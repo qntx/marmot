@@ -6,7 +6,7 @@
 use std::collections::BTreeSet;
 
 use cgka_traits::app_event::MarmotAppEvent;
-use cgka_traits::engine::{CgkaEngine, SendIntent};
+use cgka_traits::engine::{CgkaEngine, SendIntent, SendResult};
 use cgka_traits::ingest::{IngestOutcome, InputRejectionCategory};
 use cgka_traits::types::GroupId;
 use marmot_spike::harness::*;
@@ -93,7 +93,16 @@ fn decode_chat(payload: &[u8]) -> String {
         .unwrap_or_else(|_| format!("<raw:{}>", payload.len()))
 }
 
-async fn send_chat(member: &mut Member, relay: &FakeRelay, gid: &GroupId, tag: &str, seq: u64) {
+/// Sends one chat message; returns the published event's id (kind-445
+/// events are signed by per-message sender keys, not the account key, so
+/// the sender is identified by the id captured at send time).
+async fn send_chat(
+    member: &mut Member,
+    relay: &FakeRelay,
+    gid: &GroupId,
+    tag: &str,
+    seq: u64,
+) -> Option<String> {
     let payload = chat_payload(member, seq, &format!("{tag}-{seq:04}"));
     let result = member
         .engine
@@ -104,7 +113,14 @@ async fn send_chat(member: &mut Member, relay: &FakeRelay, gid: &GroupId, tag: &
         })
         .await
         .expect("send");
+    let id = match &result {
+        SendResult::ApplicationMessage { msg, .. } => Some(hex::encode(msg.id.as_slice())),
+        // Under quiescence a send can come back Queued; the convergence
+        // drain regenerates and publishes it. Its id is not needed here.
+        _ => None,
+    };
     publish_send_result(member, result, relay).await;
+    id
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -175,8 +191,12 @@ async fn m0_native_flow() {
 
     // ── Step 3: 500 application messages, publish first, read backlog ───
     let base = 1_700_000_000u64;
+    let mut a_ids = Vec::with_capacity(MSG_PER_SENDER);
     for i in 0..MSG_PER_SENDER {
-        send_chat(&mut a, &relay, &gid, "a", base + i as u64).await;
+        let id = send_chat(&mut a, &relay, &gid, "a", base + i as u64)
+            .await
+            .expect("app sends are not queued at epoch 1");
+        a_ids.push(id);
     }
     for i in 0..MSG_PER_SENDER {
         send_chat(&mut b, &relay, &gid, "b", base + i as u64).await;
@@ -189,15 +209,13 @@ async fn m0_native_flow() {
     );
     table.push(row("3. published 500 kind-445 messages", "500".into()));
 
-    // B's restart dump BEFORE reading the backlog: this is also step 4's
-    // persisted-state rebuild.
-    let b_dump = b.host.dump();
+    // B's pre-ingest dump: the newest-first reader below restarts from it.
+    let b_pre_dump = b.host.dump();
     let b_signer = b.signer.clone();
-    drop(b);
 
     // Reader 1: restarted B ingests newest-first (what a naive REQ would
     // feed the engine).
-    let mut b_newest = Member::restart(&b_dump, "B", b_signer.clone());
+    let mut b_newest = Member::restart(&b_pre_dump, "B", b_signer.clone());
     let newest_events = relay.fetch_newest_first(KIND_MARMOT_GROUP_MESSAGE, None, None);
     let (newest_counts, newest_delivered, newest_dups) =
         read_backlog(&mut b_newest, newest_events, &relay, &gid).await;
@@ -211,45 +229,70 @@ async fn m0_native_flow() {
         ),
     ));
 
-    // Reader 2: same restart dump, ascending (created_at, id) — the SDK path.
-    let mut b_ascending = Member::restart(&b_dump, "B", b_signer.clone());
-    let (asc_counts, asc_delivered, asc_dups) =
-        read_backlog(&mut b_ascending, group_events.clone(), &relay, &gid).await;
-    table.push(row(
-        "3b. B-after-restart reads backlog ASCENDING",
-        format!(
-            "{} delivered={} dups={}",
-            asc_counts.line(),
-            asc_delivered.len(),
-            asc_dups
-        ),
-    ));
-
-    // B must receive all 250 of A's messages; B's own 250 are own-echoes.
+    // ── Step 4: true mid-ingest restart on the live B ──────────────────
+    // B ingests the FIRST HALF of A's ascending messages, dumps, drops,
+    // rebuilds from the persisted KV, then ingests the rest. Every A
+    // message must be delivered exactly once overall — none re-delivered.
+    let a_id_set: BTreeSet<&str> = a_ids.iter().map(String::as_str).collect();
+    let a_events: Vec<NostrTransportEvent> = group_events
+        .iter()
+        .filter(|e| a_id_set.contains(e.id.as_str()))
+        .cloned()
+        .collect();
+    assert_eq!(a_events.len(), MSG_PER_SENDER, "250 of A's events");
     let expected_a: BTreeSet<String> = (0..MSG_PER_SENDER)
         .map(|i| format!("a-{:04}", base + i as u64))
         .collect();
+
+    let mut b_counts = IngestCounts::default();
+    let mut b_seen = BTreeSet::new();
+    let mut b_dups = 0usize;
+    for event in &a_events[..MSG_PER_SENDER / 2] {
+        b_counts.add(&ingest_event(&mut b, event).await);
+    }
+    flush_outbound(&mut b, &gid, &relay).await;
+    for (_, _, payload) in b.drain_received() {
+        if !b_seen.insert(decode_chat(&payload)) {
+            b_dups += 1;
+        }
+    }
+
+    let b_mid_dump = b.host.dump();
+    let mid_batches = b.host.batch_count();
+    drop(b);
+    let mut b = Member::restart(&b_mid_dump, "B", b_signer.clone());
+
+    for event in &a_events[MSG_PER_SENDER / 2..] {
+        b_counts.add(&ingest_event(&mut b, event).await);
+    }
+    flush_outbound(&mut b, &gid, &relay).await;
+    for (_, _, payload) in b.drain_received() {
+        if !b_seen.insert(decode_chat(&payload)) {
+            b_dups += 1;
+        }
+    }
     assert_eq!(
-        asc_delivered, expected_a,
-        "ascending read delivers every A message exactly once"
+        b_seen, expected_a,
+        "every A message delivered exactly once across the restart"
     );
-    assert_eq!(asc_dups, 0, "no re-delivery on ascending path");
+    assert_eq!(b_dups, 0, "no re-delivery across the mid-ingest restart");
+    table.push(row(
+        "4. mid-ingest restart of B (125 + 125 ascending)",
+        format!(
+            "{} delivered={} dups={} batches@dump={}",
+            b_counts.line(),
+            b_seen.len(),
+            b_dups,
+            mid_batches
+        ),
+    ));
+
     if newest_delivered != expected_a {
         println!(
             "!! FINDING: newest-first backlog lost {} of A's messages",
             expected_a.len() - newest_delivered.len()
         );
     }
-
-    // The ascending-path reader becomes B for the rest of the scenario.
-    let mut b = b_ascending;
-    table.push(row(
-        "4. restart from persisted KV mid-way",
-        format!(
-            "batches={} post-restart msgs readable",
-            b.host.batch_count()
-        ),
-    ));
 
     // A reads B's 250 too (its own 250 are echoes).
     let mut a_counts = IngestCounts::default();

@@ -39,6 +39,7 @@ use cgka_traits::engine::{
 use cgka_traits::engine_state::PendingStateRef;
 use cgka_traits::group::ProtocolProfile;
 use cgka_traits::ingest::IngestOutcome;
+use cgka_traits::storage::MessageStorage;
 use cgka_traits::transport::TransportMessage;
 use cgka_traits::types::{GroupId, MemberId, MessageId};
 use nostr::prelude::*;
@@ -161,6 +162,7 @@ pub struct Member {
     pub name: String,
     pub signer: Arc<HostAccountSigner>,
     pub host: Arc<InMemoryHost>,
+    pub provider: KvStorageProvider,
     pub clock: Arc<ManualConvergenceClock>,
     pub engine: Engine<KvStorageProvider>,
 }
@@ -180,7 +182,7 @@ impl Member {
         let provider = KvStorageProvider::open(host.clone());
         let peeler = NostrMlsPeeler::new().with_welcome_signer_arc(signer.clone());
         let clock = Arc::new(ManualConvergenceClock::new(0, 0));
-        let mut engine = EngineBuilder::new(provider)
+        let mut engine = EngineBuilder::new(provider.clone())
             .identity(signer.public_key_bytes().to_vec())
             .account_identity_proof_signer(signer.clone())
             .protocol_profile(ProtocolProfile::Current)
@@ -196,6 +198,7 @@ impl Member {
             name: name.to_string(),
             signer,
             host,
+            provider,
             clock,
             engine,
         }
@@ -211,9 +214,17 @@ impl Member {
     }
 
     /// Collect drained `MessageReceived` payloads since the last drain.
+    ///
+    /// Drained app events are AT-LEAST-ONCE: they stay in durable
+    /// `pending_application_events` until the app acknowledges them, and
+    /// an engine rebuilt from the same store re-presents unacked events
+    /// (Engine::build seeds `events_buf` from
+    /// `list_pending_application_events`). The harness acknowledges after
+    /// the test's "app store" (the `seen` set) has accepted each event —
+    /// `delete_pending_application_events` is that ack.
     pub fn drain_received(&mut self) -> Vec<(GroupId, MemberId, Vec<u8>)> {
         let mut out = Vec::new();
-        for event in self.engine.drain_events() {
+        for event in self.drain_events() {
             if let GroupEvent::MessageReceived {
                 group_id,
                 sender,
@@ -228,8 +239,22 @@ impl Member {
     }
 
     /// All drained events, for steps that assert on non-message events.
+    /// Acknowledges any `MessageReceived` payloads (see `drain_received`).
     pub fn drain_events(&mut self) -> Vec<GroupEvent> {
-        self.engine.drain_events()
+        let events = self.engine.drain_events();
+        let ack: Vec<MessageId> = events
+            .iter()
+            .filter_map(|event| match event {
+                GroupEvent::MessageReceived { message_id, .. } => Some(message_id.clone()),
+                _ => None,
+            })
+            .collect();
+        if !ack.is_empty() {
+            self.provider
+                .delete_pending_application_events(&ack)
+                .expect("ack pending application events");
+        }
+        events
     }
 }
 

@@ -4,6 +4,13 @@ Phase-A deliverable: a non-SQLite `cgka_traits::storage::StorageProvider`
 over a synchronous host key/value boundary, mirroring `storage-sqlite`
 semantics (MDK `v0.16.0`, rev `a2e0558a`).
 
+Dependency note: MDK's `nostr` is not the crates.io crate — it is the
+`erskingardner/rust-nostr` fork pinned at rev
+`e93cc06b5624f06c21ecd8111a124176eb0c7589` (same for `nostr-sdk` and
+`nostr-gossip`). Any consumer must unify on exactly that source or
+`nostr::Event`/`Keys` types will not unify across the engine/peeler
+boundary (see `spike/engine/Cargo.toml`).
+
 ## Host boundary
 
 ```rust
@@ -36,7 +43,7 @@ cover the rest and need no override):
 | Trait | impl / declared |
 | --- | --- |
 | GroupStorage | 16 / 16 |
-| MessageStorage | 23 / 30 (7 use trait defaults: `has_messages_in_states`, `list_messages_in_states`, `list_openmls_messages_in_states`, `visit_messages_in_states`, `list_deferred_message_metadata`, `release_message_for_replay`, one more default) |
+| MessageStorage | 23 / 30 (7 use trait defaults: `has_messages_in_states`, `list_messages_in_states`, `list_openmls_messages_in_states`, `visit_messages_in_states`, `list_deferred_message_metadata`, `release_message_for_replay`, `group_snapshot_fingerprint`) |
 | OutboundIntentStorage | 7 / 7 |
 | OutboundFanoutStorage | 5 / 5 |
 | LeaveRequestStorage | 3 / 3 |
@@ -179,5 +186,14 @@ hook wait for its ack.
 
 **Restart.** `InMemoryHost::dump()` serializes the committed map (the
 host's authoritative state); `load()` rebuilds a member at a snapshot.
-Step 4 proves mid-group restart recovery: 252 batches at dump time, all
-later messages readable, no earlier message redelivered.
+Step 4 proves true mid-ingest restart recovery: B consumes the first 125
+of A's ascending messages, dumps (757 committed batches), rebuilds, and
+ingests the rest — all 250 delivered exactly once.
+
+**Delivery is at-least-once.** Drained `MessageReceived` events stay in
+durable `pending_application_events` until the app acknowledges them;
+`Engine::build` seeds `events_buf` from
+`list_pending_application_events`, so an unacked drain re-presents on
+restart. The host ack is `delete_pending_application_events(&ids)` —
+the engine never deletes these rows itself. The mid-ingest restart
+surfaced this: without the ack, the first 125 came back a second time.
