@@ -288,18 +288,43 @@ fn restore_messages(
     group_id: &GroupId,
     messages: &[(u64, Vec<u8>)],
 ) -> StorageResult<()> {
+    // `cgka_messages` carries `insert_order INTEGER PRIMARY KEY` and
+    // `id UNIQUE`; the restore's explicit-order INSERT
+    // (`restore.rs:messages` → `put_message_on_connection(Some(..))`) fails
+    // when a surviving row of another group holds either, so the same
+    // conflict must fail here.
+    let mut survivor_orders = std::collections::BTreeSet::new();
+    for (row_key, _) in provider.scan_rows(Table::Message, &[])? {
+        let segments = keys::segments(&row_key)
+            .ok_or_else(|| StorageError::Backend("kv row key malformed".into()))?;
+        if segments.first().copied() == Some(gid_seg(group_id)) {
+            continue;
+        }
+        let seq = u64::from_be_bytes(
+            segments
+                .get(1)
+                .copied()
+                .ok_or_else(|| StorageError::Backend("kv row key malformed".into()))?
+                .try_into()
+                .map_err(|_| StorageError::Backend("kv row key malformed".into()))?,
+        );
+        survivor_orders.insert(seq);
+    }
     for (_, record) in provider.ordered_messages(group_id)? {
         provider.delete_message_row(&record)?;
     }
     for (seq, bytes) in messages {
         let record: cgka_traits::message::MessageRecord = ser::de(bytes)?;
-        if provider.message_row_key(&record.id)?.is_some() {
+        if provider.message_row_key(&record.id)?.is_some() || survivor_orders.contains(seq) {
             return Err(StorageError::Backend(
-                "kv snapshot restore message id conflict".into(),
+                "kv snapshot restore message conflict".into(),
             ));
         }
         provider.put_message_at(*seq, &record)?;
     }
+    // Mirror `restore.rs:messages`' prune: pending deliveries of this
+    // group survive only while their source message stands in the same
+    // group (`NOT EXISTS` pairs id AND group_id).
     for (row_key, value) in provider.scan_rows(Table::PendingAppEvent, &[])? {
         let mut tuple = ser::Tuple::new(&value);
         let group = tuple.field()?;
@@ -310,10 +335,10 @@ fn restore_messages(
             .and_then(|segments| segments.last().copied())
             .ok_or_else(|| StorageError::Backend("kv row key malformed".into()))?
             .to_vec();
-        if provider
-            .message_row_key(&cgka_traits::types::MessageId::new(mid))?
-            .is_none()
-        {
+        let survives = provider
+            .message_record(&cgka_traits::types::MessageId::new(mid))?
+            .is_some_and(|record| record.group_id.as_slice() == group);
+        if !survives {
             provider.store().delete(&row_key)?;
         }
     }
@@ -321,20 +346,34 @@ fn restore_messages(
 }
 
 /// `restore.rs:queued_outbound` — replace the group's queued intents at
-/// their captured positions.
+/// their captured positions. `cgka_queued_outbound` carries
+/// `insert_order INTEGER PRIMARY KEY` and `id UNIQUE`, and the restore's
+/// plain `INSERT` fails when a surviving row of another group holds either
+/// (e.g. an intent re-queued under a different group after the capture) —
+/// mirror that conflict instead of overwriting the survivor.
 fn restore_queued(
     provider: &KvStorageProvider,
     group_id: &GroupId,
     queued: &[(u64, Vec<u8>)],
 ) -> StorageResult<()> {
+    let mut survivors: Vec<(u64, Vec<u8>)> = Vec::new();
     for (row_key, value) in provider.scan_rows(Table::QueuedIntent, &[])? {
-        let (_, record) = KvStorageProvider::read_ordered::<QueuedOutboundIntent>(&value)?;
+        let (order, record) = KvStorageProvider::read_ordered::<QueuedOutboundIntent>(&value)?;
         if &record.group_id == group_id {
             provider.store().delete(&row_key)?;
+        } else {
+            survivors.push((order, record.id.as_slice().to_vec()));
         }
     }
     for (order, bytes) in queued {
         let record: QueuedOutboundIntent = ser::de(bytes)?;
+        if survivors.iter().any(|(surviving_order, id)| {
+            surviving_order == order || id.as_slice() == record.id.as_slice()
+        }) {
+            return Err(StorageError::Backend(
+                "kv snapshot restore queued intent conflict".into(),
+            ));
+        }
         let mid = record.id.as_slice().to_vec();
         let mut out = Vec::new();
         ser::put_u64_field(&mut out, *order);

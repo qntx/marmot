@@ -20,31 +20,34 @@ default = []
 testing = []
 
 [dependencies]
-cgka-traits    = { workspace = true }
-openmls        = { workspace = true }
-openmls_traits = { workspace = true }
-serde          = { workspace = true }
-serde_json     = { workspace = true }
-sha2           = { workspace = true }
-thiserror      = { workspace = true }
-zeroize        = { workspace = true }
-
-[dev-dependencies]
 base64                 = { workspace = true }
 cgka-engine            = { workspace = true }
+cgka-traits            = { workspace = true }
 getrandom              = { workspace = true }
 hex                    = { workspace = true }
 nostr                  = { workspace = true }
-openmls_rust_crypto    = { workspace = true }
-proptest               = { workspace = true }
-storage-sqlite         = { workspace = true }
-tokio                  = { workspace = true }
+openmls                = { workspace = true }
+openmls_traits         = { workspace = true }
+serde                  = { workspace = true }
+serde_json             = { workspace = true }
+sha2                   = { workspace = true }
+thiserror              = { workspace = true }
 transport-nostr-peeler = { workspace = true }
+url                    = { workspace = true }
+zeroize                = { workspace = true }
+
+
+[dev-dependencies]
+openmls_rust_crypto = { workspace = true }
+proptest            = { workspace = true }
+storage-sqlite      = { workspace = true }
+tokio               = { workspace = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 # `openmls` unconditionally uses `web_time` on wasm32; its `js` feature
 # supplies that dep plus the `getrandom` wasm source.
-openmls = { workspace = true, features = ["js"] }
+openmls   = { workspace = true, features = ["js"] }
+getrandom = { workspace = true, features = ["wasm_js"] }
 
 [lints]
 workspace = true

@@ -1,6 +1,7 @@
 //! Typed open-time errors for the KV store.
 
 use cgka_traits::storage::StorageError;
+
 use thiserror::Error;
 
 /// Failure to open a [`crate::KvStorageProvider`] over a set of host rows.
@@ -37,7 +38,7 @@ pub enum OpenError {
     LockPoisoned,
 }
 
-/// Which [`crate::keys::Table::Meta`] row a [`OpenError::MalformedMeta`]
+/// Which `Table::Meta` row a [`OpenError::MalformedMeta`]
 /// names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]

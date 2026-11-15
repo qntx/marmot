@@ -88,6 +88,11 @@ pub(crate) enum Table {
     /// Reserved for the session layer's inbound record table (H2).
     #[allow(dead_code, reason = "reserved for the session inbox table (H2)")]
     SessionInbox = 34,
+    /// Session-layer link from a regenerated outbound artifact's message id
+    /// to the durable queued intent it carries — the restart-safe
+    /// replacement for the engine's in-memory `queued_intent_by_message`
+    /// (cgka-engine `message_processor/mod.rs:1773`).
+    QueuedIntentLink = 35,
 }
 
 /// Meta row keys inside [`Table::Meta`].

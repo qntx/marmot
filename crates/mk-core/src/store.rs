@@ -384,7 +384,6 @@ impl KvStore {
     }
 
     /// The last emitted batch sequence, for the session durability gate.
-    #[expect(dead_code, reason = "read by the session durability gate added in H2")]
     pub(crate) fn last_seq(&self) -> Option<CommitSeq> {
         let batches = self.inner.lock().ok()?.batches;
         (batches > 0).then(|| CommitSeq::from_raw(batches))

@@ -105,7 +105,6 @@ impl KvStorageProvider {
 
     /// The last committed batch sequence, for the session durability gate a
     /// later milestone adds.
-    #[expect(dead_code, reason = "read by the session durability gate added in H2")]
     pub(crate) fn last_seq(&self) -> Option<crate::kv::CommitSeq> {
         self.store.last_seq()
     }
@@ -404,8 +403,13 @@ impl KvStorageProvider {
         )
     }
 
-    /// `delete_message_on_connection`: the row, both indexes, and the pending
-    /// application rows whose source message this was.
+    /// `delete_message_on_connection` minus its pending-application
+    /// deletes: sqlite's group-delete removes those `WHERE group_id = ?`
+    /// only (groups.rs:217-222), while `delete_message` removes them by
+    /// `message_id` (messages.rs:1325-1336) — the `delete_message` caller
+    /// runs those deletes itself before calling this. A pending event
+    /// whose source message leaves its group outlives the message, as
+    /// sqlite's group-scoped rows do.
     pub(crate) fn delete_message_row(&self, record: &MessageRecord) -> StorageResult<()> {
         let mid = mid_seg(&record.id);
         if let Some(row_key) = self.message_row_key(&record.id)? {
@@ -416,9 +420,7 @@ impl KvStorageProvider {
         self.del_row(
             Table::MessageState,
             &[gid_seg(&record.group_id), &state, mid],
-        )?;
-        self.del_row(Table::PendingAppEvent, &[mid])?;
-        self.del_row(Table::PendingAppAuthority, &[mid])
+        )
     }
 
     pub(crate) fn ordered_messages(
