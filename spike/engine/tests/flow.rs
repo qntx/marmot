@@ -103,7 +103,11 @@ async fn send_chat(
     tag: &str,
     seq: u64,
 ) -> Option<String> {
-    let payload = chat_payload(member, seq, &format!("{tag}-{seq:04}"));
+    let payload = chat_payload(
+        &member.signer.keys().public_key().to_hex(),
+        seq,
+        &format!("{tag}-{seq:04}"),
+    );
     let result = member
         .engine
         .send(SendIntent::AppMessage {

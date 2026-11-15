@@ -258,7 +258,7 @@ impl Member {
     }
 }
 
-fn supported_components() -> Vec<u16> {
+pub fn supported_components() -> Vec<u16> {
     let mut components = default_group_components();
     components.insert(NOSTR_ROUTING_COMPONENT_ID);
     components.into_iter().collect()
@@ -266,12 +266,12 @@ fn supported_components() -> Vec<u16> {
 
 /// App-component state for `create_group`: the group needs Nostr routing so
 /// the engine can fill `WelcomeMetadata.relays` for the kind-444 rumor.
-pub fn routing_component(creator: &Member, relays: &[String]) -> AppComponentData {
+pub fn routing_component(creator: &MemberId, relays: &[String]) -> AppComponentData {
     use sha2::{Digest, Sha256};
     let nostr_group_id: [u8; 32] = Sha256::digest(
         [
             b"marmot-spike-nostr-group-id".as_slice(),
-            creator.member_id().as_slice(),
+            creator.as_slice(),
         ]
         .concat(),
     )
@@ -597,7 +597,10 @@ pub async fn create_group(
         description: String::new(),
         members: invitee_kps,
         required_features: Vec::new(),
-        app_components: vec![routing_component(member, &[RELAY_URL.to_string()])],
+        app_components: vec![routing_component(
+            &member.member_id(),
+            &[RELAY_URL.to_string()],
+        )],
         initial_admins: Vec::new(),
     };
     let (group_id, result) = member.engine.create_group(req).await.expect("create_group");
@@ -606,9 +609,9 @@ pub async fn create_group(
 }
 
 /// A Marmot kind-9 chat payload: the inner app event encoded for the engine.
-pub fn chat_payload(member: &Member, created_at: u64, content: &str) -> Vec<u8> {
+pub fn chat_payload(sender_account_hex: &str, created_at: u64, content: &str) -> Vec<u8> {
     MarmotAppEvent::new(
-        member.signer.keys().public_key().to_hex(),
+        sender_account_hex,
         created_at,
         MARMOT_APP_EVENT_KIND_CHAT,
         Vec::new(),
