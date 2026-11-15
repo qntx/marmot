@@ -1,7 +1,10 @@
 # Adopted releases must be at least 7 days old (cooldown). Minor and patch
 # updates are grouped per ecosystem so the open-PR limit never fills up;
-# majors stay individual PRs and are merged by hand. Cargo joins when the
-# first crate lands.
+# majors stay individual PRs and are merged by hand. Cargo ecosystems below
+# cover the root workspace and each standalone project; git-sourced
+# dependencies (MDK, OpenMLS, the rust-nostr fork) are pinned deliberately in
+# upstream.json and the manifests — pin bumps are a manual operation, so the
+# ignore lists keep dependabot from ever proposing them.
 version: 2
 updates:
   - package-ecosystem: "bun"
@@ -22,5 +25,85 @@ updates:
       default-days: 7
     groups:
       actions-minor-patch:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 7
+    ignore:
+      # Pinned git deps: bump only through upstream.json / manual review.
+      - dependency-name: "cgka-*"
+      - dependency-name: "transport-nostr-peeler"
+      - dependency-name: "storage-sqlite"
+      - dependency-name: "cgka-conformance-simulator"
+      - dependency-name: "marmot-*"
+      - dependency-name: "fs-private"
+      - dependency-name: "openmls*"
+      - dependency-name: "nostr*"
+    groups:
+      cargo-minor-patch:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+  - package-ecosystem: "cargo"
+    directory: "/crates/interop"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 7
+    ignore:
+      # Pinned git deps: bump only through upstream.json / manual review.
+      - dependency-name: "cgka-*"
+      - dependency-name: "transport-nostr-peeler"
+      - dependency-name: "storage-sqlite"
+      - dependency-name: "cgka-conformance-simulator"
+      - dependency-name: "marmot-*"
+      - dependency-name: "fs-private"
+      - dependency-name: "openmls*"
+      - dependency-name: "nostr*"
+    groups:
+      cargo-minor-patch:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+  - package-ecosystem: "cargo"
+    directory: "/crates/conformance"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 7
+    ignore:
+      # Pinned git deps: bump only through upstream.json / manual review.
+      - dependency-name: "cgka-*"
+      - dependency-name: "transport-nostr-peeler"
+      - dependency-name: "storage-sqlite"
+      - dependency-name: "cgka-conformance-simulator"
+      - dependency-name: "marmot-*"
+      - dependency-name: "fs-private"
+      - dependency-name: "openmls*"
+      - dependency-name: "nostr*"
+    groups:
+      cargo-minor-patch:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+  - package-ecosystem: "cargo"
+    directory: "/fuzz"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 7
+    ignore:
+      # Pinned git deps: bump only through upstream.json / manual review.
+      - dependency-name: "cgka-*"
+      - dependency-name: "transport-nostr-peeler"
+      - dependency-name: "storage-sqlite"
+      - dependency-name: "cgka-conformance-simulator"
+      - dependency-name: "marmot-*"
+      - dependency-name: "fs-private"
+      - dependency-name: "openmls*"
+      - dependency-name: "nostr*"
+    groups:
+      cargo-minor-patch:
         patterns: ["*"]
         update-types: ["minor", "patch"]
