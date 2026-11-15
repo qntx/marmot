@@ -1,0 +1,72 @@
+# cargo-deny configuration for the standalone conformance project.
+#
+# Run with `cargo deny check` to enforce supply-chain hygiene:
+# - advisories: every transitive dependency must be free of known CVEs
+# - bans:       the workspace ships exactly one version of every crate
+# - licenses:   only permissive licenses are allowed
+# - sources:    only crates.io is trusted
+
+[graph]
+all-features        = true
+no-default-features = false
+
+[output]
+feature-depth = 1
+
+[advisories]
+db-path = "~/.cargo/advisory-db"
+db-urls = ["https://github.com/rustsec/advisory-db"]
+ignore = [
+  # libsqlite3-sys 0.38.2 (rusqlite 0.40, storage-sqlite dev-dep only, pinned
+  # MDK rev): fix needs rusqlite 0.41 which the pinned MDK does not accept.
+  { id = "RUSTSEC-2026-0459", reason = "dev-dependency of pinned MDK storage-sqlite; upgrade blocked on upstream rusqlite bump" },
+  # proc-macro-error2 via openmls_rust_crypto -> libcrux (pinned git dep).
+  # Unmaintained only; no safe upgrade path at the pinned revs.
+  { id = "RUSTSEC-2026-0173", reason = "transitive dep of pinned OpenMLS git rev; unmaintained advisory, no upgrade available" },
+  # Everything below is pulled transitively by the pinned
+  # cgka-conformance-simulator (marmot-app stack): test tooling only, no
+  # safe upgrade is published at the pinned MDK rev.
+  { id = "RUSTSEC-2024-0384", reason = "`instant` via pinned cgka-conformance-simulator transitive deps; unmaintained, no upgrade" },
+  { id = "RUSTSEC-2024-0449", reason = "`unsafe-libyaml` via pinned cgka-conformance-simulator transitive deps; unmaintained, no upgrade" },
+  { id = "RUSTSEC-2026-0237", reason = "`nostr-relay-builder` via pinned MDK test tooling; unmaintained, no upgrade" },
+  { id = "RUSTSEC-2026-0370", reason = "`zbus_names` via marmot-account keyring deps; unmaintained, no upgrade" },
+  { id = "RUSTSEC-2026-0371", reason = "`zvariant` via marmot-account keyring deps; unmaintained, no upgrade" },
+  { id = "RUSTSEC-2026-0372", reason = "`zvariant_derive` via marmot-account keyring deps; unmaintained, no upgrade" },
+]
+yanked = "deny"
+
+[licenses]
+allow                = ["MIT", "Apache-2.0", "BSD-3-Clause", "CDLA-Permissive-2.0", "ISC", "MPL-2.0", "Unicode-3.0", "CC0-1.0", "Zlib", "MIT-0", "Unlicense"]
+confidence-threshold = 0.93
+exceptions           = []
+
+# The two crates ship no license metadata; the MDK workspace root declares
+# MIT (LICENSE file at the pinned rev).
+[[licenses.clarify]]
+name          = "marmot-markdown"
+version       = "*"
+expression    = "MIT"
+license-files = []
+
+[[licenses.clarify]]
+name          = "marmot-markdown-ast"
+version       = "*"
+expression    = "MIT"
+license-files = []
+
+[bans]
+multiple-versions = "warn"
+wildcards         = "deny"
+highlight         = "all"
+allow             = []
+deny              = []
+skip              = []
+skip-tree         = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git      = "deny"
+allow-registry   = ["https://github.com/rust-lang/crates.io-index"]
+# MDK is a git dependency by design (upstream.json pins the tag/rev), and it
+# pulls OpenMLS and its rust-nostr fork from git so the types unify.
+allow-git = ["https://github.com/marmot-protocol/mdk", "https://github.com/openmls/openmls", "https://github.com/erskingardner/rust-nostr"]

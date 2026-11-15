@@ -125,4 +125,74 @@ describe("checkPins", () => {
     );
     expect(errors).toStrictEqual([`spec: 3rdparty/marmot is at ${REV_B}, pinned rev is ${REV_A}`]);
   });
+
+  const MDK_FILES: Record<string, Uint8Array> = {
+    "3rdparty/mdk/crates/cgka-conformance-simulator/vectors/a.v1.json": new TextEncoder().encode(
+      "vector a",
+    ),
+    "3rdparty/mdk/crates/cgka-conformance-simulator/vectors/unrecorded.v1.json":
+      new TextEncoder().encode("not recorded"),
+    "3rdparty/mdk/crates/cgka-conformance-simulator/vectors/incidents/i.v1.json":
+      new TextEncoder().encode("incident i"),
+    "vectors/mdk/a.v1.json": new TextEncoder().encode("vector a"),
+    "vectors/mdk/PROVENANCE.md": new TextEncoder().encode("provenance"),
+    "vectors/mdk/incidents/i.v1.json": new TextEncoder().encode("incident i"),
+  };
+
+  test("compares recorded mdk vectors when the mdk checkout is at the pin", () => {
+    const files = { ...SPEC_FILES, ...MDK_FILES };
+    expect(
+      checkPins(PINS, probe({ "3rdparty/marmot": REV_A, "3rdparty/mdk": REV_B }, files)),
+    ).toStrictEqual({ errors: [], notes: [] });
+  });
+
+  test("rejects a stale recorded mdk vector, including under incidents/", () => {
+    const files = {
+      ...SPEC_FILES,
+      ...MDK_FILES,
+      "vectors/mdk/a.v1.json": new TextEncoder().encode("stale vector"),
+      "vectors/mdk/incidents/i.v1.json": new TextEncoder().encode("stale incident"),
+    };
+    const { errors } = checkPins(
+      PINS,
+      probe({ "3rdparty/marmot": REV_A, "3rdparty/mdk": REV_B }, files),
+    );
+    expect(errors).toStrictEqual([
+      "mdk: vectors/mdk/a.v1.json differs from 3rdparty/mdk/crates/cgka-conformance-simulator/vectors/a.v1.json",
+      "mdk: vectors/mdk/incidents/i.v1.json differs from 3rdparty/mdk/crates/cgka-conformance-simulator/vectors/incidents/i.v1.json",
+    ]);
+  });
+
+  test("does not compare recorded mdk vectors when the mdk checkout is off the pin", () => {
+    const files = {
+      ...SPEC_FILES,
+      ...MDK_FILES,
+      "vectors/mdk/a.v1.json": new TextEncoder().encode("stale vector"),
+    };
+    const { errors } = checkPins(
+      PINS,
+      probe(
+        { "3rdparty/marmot": REV_A, "3rdparty/mdk": "9cf81ea674a8e6e63f9f899261ee7fe58b529681" },
+        files,
+      ),
+    );
+    expect(errors).toStrictEqual([
+      `mdk: 3rdparty/mdk is at 9cf81ea674a8e6e63f9f899261ee7fe58b529681, pinned rev is ${REV_B} (v0.16.0)`,
+    ]);
+  });
+
+  test("rejects a recorded mdk vector with no source, ignores unrecorded source files", () => {
+    const files = {
+      ...SPEC_FILES,
+      ...MDK_FILES,
+      "vectors/mdk/missing.v1.json": new TextEncoder().encode("no source"),
+    };
+    const { errors } = checkPins(
+      PINS,
+      probe({ "3rdparty/marmot": REV_A, "3rdparty/mdk": REV_B }, files),
+    );
+    expect(errors).toStrictEqual([
+      "mdk: vectors/mdk/missing.v1.json has no source in 3rdparty/mdk/crates/cgka-conformance-simulator/vectors",
+    ]);
+  });
 });
