@@ -1,0 +1,31 @@
+[package]
+name    = "marmot-spike-wasm"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+marmot-spike           = { path = "../engine" }
+cgka-traits            = { git = "https://github.com/marmot-protocol/mdk", rev = "a2e0558a634bbd20607cdd5afb93abc6220ee58d" }
+cgka-engine            = { git = "https://github.com/marmot-protocol/mdk", rev = "a2e0558a634bbd20607cdd5afb93abc6220ee58d" }
+transport-nostr-peeler = { git = "https://github.com/marmot-protocol/mdk", rev = "a2e0558a634bbd20607cdd5afb93abc6220ee58d" }
+nostr = { git = "https://github.com/erskingardner/rust-nostr", rev = "e93cc06b5624f06c21ecd8111a124176eb0c7589", default-features = false, features = ["std", "rand", "os-rng", "nip04", "nip49", "nip59"] }
+
+wasm-bindgen         = "=0.2.122"
+wasm-bindgen-futures = "0.4"
+js-sys               = "0.3"
+serde-wasm-bindgen   = "0.6"
+send_wrapper         = { version = "0.6", features = ["futures"] }
+console_error_panic_hook = "0.1"
+
+base64     = "0.22"
+hex        = "0.4"
+serde      = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2       = "0.10"
+getrandom      = { version = "0.2", features = ["js"] }
+web-time       = "1"
+universal-time = "0.3"
