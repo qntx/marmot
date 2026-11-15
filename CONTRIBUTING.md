@@ -3,18 +3,41 @@
 ## Prerequisites
 
 - **Bun 1.4** — package scripts, tests, and tooling (`devEngines`).
-- **Rust 1.99** — via the root `rust-toolchain.toml`. Only needed once crates
-  land (M2); the toolchain file is already pinned so `cargo metadata` works.
-- `cargo-deny` for the supply-chain check, once `crates/` exists
-  (`cargo install cargo-deny`).
+- **Rust 1.99.1** — via the root `rust-toolchain.toml` (and each standalone
+  project's own copy under `crates/interop`, `crates/conformance`, `fuzz/`).
+- `cargo-deny` — supply-chain check (`cargo install cargo-deny`).
+- `cargo-hack` — per-feature check (`cargo install cargo-hack`).
+- **Android NDK** — only for the `aarch64-linux-android` check
+  (`secp256k1-sys` compiles C); point `CC_aarch64_linux_android` at the NDK
+  clang.
+- **Rust nightly + cargo-fuzz 0.13** — only for fuzzing
+  (`cargo install cargo-fuzz`).
+- **Odin `dev-2026-10`, rev `84bc3fc`** — only for `crates/conformance`
+  (its simulator dep compiles `marmot-markdown`) and for building `wn`/`wnd`
+  for interop. Install with MDK's checksum-pinned installer:
+
+  ```sh
+  # inside a checkout of marmot-protocol/mdk at the pinned rev
+  bash scripts/install-odin.sh "$PWD/target/odin-bin"
+  export ODIN="$PWD/target/odin-bin/odin"
+  odin version   # dev-2026-10-nightly:84bc3fc
+  ```
 
 ## Repository layout
 
 ```text
 packages/marmot/      @qntx/marmot — platform-neutral TypeScript SDK
                       (today: src/core registries + result vocabulary)
-vectors/              recorded spec copies frozen at the pinned rev (see
-                      vectors/README.md); shared cross-language vectors later
+crates/mk-core/       pure-Rust core: KV storage provider + Session API
+                      (publish = false, no bindings yet)
+crates/interop/       standalone project — wn/wnd scenario tests against
+                      the public Session API (excluded from the workspace)
+crates/conformance/   standalone project — recorded MDK vectors replayed
+                      through Session (excluded; needs Odin)
+fuzz/                 standalone cargo-fuzz project (excluded); corpus/ is
+                      gitignored — seeds are generated (see Fuzzing below)
+vectors/              recorded copies frozen at the pinned revs (see
+                      vectors/README.md): spec/ spec text, mdk/ MDK vectors
 upstream.json         the one pins file: spec rev + MDK tag/rev and their
                       3rdparty/ checkout paths
 3rdparty/             local upstream checkouts — gitignored, never committed
@@ -31,13 +54,86 @@ Run before opening a pull request:
 bun install && bun run lint && bun run typecheck && bun run test && bun run build
 bun run check:pins
 cargo metadata --no-deps --format-version 1 >/dev/null
+cargo fmt --all --check
+cargo clippy -p mk-core --all-targets --all-features -- -D warnings
+cargo clippy -p mk-core --all-targets --no-default-features -- -D warnings
+cargo test -p mk-core --all-features --release
+cargo hack check -p mk-core --each-feature --no-dev-deps
+RUSTDOCFLAGS="-D warnings" cargo doc -p mk-core --no-deps --all-features
+cargo deny check
+cargo check -p mk-core --target wasm32-unknown-unknown
+cargo check -p mk-core --target aarch64-apple-ios
+CC_aarch64_linux_android=<ndk-clang> cargo check -p mk-core --target aarch64-linux-android
 ```
 
 `lint` = `vp check` (oxlint + oxfmt) + `taplo fmt --check` +
 `scripts/check-version.ts`. `check:pins` verifies that local `3rdparty/`
 checkouts sit at the revs recorded in `upstream.json` and that the recorded
-spec copies under `vectors/spec/` are byte-identical to the pinned spec
-checkout; absent checkouts are skipped (CI has no 3rdparty).
+copies under `vectors/` are byte-identical to the pinned sources; absent
+checkouts are skipped (CI has no 3rdparty).
+
+## Conformance vectors (`crates/conformance`)
+
+Replays the recorded MDK scenario vectors under `vectors/mdk/` through the
+public `mk_core::Session` API; each vector is classified `PASS`, `REFUSED`
+(with a reasoned capability it cannot exercise), or `BYTE-FIXTURE`.
+
+```sh
+cd crates/conformance
+ODIN=<path-to-odin> cargo test --release   # normal test, not ignored
+cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo deny check
+```
+
+## White Noise interop (`crates/interop`)
+
+Four scenario tests (`tests/wn.rs`) drive the public `Session` API against a
+real White Noise `wn`/`wnd` pair built from the pinned MDK rev, over a real
+in-process NIP-01 WebSocket relay (`nostr-sdk`'s `LocalRelay` from the
+`erskingardner/rust-nostr` fork MDK itself pins). `wnd` is spawned and
+reaped by the test; a missing or wrong-version binary under `--ignored` is
+a hard failure, never a silent skip.
+
+Build `wn`/`wnd` from the pinned MDK rev (`upstream.json` → `mdk.tag`/`rev`;
+`marmot-markdown` needs the pinned Odin above):
+
+```sh
+ODIN=<path-to-odin> cargo install --locked \
+  --git https://github.com/marmot-protocol/mdk \
+  --rev a2e0558a634bbd20607cdd5afb93abc6220ee58d \
+  --root spike/target/wn wn-cli
+```
+
+`cargo install` takes ~12 min cold; `wn --version` must report `wn 0.16.0`
+(the test asserts it against `upstream.json` `mdk.tag`).
+
+```sh
+cd crates/interop
+cargo test                                     # compiles/lints; scenarios ignored
+WN_BIN=$PWD/../../spike/target/wn/bin/wn \
+WND_BIN=$PWD/../../spike/target/wn/bin/wnd \
+  cargo test --release -- --ignored --test-threads=1 --nocapture
+```
+
+Each run uses a fresh temporary `WN_HOME` (`WN_SECRET_STORE=file`,
+`WN_ALLOW_LOOPBACK_RELAYS=1`), removed when the `Wnd` guard drops; `wnd`
+logs land under `crates/interop/target/wn-logs/`. Per-scenario
+`SCENARIO-N PASS|REFUSED <evidence> <seconds>` lines print to stderr.
+
+## Fuzzing (`fuzz/`)
+
+Five libFuzzer targets cover every decoder mk-core owns (kv batch, kv rows,
+event JSON, account proof, key-package event). The seed corpus is generated
+from real session artifacts and is gitignored — regenerate it when the row
+formats change:
+
+```sh
+cd fuzz
+cargo run --features corpus-gen --bin gen_corpus   # seeds corpus/<target>/
+cargo +nightly fuzz run <target> -- -max_total_time=60
+```
+
+CI (`ci-rust-fuzz`) runs every target for 60 s starting from an empty
+corpus — no seeds needed there.
 
 ## Commits
 
@@ -70,7 +166,9 @@ git tag -a vX.Y.Z <merge-sha> -m vX.Y.Z && git push origin vX.Y.Z
 `scripts/check-version.ts` fails the lint gate when the internal `@qntx/*`
 ranges, the Cargo workspace version, member `version.workspace = true`
 inheritance, internal `=<version>` pins, Cargo.lock workspace-member entries,
-or bun.lock workspace entries drift from the manifests.
+or bun.lock workspace entries drift from the manifests. The standalone
+projects (`crates/interop`, `crates/conformance`, `fuzz/`) are excluded
+from member checks — they version independently (`0.0.0`).
 
 ## License
 

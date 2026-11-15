@@ -22,5 +22,5 @@ here alongside `parity.json` in later milestones.
   frozen at the MDK pin in `upstream.json` (`mdk.rev`, tag `v0.16.0`).
   Provenance (repository, tag, rev, source path, SHA-256 per file) lives in
   `mdk/PROVENANCE.md`; `bun run check:pins` verifies the copies against a
-  local `3rdparty/mdk` checkout when present. `crates/mk-core/tests/conformance.rs`
-  replays them through the public `Session` API.
+  local `3rdparty/mdk` checkout when present. `crates/conformance` replays
+  them through the public `Session` API.

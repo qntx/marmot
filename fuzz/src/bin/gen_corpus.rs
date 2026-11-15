@@ -1,6 +1,7 @@
-//! Generate the committed seed corpus from real session artifacts.
+//! Generate the seed corpus from real session artifacts.
 //!
-//! Run once when the corpus needs refreshing:
+//! `fuzz/corpus/` is gitignored — regenerate seeds whenever the row formats
+//! change; CI fuzzes from an empty corpus. Run:
 //! `cargo run --features corpus-gen --bin gen_corpus`.
 //! The session flow mirrors `crates/mk-core/tests/support/mod.rs`:
 //! open (account-proof handshake), publish a KeyPackage, then serialize the
