@@ -101,3 +101,70 @@ would add an app-owned executor, pointer/byte ownership plumbing, and a
 promise bridge for every async engine call — pure cost, no dependency saving.
 So: wasm-bindgen + wasm-bindgen-futures, `--target web` (one artifact serving
 Bun and the browser — Bun loads the same `init({module_or_path})` entry).
+
+## C0: send/ingest/convergence breakdown (bench-breakdown.json)
+
+Focused 100-message benchmark (`js/bench-breakdown.ts`), Bun:
+
+| op | n | median ms | p95 ms | max ms |
+|---|---|---|---|---|
+| `send` (JS → kind-445 event) | 100 | 1.901 | 9.834 | 45.744 |
+| `ingest` (cold backlog) | 100 | 0.897 | 8.420 | 38.904 |
+| `advanceConvergence` pass | 2 | 1.641 | 1.641 | 1.641 |
+
+The isolated benchmark's convergence cost is ~2 ms total (2 passes) — the
+scenario's long tail is **not** the convergence driver and not the JS
+boundary. Aggregated scenario timings (results/bun.json `apiTimings`):
+`ingest` 6 299 calls ≈ 298.7 s median 47.4 ms — every step re-ingests the
+whole accumulated backlog per member, so ingest against an increasingly hot
+ledger dominates (hot-ledger median ≈ 47 ms vs cold-backlog ≈ 0.9 ms). That
+is harness amplification, not an engine property: a real SDK ingests each
+event once. `send` 508 calls ≈ 2.74 s median 5.4 ms; `advance` 40 calls
+≈ 8.4 s median 210 ms (driven per-step, includes commit fanout waits).
+
+## In-page Chromium ingest
+
+`run-chromium.ts` now measures the full 507-event ascending backlog inside a
+single `page.evaluate` (no per-event round-trip): **342.2 ms total,
+0.675 ms/event** (chromium.json `ingestMs`). Comparable to Bun's 199 ms /
+0.39 ms; both far under any 1 s threshold.
+
+## Size attribution
+
+Current artifact (profile.wasm, strip on) section profile
+(`wasm/pkg/marmot_spike_wasm_bg.wasm`, 5 662 935 B):
+
+| section | bytes | % |
+|---|---|---|
+| code (sec10) | 4 035 837 | 71.3 |
+| data (sec11) | 1 595 917 | 28.2 |
+| function `name` custom section | 498 | ≈0 |
+| producers | 60 | ≈0 |
+
+`strip` already removes function names and debug info — a prior unstripped
+twiggy run attributed ~4.15 MB to the `name` section, so `strip` is the
+single biggest cheap lever and is already in the profile. The remaining
+data section (~1.6 MB) is Rust metadata: source/panic paths, panic/assert
+strings, type and symbol paths, MLS/Marmot error strings, URL/encoding
+tables — not removable without code changes.
+
+Crate-level attribution from the earlier unstripped twiggy run (largest
+first): `cgka-engine` + `cgka-traits` + `marmot-forensics`; `serde` /
+`serde_json` / `serde-wasm-bindgen` (MDK's serialization choice — our KV
+values add little); OpenMLS + RustCrypto/HPKE stack; the spike KV provider;
+`std`; the erskingardner `nostr` fork; `wasm-bindgen` glue.
+
+## Levers measured (each number = a build actually run)
+
+| lever | raw | gzip -9 | brotli -11 | verdict |
+|---|---|---|---|---|
+| baseline bindgen (opt z) | 5 660 049 | 2 537 879 | 2 141 934 | best compressed artifact |
+| `wasm-opt -Os` (+feature flags) | 5 140 006 | 2 669 444 | 2 236 202 | raw −9 %, compressed +5 %: lose |
+| `wasm-opt -Oz` (+feature flags) | 5 079 852 | 2 671 696 | 2 241 506 | same, worse |
+| `panic = "abort"` | — | — | — | no-op: wasm32 panic is abort already; `catch_unwind` appears only in MDK tests (`candidate_replay.rs`, `rewind_restore_fault.rs`), never in production code paths |
+| strip name/producers | (in profile) | — | — | already applied; ~4 MB saved vs unstripped |
+
+**Floor:** ≈ 5.6 MB raw / 2.54 MB gzip / 2.14 MB brotli as built. A ≤ 1.5 MB
+gzip artifact is **not** reachable without patching MDK itself — the headroom
+sits in MDK's own dependency graph (forensics, serde_json paths, OpenMLS
+feature surface), which a spike cannot prune from outside.

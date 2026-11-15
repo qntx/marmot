@@ -52,7 +52,7 @@ use cgka_traits::types::{GroupId, MessageId};
 use js_sys::{Array, Function, Object, Promise, Reflect, Uint8Array};
 use marmot_spike::harness::{
     KIND_MARMOT_KEY_PACKAGE, chat_payload, key_package_from_event, routing_component,
-    supported_components,
+    supported_components, supported_features,
 };
 use marmot_spike::{KvHost, KvOp, KvStorageProvider};
 use nostr::prelude::{Event, PublicKey, Signature, UnsignedEvent};
@@ -600,6 +600,7 @@ impl Client {
             .account_identity_proof_signer(signer)
             .protocol_profile(ProtocolProfile::Current)
             .supported_app_components(supported_components())
+            .feature_registry(supported_features())
             .peeler(Box::new(peeler))
             .convergence_clock(clock.clone())
             .maintenance_sources(

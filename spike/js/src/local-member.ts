@@ -97,6 +97,18 @@ export class LocalMember implements MemberDriver {
   private pendingCommits: Promise<void> = Promise.resolve();
   private Client: any;
   private nowMs?: number;
+  readonly timings: Record<string, { n: number; ms: number }> = {};
+
+  private async timed<T>(name: string, f: () => Promise<T>): Promise<T> {
+    const t0 = performance.now();
+    try {
+      return await f();
+    } finally {
+      const t = (this.timings[name] ??= { n: 0, ms: 0 });
+      t.n++;
+      t.ms += performance.now() - t0;
+    }
+  }
 
   private constructor(opts: LocalMemberOpts) {
     this.Client = opts.Client;
@@ -160,35 +172,35 @@ export class LocalMember implements MemberDriver {
   }
 
   async send(groupId: string, intent: unknown): Promise<SendResult> {
-    const out = await this.client.send({ groupId, intent });
+    const out = await this.timed("send", () => this.client.send({ groupId, intent }));
     await this.flush();
     return out;
   }
 
   async ingest(ev: RelayEvent): Promise<IngestOutcome> {
-    const out = await this.client.ingest(ev);
+    const out = await this.timed("ingest", () => this.client.ingest(ev));
     await this.flush();
     return out;
   }
 
   async advance(groupId: string): Promise<ConvergencePass> {
-    const out = await this.client.advanceConvergence(groupId);
+    const out = await this.timed("advance", () => this.client.advanceConvergence(groupId));
     await this.flush();
     return out;
   }
 
   async confirmPublished(pending: unknown): Promise<void> {
-    await this.client.confirmPublished(pending);
+    await this.timed("confirmPublished", () => this.client.confirmPublished(pending));
     await this.flush();
   }
 
   async publishFailed(pending: unknown): Promise<void> {
-    await this.client.publishFailed(pending);
+    await this.timed("publishFailed", () => this.client.publishFailed(pending));
     await this.flush();
   }
 
   async drainEvents(): Promise<DrainedEvent[]> {
-    const out = await this.client.drainEvents();
+    const out = await this.timed("drainEvents", () => this.client.drainEvents());
     await this.flush();
     return out;
   }

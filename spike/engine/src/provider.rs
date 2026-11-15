@@ -37,6 +37,7 @@
 //!   gml/<group_key>/<storage_key>  group index for OpenMLS rows
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use cgka_traits::app_event::PendingAppMessageAuthority;
 use cgka_traits::capabilities::{Capability, CapabilityRequirement, Feature, RequirementLevel};
@@ -67,6 +68,7 @@ const NS_GRP: &[u8] = b"grp/";
 const NS_IAD: &[u8] = b"iad/";
 const NS_MSG: &[u8] = b"msg/";
 const NS_MIDX: &[u8] = b"midx/";
+const NS_MST: &[u8] = b"mst/";
 const NS_PAPP: &[u8] = b"papp/";
 const NS_PAUTH: &[u8] = b"pauth/";
 const NS_DDM: &[u8] = b"ddm/";
@@ -93,6 +95,11 @@ const NS_FOR: &[u8] = b"for/";
 const NS_SNAP: &[u8] = b"snap/";
 const NS_CHKI: &[u8] = b"chki/";
 const NS_CHKD: &[u8] = b"chkd/";
+
+/// Diagnostic counters for the C0 size/time attribution: how often the
+/// engine drives full-ledger snapshot capture/restore per commit.
+pub static SNAP_CAPTURES: AtomicUsize = AtomicUsize::new(0);
+pub static SNAP_RESTORES: AtomicUsize = AtomicUsize::new(0);
 const K_HIW: &[u8] = b"hiw";
 
 pub(crate) const MLS_NS: &[u8] = b"mls/";
@@ -105,6 +112,11 @@ fn k(ns: &[u8], parts: &[&[u8]]) -> Vec<u8> {
         out.extend_from_slice(p);
     }
     out
+}
+
+/// Deterministic key fragment for a MessageState (serde_json of the enum).
+fn state_fragment(state: &MessageState) -> Vec<u8> {
+    serde_json::to_vec(state).unwrap_or_default()
 }
 
 fn ser<T: Serialize>(v: &T) -> StorageResult<Vec<u8>> {
@@ -163,6 +175,7 @@ impl KvStorageProvider {
     /// Capture all live canonical + ledger/outbound rows for `gid` into one
     /// image. Full snapshots also cover the message ledger and outbound queue.
     fn capture_group(&self, gid: &GroupId, canonical_only: bool) -> Vec<(Vec<u8>, Vec<u8>)> {
+        SNAP_CAPTURES.fetch_add(1, Ordering::Relaxed);
         let g = gid.as_slice();
         let mut rows: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
         for prefix in Self::canonical_prefixes(gid) {
@@ -183,8 +196,9 @@ impl KvStorageProvider {
         if canonical_only {
             return rows;
         }
-        // Message ledger: msg/<gid>/<seq>/<id>
+        // Message ledger + its state index.
         rows.extend(self.store.scan_prefix(&k(NS_MSG, &[g])));
+        rows.extend(self.store.scan_prefix(&k(NS_MST, &[g])));
         // Outbound intents / own-commit intents / fanouts filtered by gid.
         for (key, v) in self.store.scan_prefix(NS_INT) {
             if de::<QueuedOutboundIntent>(&v)
@@ -240,6 +254,7 @@ impl KvStorageProvider {
             return;
         }
         self.store.delete_prefix(&k(NS_MSG, &[g]));
+        self.store.delete_prefix(&k(NS_MST, &[g]));
         for (key, v) in self.store.scan_prefix(NS_INT) {
             if de::<QueuedOutboundIntent>(&v)
                 .map(|r| r.group_id.as_slice() == g)
@@ -294,6 +309,7 @@ impl KvStorageProvider {
         let Some(image) = self.store.get(&key) else {
             return Err(StorageError::SnapshotMissing(name.to_owned()));
         };
+        SNAP_RESTORES.fetch_add(1, Ordering::Relaxed);
         let rows: Vec<(Vec<u8>, Vec<u8>)> = de(&image)?;
         self.clear_group(gid, canonical_only);
         for (k2, v) in rows {
@@ -564,7 +580,24 @@ impl MessageStorage for KvStorageProvider {
         // keyed row).
         let idx = k(NS_MIDX, &[record.id.as_slice()]);
         let key = match self.store.get(&idx) {
-            Some(existing) => existing,
+            Some(existing) => {
+                // Drop the previous state-index entry on overwrite.
+                if let Some(old_v) = self.store.get(&existing) {
+                    if let Ok(old) = de::<MessageRecord>(&old_v) {
+                        if old.state != record.state {
+                            self.store.delete(&k(
+                                NS_MST,
+                                &[
+                                    record.group_id.as_slice(),
+                                    &state_fragment(&old.state),
+                                    record.id.as_slice(),
+                                ],
+                            ));
+                        }
+                    }
+                }
+                existing
+            }
             None => {
                 let seq = self.store.next_seq();
                 let key = k(
@@ -579,6 +612,17 @@ impl MessageStorage for KvStorageProvider {
                 key
             }
         };
+        self.store.put(
+            k(
+                NS_MST,
+                &[
+                    record.group_id.as_slice(),
+                    &state_fragment(&record.state),
+                    record.id.as_slice(),
+                ],
+            ),
+            key.clone(),
+        );
         self.store.put(key, ser(record)?);
         Ok(())
     }
@@ -592,6 +636,14 @@ impl MessageStorage for KvStorageProvider {
 
     fn delete_message(&self, id: &MessageId) -> StorageResult<()> {
         if let Some(key) = self.store.get(&k(NS_MIDX, &[id.as_slice()])) {
+            if let Some(v) = self.store.get(&key) {
+                if let Ok(rec) = de::<MessageRecord>(&v) {
+                    self.store.delete(&k(
+                        NS_MST,
+                        &[rec.group_id.as_slice(), &state_fragment(&rec.state), id.as_slice()],
+                    ));
+                }
+            }
             self.store.delete(&key);
             self.store.delete(&k(NS_MIDX, &[id.as_slice()]));
         }
@@ -600,11 +652,23 @@ impl MessageStorage for KvStorageProvider {
 
     fn update_message_state(&self, id: &MessageId, new_state: MessageState) -> StorageResult<()> {
         let mut record = self.get_message(id)?;
+        let old_state = record.state;
         record.state = new_state;
         let key = self
             .store
             .get(&k(NS_MIDX, &[id.as_slice()]))
             .ok_or(StorageError::NotFound)?;
+        self.store.delete(&k(
+            NS_MST,
+            &[record.group_id.as_slice(), &state_fragment(&old_state), id.as_slice()],
+        ));
+        self.store.put(
+            k(
+                NS_MST,
+                &[record.group_id.as_slice(), &state_fragment(&new_state), id.as_slice()],
+            ),
+            key.clone(),
+        );
         self.store.put(key, ser(&record)?);
         Ok(())
     }
@@ -624,6 +688,59 @@ impl MessageStorage for KvStorageProvider {
                     .unwrap_or(true)
             })
             .collect()
+    }
+
+    /// State-filtered listing backed by the `mst/` index — the trait
+    /// default materializes and decodes every ledger row, which makes
+    /// per-send engine checks O(ledger) and the whole flow O(n^2).
+    fn list_messages_in_states(
+        &self,
+        group_id: &GroupId,
+        states: &[MessageState],
+        at_or_after_epoch: EpochId,
+    ) -> StorageResult<Vec<MessageRecord>> {
+        if states.is_empty() {
+            return Ok(vec![]);
+        }
+        let g = group_id.as_slice();
+        let mut rows: Vec<(Vec<u8>, MessageRecord)> = Vec::new();
+        for st in states {
+            for (_, row_key) in self.store.scan_prefix(&k(NS_MST, &[g, &state_fragment(st)])) {
+                if let Some(v) = self.store.get(&row_key) {
+                    let rec: MessageRecord = de(&v)?;
+                    if rec.epoch >= at_or_after_epoch {
+                        rows.push((row_key, rec));
+                    }
+                }
+            }
+        }
+        // Same deterministic replay order as list_messages: the row key
+        // embeds the insertion sequence.
+        rows.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(rows.into_iter().map(|(_, r)| r).collect())
+    }
+
+    fn has_messages_in_states(
+        &self,
+        group_id: &GroupId,
+        states: &[MessageState],
+        at_or_after_epoch: EpochId,
+    ) -> StorageResult<bool> {
+        Ok(self
+            .list_messages_in_states(group_id, states, at_or_after_epoch)?
+            .iter()
+            .any(|_| true))
+    }
+
+    fn list_deferred_message_metadata(
+        &self,
+        group_id: &GroupId,
+    ) -> StorageResult<Vec<cgka_traits::message::DeferredMessageMetadata>> {
+        Ok(self
+            .list_messages_in_states(group_id, &[MessageState::PeelDeferred], EpochId(0))?
+            .into_iter()
+            .map(cgka_traits::message::DeferredMessageMetadata::from)
+            .collect())
     }
 
     fn put_pending_application_event(&self, event: &GroupEvent) -> StorageResult<()> {

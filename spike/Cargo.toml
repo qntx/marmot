@@ -16,3 +16,18 @@ opt-level     = "z"
 lto           = true
 codegen-units = 1
 strip         = true
+
+# Same as [profile.wasm] but keeps the name section for size attribution.
+[profile.wasm-named]
+inherits      = "release"
+opt-level     = "z"
+lto           = true
+codegen-units = 1
+strip         = false
+
+[profile.wasm-s]
+inherits      = "release"
+opt-level     = "s"
+lto           = true
+codegen-units = 1
+strip         = true

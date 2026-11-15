@@ -541,5 +541,10 @@ async fn m0_native_flow() {
         println!("{line}");
     }
     println!("relay events stored: {relay_size}");
+    println!(
+        "snapshot capture/restore calls: {} / {}",
+        marmot_spike::SNAP_CAPTURES.load(std::sync::atomic::Ordering::Relaxed),
+        marmot_spike::SNAP_RESTORES.load(std::sync::atomic::Ordering::Relaxed)
+    );
     println!("newest-first vs ascending finding: see 3a/3b rows above");
 }

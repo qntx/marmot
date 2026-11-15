@@ -1,0 +1,21 @@
+[10:51:24] relay: ws://127.0.0.1:45670
+[10:51:25] wn account exists: npub1c0zm0w8g3q0lukf8n404rr82tm3ulfhhzpdkgt8y2fk489vn3ggscyaj3s
+[10:51:25] wn pubkey: c3c5b7b8e8881ffe59279d5f518cea5ee3cfa6f7105b642ce4526d5395938a11
+[10:51:25] wn keys publish: {"account_id":"c3c5b7b8e8881ffe59279d5f518cea5ee3cfa6f7105b642ce4526d5395938a11","key_package_bytes":472,"npub":"npub1c0zm0w8g3q0lukf8n404rr82tm3ulfhhzpdkgt8y2fk489vn3ggscyaj3s"}
+[10:51:25] spike A inbox relay list published
+[10:51:25] spike A key package published
+[10:51:25] wn KP event bdcca4d327b0… fetched (1)
+[10:51:25] spike A created group gid=fff83cf91e28bae2… welcome+commit published (57ms)
+[10:51:28] wn invite: {"admin_policy":{"admins":["02cbdf221280d1b65655286a2e6a71a89e94e26048f70b913669c6d06d7f7205"],"component":"marmot.group.admin-policy.v1","component_id":32771,"data_hex":"2002cbdf221280d1b65655286a2e6a71a89e94e26048f70b913669c6d06d7f7205"},"agent_text_stream":{"allowed_member_roles":[],"component":"marmot.group.agent-text-stream.quic.v1","component_id":32774,"data_hex":"","max_plaintext_frame_len"
+[10:51:28] wn accepted invite
+[10:51:31] wn roster settled (2 members) + 3s fanout settle
+[10:51:31] spike sees 2 members
+[10:51:31] wn sent message
+[10:51:31] spike decoded wn message: {"decoded":{"author":"c3c5b7b8e8881ffe59279d5f518cea5ee3cfa6f7105b642ce4526d5395938a11","content":"hello-from-wn","createdAt":1794739891,"kind":9},"epoch":1,"groupId":"fff83cf91e28bae27fba8ff908c780d1","messageId":"ba9b54066b524069ae1a806091ec01fd9e8eceb7e87657c0491ac970fe3258c3","payload":"eyJpZCI6
+[10:51:31] spike sent message
+[10:51:31] wn decoded spike message: {"direction":"received","from":"02cbdf221280d1b65655286a2e6a71a89e94e26048f70b913669c6d06d7f7205","from_display_name":null,"group_id":"fff83cf91e28bae27fba8ff908c780d1","kind":9,"message_id":"6fbb6877cb97927863fb0c82cb391dd0fe31f4344ebdd7b2db1b316c7bad529a","plaintext":"hello-from-spike","received_a
+[10:51:31] spike A npub: npub1qt9a7gsjsrgmv4j49p4zu6n34z0ffcnqfrmshyfkd8rdqmtlwgzsgk5x03
+[10:51:31] wn created group gid2=1c73d1c977ebc28e8cb02f615e26baaa : {"account_id":"c3c5b7b8e8881ffe59279d5f518cea5ee3cfa6f7105b642ce4526d5395938a11","admin_policy":{"admins":["c3c5b7b8e8881ffe59279d5f518cea5ee3cfa6f7105b642ce4526d5395938a11"],"component":"marmot.group.admin-policy.v1","component_id":32771,"data_hex":"20c3c5b7b8e8881ffe59279d5f518cea5ee3cfa6f7105b642
+[10:51:31] spike ingest welcome: {"outcome":"processed"}
+[10:51:31] spike joined group: gid2Spike=undefined (wn gid2=1c73d1c977ebc28e8cb02f615e26baaa)
+[10:51:31] !! gid mismatch spike=undefined wn=1c73d1c977ebc28e8cb02f615e26baaa

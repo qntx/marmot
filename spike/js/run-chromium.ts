@@ -192,20 +192,32 @@ row("scenario total", `${(performance.now() - t0).toFixed(0)}ms`);
 // ---- Measurements ----------------------------------------------------------
 const results: Record<string, unknown> = { rows };
 
-// Clean 500-message ascending ingest timing on B's pre-ingest snapshot.
-await openOn(pageB, "ingestReader", "bob", lastSnapshot);
-const reader = new PageDriver(pageB, "ingestReader");
+// Clean 500-message ascending ingest on B's pre-ingest snapshot — measured
+// INSIDE the page in one evaluate (comparable to Bun's in-process number).
 const allEvents = relay.fetchAsc(KIND_GROUP_MESSAGE);
-const tIngest = performance.now();
-for (const ev of allEvents) await reader.ingest(ev);
-const ingestTotal = performance.now() - tIngest;
+await openOn(pageB, "ingestReader", "bob", lastSnapshot);
+const inPage = await pageB.evaluate(async (events) => {
+  const times: number[] = [];
+  const t0 = performance.now();
+  for (const ev of events) {
+    const t = performance.now();
+    await (window as any).__member.call("ingestReader", "ingest", ev);
+    times.push(performance.now() - t);
+  }
+  return { totalMs: performance.now() - t0, times };
+}, allEvents);
+const sorted = [...inPage.times].sort((x, y) => x - y);
 results.ingestMs = {
   events: allEvents.length,
-  totalMs: ingestTotal,
-  perMessageMs: ingestTotal / allEvents.length,
-  note: "includes page.evaluate round-trip per event",
+  totalMs: inPage.totalMs,
+  perMessageMs: inPage.totalMs / allEvents.length,
+  medianMs: sorted[Math.floor(sorted.length / 2)],
+  p95Ms: sorted[Math.floor(sorted.length * 0.95)],
+  note: "in-page, single evaluate",
 };
-console.log(`chromium ingest ${allEvents.length} events in ${ingestTotal.toFixed(0)}ms`);
+console.log(
+  `chromium ingest ${allEvents.length} events in ${inPage.totalMs.toFixed(0)}ms (in-page)`,
+);
 
 // KeyPackage generation n=24 (inside the page, single evaluate for clean ms).
 const kpRes = await pageB.evaluate(async () => {

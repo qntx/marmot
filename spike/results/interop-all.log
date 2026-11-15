@@ -1,0 +1,94 @@
+[10:40:35] relay: ws://127.0.0.1:45670
+[10:40:35] wn account exists: npub1c0zm0w8g3q0lukf8n404rr82tm3ulfhhzpdkgt8y2fk489vn3ggscyaj3s
+[10:40:35] wn pubkey: c3c5b7b8e8881ffe59279d5f518cea5ee3cfa6f7105b642ce4526d5395938a11
+[10:40:35] wn keys publish: {"account_id":"c3c5b7b8e8881ffe59279d5f518cea5ee3cfa6f7105b642ce4526d5395938a11","key_package_bytes":472,"npub":"npub1c0zm0w8g3q0lukf8n404rr82tm3ulfhhzpdkgt8y2fk489vn3ggscyaj3s"}
+[10:40:35] spike A key package published
+[10:40:35] wn KP event 7c5a99d9874f… fetched (1)
+[10:40:35] spike A created group gid=7a13856f4abd5dde… welcome+commit published (51ms)
+[10:40:40] wn invite: {"admin_policy":{"admins":["02cbdf221280d1b65655286a2e6a71a89e94e26048f70b913669c6d06d7f7205"],"component":"marmot.group.admin-policy.v1","component_id":32771,"data_hex":"2002cbdf221280d1b65655286a2e6a71a89e94e26048f70b913669c6d06d7f7205"},"agent_text_stream":{"allowed_member_roles":[],"component":"marmot.group.agent-text-stream.quic.v1","component_id":32774,"data_hex":"","max_plaintext_frame_len"
+[10:40:40] wn accepted invite
+[10:40:40] spike sees 2 members
+[10:41:28] relay: ws://127.0.0.1:45670
+[10:41:28] wn account exists: npub1c0zm0w8g3q0lukf8n404rr82tm3ulfhhzpdkgt8y2fk489vn3ggscyaj3s
+[10:41:28] wn pubkey: c3c5b7b8e8881ffe59279d5f518cea5ee3cfa6f7105b642ce4526d5395938a11
+[10:41:28] wn keys publish: {"account_id":"c3c5b7b8e8881ffe59279d5f518cea5ee3cfa6f7105b642ce4526d5395938a11","key_package_bytes":472,"npub":"npub1c0zm0w8g3q0lukf8n404rr82tm3ulfhhzpdkgt8y2fk489vn3ggscyaj3s"}
+[10:41:28] spike A key package published
+[10:41:28] wn KP event 1ff1403eca27… fetched (1)
+[10:41:28] spike A created group gid=8a1edf3d2ebf79e2… welcome+commit published (46ms)
+[10:41:31] wn invite: {"admin_policy":{"admins":["02cbdf221280d1b65655286a2e6a71a89e94e26048f70b913669c6d06d7f7205"],"component":"marmot.group.admin-policy.v1","component_id":32771,"data_hex":"2002cbdf221280d1b65655286a2e6a71a89e94e26048f70b913669c6d06d7f7205"},"agent_text_stream":{"allowed_member_roles":[],"component":"marmot.group.agent-text-stream.quic.v1","component_id":32774,"data_hex":"","max_plaintext_frame_len"
+[10:41:31] wn accepted invite
+[10:41:31] wn roster settled (2 members)
+[10:41:31] spike sees 2 members
+[10:41:51] relay: ws://127.0.0.1:45670
+[10:41:52] wn account exists: npub1c0zm0w8g3q0lukf8n404rr82tm3ulfhhzpdkgt8y2fk489vn3ggscyaj3s
+[10:41:52] wn pubkey: c3c5b7b8e8881ffe59279d5f518cea5ee3cfa6f7105b642ce4526d5395938a11
+[10:41:52] wn keys publish: {"account_id":"c3c5b7b8e8881ffe59279d5f518cea5ee3cfa6f7105b642ce4526d5395938a11","key_package_bytes":472,"npub":"npub1c0zm0w8g3q0lukf8n404rr82tm3ulfhhzpdkgt8y2fk489vn3ggscyaj3s"}
+[10:41:52] spike A key package published
+[10:41:52] wn KP event 4e5c2b4354de… fetched (1)
+[10:41:52] spike A created group gid=19b5b3a173e4f9f4… welcome+commit published (53ms)
+[10:41:56] wn invite: {"admin_policy":{"admins":["02cbdf221280d1b65655286a2e6a71a89e94e26048f70b913669c6d06d7f7205"],"component":"marmot.group.admin-policy.v1","component_id":32771,"data_hex":"2002cbdf221280d1b65655286a2e6a71a89e94e26048f70b913669c6d06d7f7205"},"agent_text_stream":{"allowed_member_roles":[],"component":"marmot.group.agent-text-stream.quic.v1","component_id":32774,"data_hex":"","max_plaintext_frame_len"
+[10:41:56] wn accepted invite
+[10:45:34] relay: ws://127.0.0.1:45670
+[10:45:34] wn account exists: npub1c0zm0w8g3q0lukf8n404rr82tm3ulfhhzpdkgt8y2fk489vn3ggscyaj3s
+[10:45:34] wn pubkey: c3c5b7b8e8881ffe59279d5f518cea5ee3cfa6f7105b642ce4526d5395938a11
+[10:45:34] wn keys publish: {"account_id":"c3c5b7b8e8881ffe59279d5f518cea5ee3cfa6f7105b642ce4526d5395938a11","key_package_bytes":472,"npub":"npub1c0zm0w8g3q0lukf8n404rr82tm3ulfhhzpdkgt8y2fk489vn3ggscyaj3s"}
+[10:45:34] spike A key package published
+[10:45:34] wn KP event 9ecf93571535… fetched (1)
+[10:45:34] spike A created group gid=a56bee743e6b0aae… welcome+commit published (43ms)
+[10:45:39] wn invite: {"admin_policy":{"admins":["02cbdf221280d1b65655286a2e6a71a89e94e26048f70b913669c6d06d7f7205"],"component":"marmot.group.admin-policy.v1","component_id":32771,"data_hex":"2002cbdf221280d1b65655286a2e6a71a89e94e26048f70b913669c6d06d7f7205"},"agent_text_stream":{"allowed_member_roles":[],"component":"marmot.group.agent-text-stream.quic.v1","component_id":32774,"data_hex":"","max_plaintext_frame_len"
+[10:45:39] wn accepted invite
+[10:47:48] relay: ws://127.0.0.1:45670
+[10:47:48] wn account exists: npub1c0zm0w8g3q0lukf8n404rr82tm3ulfhhzpdkgt8y2fk489vn3ggscyaj3s
+[10:47:48] wn pubkey: c3c5b7b8e8881ffe59279d5f518cea5ee3cfa6f7105b642ce4526d5395938a11
+[10:47:48] wn keys publish: {"account_id":"c3c5b7b8e8881ffe59279d5f518cea5ee3cfa6f7105b642ce4526d5395938a11","key_package_bytes":472,"npub":"npub1c0zm0w8g3q0lukf8n404rr82tm3ulfhhzpdkgt8y2fk489vn3ggscyaj3s"}
+[10:47:48] spike A key package published
+[10:47:48] wn KP event 7aa3ad255fe4… fetched (1)
+[10:47:48] spike A created group gid=5f9e3bc2807d7fe3… welcome+commit published (53ms)
+[10:47:51] wn invite: {"admin_policy":{"admins":["02cbdf221280d1b65655286a2e6a71a89e94e26048f70b913669c6d06d7f7205"],"component":"marmot.group.admin-policy.v1","component_id":32771,"data_hex":"2002cbdf221280d1b65655286a2e6a71a89e94e26048f70b913669c6d06d7f7205"},"agent_text_stream":{"allowed_member_roles":[],"component":"marmot.group.agent-text-stream.quic.v1","component_id":32774,"data_hex":"","max_plaintext_frame_len"
+[10:47:51] wn accepted invite
+[10:47:54] wn roster settled (2 members) + 3s fanout settle
+[10:47:54] spike sees 2 members
+[10:47:54] wn sent message
+[10:47:54] spike decoded wn message: {"decoded":{"author":"c3c5b7b8e8881ffe59279d5f518cea5ee3cfa6f7105b642ce4526d5395938a11","content":"hello-from-wn","createdAt":1794739674,"kind":9},"epoch":1,"groupId":"5f9e3bc2807d7fe31c64c95f0173e29f","messageId":"cb93aadf70c1421a5d53fcf5676b472ec00d0825a3541699e574360179d7319a","payload":"eyJpZCI6
+[10:47:54] spike sent message
+[10:47:54] wn decoded spike message: {"direction":"received","from":"02cbdf221280d1b65655286a2e6a71a89e94e26048f70b913669c6d06d7f7205","from_display_name":null,"group_id":"5f9e3bc2807d7fe31c64c95f0173e29f","kind":9,"message_id":"e58feabfd03dab25d77336ac344e42fce37dcf806f81f2bcd0b644d9b3ed2a17","plaintext":"hello-from-spike","received_a
+[10:47:54] spike A npub: npub1qt9a7gsjsrgmv4j49p4zu6n34z0ffcnqfrmshyfkd8rdqmtlwgzsgk5x03
+[10:54:17] relay: ws://127.0.0.1:45670
+[10:54:17] wn account exists: npub1c0zm0w8g3q0lukf8n404rr82tm3ulfhhzpdkgt8y2fk489vn3ggscyaj3s
+[10:54:17] wn pubkey: c3c5b7b8e8881ffe59279d5f518cea5ee3cfa6f7105b642ce4526d5395938a11
+[10:54:18] wn keys publish: {"account_id":"c3c5b7b8e8881ffe59279d5f518cea5ee3cfa6f7105b642ce4526d5395938a11","key_package_bytes":472,"npub":"npub1c0zm0w8g3q0lukf8n404rr82tm3ulfhhzpdkgt8y2fk489vn3ggscyaj3s"}
+[10:54:18] spike A inbox relay list published
+[10:54:18] spike A key package published
+[10:54:18] wn KP event 5dde28e70e9e… fetched (1)
+[10:54:18] spike A created group gid=87acd3b8e98b01d5… welcome+commit published (59ms)
+[10:54:22] wn invite: {"admin_policy":{"admins":["02cbdf221280d1b65655286a2e6a71a89e94e26048f70b913669c6d06d7f7205"],"component":"marmot.group.admin-policy.v1","component_id":32771,"data_hex":"2002cbdf221280d1b65655286a2e6a71a89e94e26048f70b913669c6d06d7f7205"},"agent_text_stream":{"allowed_member_roles":[],"component":"marmot.group.agent-text-stream.quic.v1","component_id":32774,"data_hex":"","max_plaintext_frame_len"
+[10:54:22] wn accepted invite
+[10:54:25] wn roster settled (2 members) + 3s fanout settle
+[10:54:25] spike sees 2 members
+[10:54:26] wn sent message
+[10:54:26] spike decoded wn message: {"decoded":{"author":"c3c5b7b8e8881ffe59279d5f518cea5ee3cfa6f7105b642ce4526d5395938a11","content":"hello-from-wn","createdAt":1794740065,"kind":9},"epoch":1,"groupId":"87acd3b8e98b01d58f96f80dab69eab2","messageId":"6e8298e2c75e3a5bd19d8f441f0e636e691f756b8a70ee2ad3c7b8f855eb9499","payload":"eyJpZCI6
+[10:54:26] spike sent message
+[10:54:26] wn decoded spike message: {"direction":"received","from":"02cbdf221280d1b65655286a2e6a71a89e94e26048f70b913669c6d06d7f7205","from_display_name":null,"group_id":"87acd3b8e98b01d58f96f80dab69eab2","kind":9,"message_id":"ae3297b1871b321499009b8696ba54799141ded8606e6b3a12bae3beb4801e36","plaintext":"hello-from-spike","received_a
+[10:54:26] spike A npub: npub1qt9a7gsjsrgmv4j49p4zu6n34z0ffcnqfrmshyfkd8rdqmtlwgzsgk5x03
+[10:54:26] wn created group gid2=3b24038fc78cfd8829086a4bb157d028 : {"account_id":"c3c5b7b8e8881ffe59279d5f518cea5ee3cfa6f7105b642ce4526d5395938a11","admin_policy":{"admins":["c3c5b7b8e8881ffe59279d5f518cea5ee3cfa6f7105b642ce4526d5395938a11"],"component":"marmot.group.admin-policy.v1","component_id":32771,"data_hex":"20c3c5b7b8e8881ffe59279d5f518cea5ee3cfa6f7105b642
+[10:54:26] spike ingest welcome: {"outcome":"processed"}
+[10:54:26] spike joined group: gid2Spike=undefined (wn gid2=3b24038fc78cfd8829086a4bb157d028)
+[10:54:26] !! gid mismatch spike=undefined wn=3b24038fc78cfd8829086a4bb157d028
+[10:54:29] s2 send result: events=1 pending=null
+[10:54:29] s2 flush published 0 events
+[10:54:29] relay kind-445 events: 3
+[10:54:29] wn decoded s2 spike message
+[10:54:29] spike decoded wn s2 message
+[10:54:30] wn sent 25 messages in 1646ms
+[10:54:31] spike sent 475 messages (h=0fd12053547c…)
+[10:54:31] spike ingested 502 events ascending in 85ms (processed=25, wn bulk msgs decoded=25/25)
+[10:54:36] wn sees 475 spike bulk messages
+[10:54:36] spike C inbox relay list published
+[10:54:36] spike C joined group 1: ["02cbdf221280d1b65655286a2e6a71a89e94e26048f70b913669c6d06d7f7205","c3c5b7b8e8881ffe59279d5f518cea5ee3cfa6f7105b642ce4526d5395938a11","2ebaede5ce2055224158d3172ed20f664d91b654ee5218cf42df5644c72d8e19
+[10:54:37] C reads post-removal message: false
+[10:54:42] wn members after removal: {"ok":true,"result":{"account_id":"c3c5b7b8e8881ffe59279d5f518cea5ee3cfa6f7105b642ce4526d5395938a11","group_id":"87acd3b8e98b01d58f96f80dab69eab2","members":[{"device_count":1,"local":false,"member_id":"02cbdf221280d1b65655286a2e6a71a89e94e26048f70b913669c6d06d7f7205","npub":"npub1qt9a7gsjsrgmv4j49p
+[10:54:42] wn sees post-removal plaintext: false
+[10:54:42] wn removed spike A from group 2
+[10:54:42] spike A members(gid2) after removal: ["c3c5b7b8e8881ffe59279d5f518cea5ee3cfa6f7105b642ce4526d5395938a11"]
+[10:54:42] groups show gid2 (0x800d present: false): {"ok":true,"result":{"account_id":"c3c5b7b8e8881ffe59279d5f518cea5ee3cfa6f7105b642ce4526d5395938a11","group":{"admin_policy":{"admins":["c3c5b7b8e8881ffe59279d5f518cea5ee3cfa6f7105b642ce4526d5395938a11"],"component":"marmot.group.admin-policy.v1","component_id":32771,"data_hex":"20c3c5b7b8e8881ffe59279d5f518cea5ee3cfa6f7105b642ce4526d5395938a11"},"agent_text_stream":{"allowed_member_roles":["receive","send"],"component":"marmot.group.agent-text-stream.quic.v1","component_id":32774,"data_hex":"010300001000000000000000","max_plaintext_frame_len":4096,"padding_bucket_bytes":0,"replay_ttl_secs":0,"required":true,"required_member_roles":["receive"]},"archived":false,"avatar_url":{"component":"marmot.group.avatar-url.v1","component_id":32775,"data_hex":"000000","dim":null,"present":false,"thumbh
+[10:54:42] {"scenario1":"PASS","scenario2":"PASS","scenario3":"PASS","scenario4":"see log: 0x800d=false"}

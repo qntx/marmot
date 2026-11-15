@@ -1687,6 +1687,7 @@ dependencies = [
  "base64",
  "cgka-engine",
  "cgka-traits",
+ "getrandom 0.2.17",
  "hex",
  "nostr",
  "openmls",

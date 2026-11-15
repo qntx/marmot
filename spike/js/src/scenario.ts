@@ -71,8 +71,14 @@ async function drainContents(member: MemberDriver): Promise<Set<string>> {
 }
 
 export async function runScenario(env: ScenarioEnv): Promise<void> {
-  const { relay, assert, row } = env;
+  const { relay, assert } = env;
   const publish = (ev: RelayEvent) => relay.tryPublish(ev);
+  let lastT = env.time();
+  const row = (s: string, d: string) => {
+    const now = env.time();
+    env.row(s, `${d} (+${(now - lastT).toFixed(0)}ms)`);
+    lastT = now;
+  };
 
   // Step 1: three accounts, all publish KeyPackages (kind 30443).
   const a = await env.makeMember("alice");

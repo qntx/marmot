@@ -12,4 +12,4 @@ pub mod provider;
 pub mod store;
 
 pub use kv::{InMemoryHost, KvHost, KvOp};
-pub use provider::KvStorageProvider;
+pub use provider::{KvStorageProvider, SNAP_CAPTURES, SNAP_RESTORES};

@@ -27,7 +27,12 @@ use cgka_engine::account_identity_proof::{
     AccountIdentityProofRequest, AccountIdentityProofSigner,
 };
 use cgka_engine::convergence_clock::ManualConvergenceClock;
-use cgka_engine::{Engine, EngineBuilder};
+use cgka_engine::{Engine, EngineBuilder, FeatureRegistry};
+use cgka_traits::agent_text_stream::{
+    AGENT_TEXT_STREAM_QUIC_FANOUT_FEATURE, AGENT_TEXT_STREAM_QUIC_RECEIVE_FEATURE,
+    AGENT_TEXT_STREAM_QUIC_SEND_FEATURE,
+};
+use cgka_traits::capabilities::{Capability, CapabilityRequirement, Feature, RequirementLevel};
 use cgka_traits::app_components::{
     AppComponentData, NOSTR_ROUTING_COMPONENT_ID, NostrRoutingV1,
     PRIVATE_USE_APP_COMPONENT_ID_START, default_group_components, encode_nostr_routing_v1,
@@ -187,6 +192,7 @@ impl Member {
             .account_identity_proof_signer(signer.clone())
             .protocol_profile(ProtocolProfile::Current)
             .supported_app_components(supported_components())
+            .feature_registry(supported_features())
             .peeler(Box::new(peeler))
             .convergence_clock(clock.clone())
             .build()
@@ -258,24 +264,73 @@ impl Member {
     }
 }
 
+/// Components the spike advertises: the engine defaults plus the
+/// protocol-advertisable set White Noise groups require of members
+/// (agent-text-stream, encrypted-media v2, account-devices). Only ids the
+/// engine's `ADVERTISABLE_PROTOCOL_APP_COMPONENTS` gate accepts.
 pub fn supported_components() -> Vec<u16> {
+    use cgka_traits::app_components::{
+        ACCOUNT_DEVICES_COMPONENT_ID, AGENT_TEXT_STREAM_QUIC_COMPONENT_ID,
+        GROUP_ENCRYPTED_MEDIA_V2_COMPONENT_ID,
+    };
     let mut components = default_group_components();
     components.insert(NOSTR_ROUTING_COMPONENT_ID);
+    components.insert(AGENT_TEXT_STREAM_QUIC_COMPONENT_ID);
+    components.insert(GROUP_ENCRYPTED_MEDIA_V2_COMPONENT_ID);
+    components.insert(ACCOUNT_DEVICES_COMPONENT_ID);
     components.into_iter().collect()
+}
+
+/// Feature registry matching marmot-app's `app_feature_registry`: the
+/// SelfRemove proposal and the three agent-text-stream QUIC extension
+/// capabilities so KeyPackages carry them.
+pub fn supported_features() -> FeatureRegistry {
+    let mut registry = FeatureRegistry::new();
+    registry.register(
+        Feature("self-remove"),
+        CapabilityRequirement {
+            requires: Capability::Proposal(10),
+            level: RequirementLevel::Required,
+            description: "MIP-03 SelfRemove group departure",
+        },
+    );
+    for (feature, capability, description) in [
+        (
+            AGENT_TEXT_STREAM_QUIC_RECEIVE_FEATURE.clone(),
+            cgka_traits::agent_text_stream::AGENT_TEXT_STREAM_QUIC_RECEIVE_CAPABILITY,
+            "receive QUIC-backed agent text stream previews",
+        ),
+        (
+            AGENT_TEXT_STREAM_QUIC_SEND_FEATURE.clone(),
+            cgka_traits::agent_text_stream::AGENT_TEXT_STREAM_QUIC_SEND_CAPABILITY,
+            "send QUIC-backed agent text stream frames",
+        ),
+        (
+            AGENT_TEXT_STREAM_QUIC_FANOUT_FEATURE.clone(),
+            cgka_traits::agent_text_stream::AGENT_TEXT_STREAM_QUIC_FANOUT_CAPABILITY,
+            "fan out QUIC-backed agent text stream frames",
+        ),
+    ] {
+        registry.register(
+            feature,
+            CapabilityRequirement {
+                requires: capability,
+                level: RequirementLevel::Optional,
+                description,
+            },
+        );
+    }
+    registry
 }
 
 /// App-component state for `create_group`: the group needs Nostr routing so
 /// the engine can fill `WelcomeMetadata.relays` for the kind-444 rumor.
 pub fn routing_component(creator: &MemberId, relays: &[String]) -> AppComponentData {
-    use sha2::{Digest, Sha256};
-    let nostr_group_id: [u8; 32] = Sha256::digest(
-        [
-            b"marmot-spike-nostr-group-id".as_slice(),
-            creator.as_slice(),
-        ]
-        .concat(),
-    )
-    .into();
+    // The nostr_group_id routes every kind-445 event of ONE group; it must be
+    // unique per group or relays/daemons cannot tell two groups apart.
+    let mut nostr_group_id = [0u8; 32];
+    getrandom::getrandom(&mut nostr_group_id).expect("rng");
+    let _ = creator;
     let routing = NostrRoutingV1::new(nostr_group_id, relays.to_vec()).expect("routing valid");
     AppComponentData {
         component_id: NOSTR_ROUTING_COMPONENT_ID,

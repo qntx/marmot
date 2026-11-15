@@ -41,11 +41,13 @@ const env = {
     return m;
   },
   async spawnReader(seed: string, entries: [string, string][]) {
-    return LocalMember.open({
+    const m = await LocalMember.open({
       Client,
       keys: await accountKeys(seed),
       backend: new MapBackend(entries),
     });
+    members.set(`${seed}-reader-${members.size}`, m);
+    return m;
   },
   async snapshot(m: LocalMember) {
     lastSnapshot = await (m as LocalMember).backend.loadAll();
@@ -63,6 +65,15 @@ console.log("=== M0 wasm flow — Bun ===");
 const t0 = performance.now();
 await runScenario(env as any);
 row("scenario total", `${(performance.now() - t0).toFixed(0)}ms`);
+const agg: Record<string, { n: number; ms: number }> = {};
+for (const m of members.values())
+  for (const [k, v] of Object.entries(m.timings)) {
+    const a = (agg[k] ??= { n: 0, ms: 0 });
+    a.n += v.n;
+    a.ms += v.ms;
+  }
+for (const [k, v] of Object.entries(agg).sort((x, y) => y[1].ms - x[1].ms))
+  row(`api ${k}`, `n=${v.n} total=${v.ms.toFixed(0)}ms med=${(v.ms / v.n).toFixed(2)}ms`);
 
 // ---- Measurements ----------------------------------------------------------
 const results: Record<string, unknown> = { rows };

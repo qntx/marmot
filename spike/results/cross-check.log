@@ -1,0 +1,48 @@
+===== aarch64-apple-ios =====
+    Checking rand_chacha v0.3.1
+    Checking rand_chacha v0.10.0
+    Checking rand v0.8.8
+    Checking postcard v1.1.3
+    Checking tokio v1.54.1
+    Checking openmls v0.9.0 (https://github.com/openmls/openmls.git?rev=6100df3fb1d8c3eeab53e349fcbd621f98c44fe2#6100df3f)
+    Checking hpke-rs-rust-crypto v0.8.0
+    Checking openmls_basic_credential v0.6.0 (https://github.com/openmls/openmls.git?rev=6100df3fb1d8c3eeab53e349fcbd621f98c44fe2#6100df3f)
+    Checking openmls_rust_crypto v0.6.0 (https://github.com/openmls/openmls.git?rev=6100df3fb1d8c3eeab53e349fcbd621f98c44fe2#6100df3f)
+    Checking secp256k1 v0.30.0
+    Checking nostr v0.45.5 (https://github.com/erskingardner/rust-nostr?rev=e93cc06b5624f06c21ecd8111a124176eb0c7589#e93cc06b)
+    Checking cgka-engine v0.16.0 (https://github.com/marmot-protocol/mdk?rev=a2e0558a634bbd20607cdd5afb93abc6220ee58d#a2e0558a)
+    Checking transport-nostr-peeler v0.16.0 (https://github.com/marmot-protocol/mdk?rev=a2e0558a634bbd20607cdd5afb93abc6220ee58d#a2e0558a)
+    Checking marmot-spike v0.0.0 (/Users/xu/Desktop/qntx/marmot/spike/engine)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 11.37s
+===== aarch64-apple-ios-sim =====
+    Checking tracing v0.1.44
+    Checking tokio v1.54.1
+    Checking marmot-forensics v0.16.0 (https://github.com/marmot-protocol/mdk?rev=a2e0558a634bbd20607cdd5afb93abc6220ee58d#a2e0558a)
+    Checking cobs v0.3.0
+    Checking postcard v1.1.3
+    Checking openmls v0.9.0 (https://github.com/openmls/openmls.git?rev=6100df3fb1d8c3eeab53e349fcbd621f98c44fe2#6100df3f)
+    Checking hpke-rs-rust-crypto v0.8.0
+    Checking openmls_basic_credential v0.6.0 (https://github.com/openmls/openmls.git?rev=6100df3fb1d8c3eeab53e349fcbd621f98c44fe2#6100df3f)
+    Checking openmls_rust_crypto v0.6.0 (https://github.com/openmls/openmls.git?rev=6100df3fb1d8c3eeab53e349fcbd621f98c44fe2#6100df3f)
+    Checking secp256k1 v0.30.0
+    Checking nostr v0.45.5 (https://github.com/erskingardner/rust-nostr?rev=e93cc06b5624f06c21ecd8111a124176eb0c7589#e93cc06b)
+    Checking transport-nostr-peeler v0.16.0 (https://github.com/marmot-protocol/mdk?rev=a2e0558a634bbd20607cdd5afb93abc6220ee58d#a2e0558a)
+    Checking cgka-engine v0.16.0 (https://github.com/marmot-protocol/mdk?rev=a2e0558a634bbd20607cdd5afb93abc6220ee58d#a2e0558a)
+    Checking marmot-spike v0.0.0 (/Users/xu/Desktop/qntx/marmot/spike/engine)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 11.57s
+===== aarch64-linux-android =====
+    Checking ppv-lite86 v0.2.21
+    Checking postcard v1.1.3
+    Checking rand_chacha v0.3.1
+    Checking rand_chacha v0.10.0
+    Checking secp256k1 v0.30.0
+    Checking rand v0.8.8
+    Checking nostr v0.45.5 (https://github.com/erskingardner/rust-nostr?rev=e93cc06b5624f06c21ecd8111a124176eb0c7589#e93cc06b)
+    Checking openmls v0.9.0 (https://github.com/openmls/openmls.git?rev=6100df3fb1d8c3eeab53e349fcbd621f98c44fe2#6100df3f)
+    Checking hpke-rs-rust-crypto v0.8.0
+    Checking openmls_basic_credential v0.6.0 (https://github.com/openmls/openmls.git?rev=6100df3fb1d8c3eeab53e349fcbd621f98c44fe2#6100df3f)
+    Checking openmls_rust_crypto v0.6.0 (https://github.com/openmls/openmls.git?rev=6100df3fb1d8c3eeab53e349fcbd621f98c44fe2#6100df3f)
+    Checking transport-nostr-peeler v0.16.0 (https://github.com/marmot-protocol/mdk?rev=a2e0558a634bbd20607cdd5afb93abc6220ee58d#a2e0558a)
+    Checking cgka-engine v0.16.0 (https://github.com/marmot-protocol/mdk?rev=a2e0558a634bbd20607cdd5afb93abc6220ee58d#a2e0558a)
+    Checking marmot-spike v0.0.0 (/Users/xu/Desktop/qntx/marmot/spike/engine)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 11.55s

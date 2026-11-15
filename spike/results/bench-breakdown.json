@@ -1,0 +1,24 @@
+{
+  "n": {
+    "sends": 100,
+    "ingests": 100,
+    "advancePasses": 2
+  },
+  "sendMs": {
+    "median": 1.901,
+    "p95": 9.834,
+    "max": 45.744
+  },
+  "ingestMs": {
+    "median": 0.897,
+    "p95": 8.42,
+    "max": 38.904
+  },
+  "advancePassMs": {
+    "median": 1.641,
+    "p95": 1.641,
+    "max": 1.641,
+    "total": 2.1
+  },
+  "wasmMemoryBytes": 5177344
+}
