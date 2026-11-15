@@ -1,0 +1,41 @@
+[workspace]
+members  = ["engine", "wasm"]
+resolver = "3"
+
+[workspace.package]
+version      = "0.0.0"
+edition      = "2024"
+rust-version = "1.99"
+license      = "MIT OR Apache-2.0"
+publish      = false
+
+# Size profile for the wasm32 build (cargo build --profile wasm).
+[profile.wasm]
+inherits      = "release"
+opt-level     = "z"
+lto           = true
+codegen-units = 1
+strip         = true
+
+# Same as [profile.wasm] but keeps the name section for size attribution.
+[profile.wasm-named]
+inherits      = "release"
+opt-level     = "z"
+lto           = true
+codegen-units = 1
+strip         = false
+debug         = false
+
+[profile.wasm-s]
+inherits      = "release"
+opt-level     = "s"
+lto           = true
+codegen-units = 1
+strip         = true
+
+[profile.wasm-3]
+inherits      = "release"
+opt-level     = 3
+lto           = true
+codegen-units = 1
+strip         = true

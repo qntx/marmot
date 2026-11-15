@@ -1,0 +1,13 @@
+import init, { Client } from "../wasm/pkg/marmot_spike_wasm.js";
+import { WsRelay } from "./src/ws-relay.js";
+import { accountKeys, LocalMember } from "./src/local-member.js";
+import { MapBackend } from "./src/member.js";
+import { npubEncode } from "@qntx/nostr";
+const wasmPath = new URL("../wasm/pkg/marmot_spike_wasm_bg.wasm", import.meta.url);
+await init({ module_or_path: await Bun.file(wasmPath).arrayBuffer() });
+const relay = await WsRelay.connect("ws://127.0.0.1:45670");
+const a = await LocalMember.open({ Client, keys: await accountKeys("interop-a"), backend: new MapBackend() });
+const kp = await a.publishKeyPackage();
+console.log("pub", await relay.publish(kp), "npub", npubEncode(a.keys.publicKey));
+relay.close();
+process.exit(0);

@@ -1,0 +1,81 @@
+{
+  "rows": [
+    "| 1. key packages published (kind 30443)                     | A B C (+96ms) |",
+    "| 2. group created, B joined via welcome                     | epoch=1 members=2 (+274ms) |",
+    "| 3. published 500 kind-445 messages                         | 500 (+2629ms) |",
+    "| 3a. reader on pre-ingest state, NEWEST-FIRST               | processed=100 buffered=0 deferred=0 own_echo=250 ignored=0 local=0 stale=150 rejected=0 other=0 delivered=100 (+1246ms) |",
+    "| 4. mid-ingest restart of B (125 + 125 ascending)           | processed=250 buffered=0 deferred=0 own_echo=0 ignored=0 local=0 stale=0 rejected=0 other=0 delivered=250 dups=0 (+990ms) |",
+    "| 4b. A reads the same backlog ascending                     | processed=250 buffered=0 deferred=0 own_echo=250 ignored=0 local=0 stale=0 rejected=0 other=0 delivered=250 (+821ms) |",
+    "| 5. A added C; three-way messages readable                  | epoch=2 members=3 (+6047ms) |",
+    "| 6. A removed B; post-removal msg unreadable by B           | members=2 (+96743ms) |",
+    "| 7. publish_failed + retry keeps group consistent           | epoch=4 (+202893ms) |",
+    "| relay events stored                                        | 512 (+0ms) |",
+    "| scenario total                                             | 311741ms |",
+    "| api ingest                                                 | n=6299 total=298727ms med=47.42ms |",
+    "| api advance                                                | n=40 total=8422ms med=210.55ms |",
+    "| api send                                                   | n=508 total=2739ms med=5.39ms |",
+    "| api confirmPublished                                       | n=3 total=445ms med=148.36ms |",
+    "| api publishFailed                                          | n=1 total=214ms med=213.74ms |",
+    "| api drainEvents                                            | n=15 total=75ms med=4.98ms |"
+  ],
+  "wasmSize": {
+    "bindgen": {
+      "raw": 5660049,
+      "gzip9": 2537879,
+      "brotli11": 2141934
+    },
+    "wasmOptOz": {
+      "raw": 5079914,
+      "gzip9": 2672453,
+      "brotli11": 2241171
+    },
+    "jsGlue": {
+      "raw": 37175,
+      "gzip9": 7832
+    }
+  },
+  "keyPackageMs": {
+    "n": 24,
+    "median": 1.6849999999976717,
+    "times": [
+      3.219915999972727,
+      2.371458999987226,
+      1.9072500000474975,
+      2.1512089999741875,
+      2.176458999980241,
+      1.974832999985665,
+      2.610041000007186,
+      1.7632079999893904,
+      1.688750000030268,
+      1.9422090000007302,
+      1.7257499999832362,
+      1.4844159999629483,
+      1.3520830000052229,
+      1.3333330000168644,
+      1.6341249999823049,
+      1.284250000026077,
+      1.303124999976717,
+      1.3130420000525191,
+      1.2701250000391155,
+      1.3785829999833368,
+      1.2655829999712296,
+      1.2708340000244789,
+      1.6849999999976717,
+      1.2607909999787807
+    ]
+  },
+  "ingestMs": {
+    "events": 507,
+    "totalMs": 255.08425000001444,
+    "perMessageMs": 0.503124753451705
+  },
+  "create50Ms": 505.90379199996823,
+  "welcomeJoin50Ms": 41.31279200001154,
+  "add1CommitMs": 25.876625000033528,
+  "add1IngestMs": 0.16049999999813735,
+  "memory": {
+    "rss": 660194600,
+    "heapUsed": 178147335,
+    "wasmBufferBytes": 58851328
+  }
+}

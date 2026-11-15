@@ -1,0 +1,12 @@
+{
+  "name": "marmot-spike-js",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "devDependencies": {
+    "@qntx/nostr": "0.15.4",
+    "binaryen": "132.0.0",
+    "playwright": "1.65.0",
+    "ws": "8.18.3"
+  }
+}

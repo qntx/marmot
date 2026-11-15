@@ -1,0 +1,37 @@
+[11:18:48] relay: ws://127.0.0.1:45670
+[11:18:48] wn account exists: npub1qpcg6k4mkasd7vlvd466s7nq8hx5p2yxc22u30rn7ue5pm4jeyas5ajks8
+[11:18:48] wn pubkey: 00708d5abbb760df33ec6d75a87a603dcd40a886c295c8bc73f73340eeb2c93b
+[11:18:48] wn keys publish: {"account_id":"00708d5abbb760df33ec6d75a87a603dcd40a886c295c8bc73f73340eeb2c93b","key_package_bytes":472,"npub":"npub1qpcg6k4mkasd7vlvd466s7nq8hx5p2yxc22u30rn7ue5pm4jeyas5ajks8"}
+[11:18:48] spike A inbox relay list + key package published
+[11:18:48] wn KP event fef69eb8b2fd… fetched (1)
+[11:18:48] spike A created group gid=b58959d1bd213231… welcome+commit published (47ms)
+[11:18:51] wn invite group_id=b58959d1bd2132315cbb8d7a096756a6
+[11:18:51] wn accepted invite
+[11:18:54] wn roster settled (2 members) + 3s fanout settle
+[11:18:54] spike sees 2 members (incl. wn)
+[11:18:54] wn sent message
+[11:18:54] spike decoded wn message: {"decoded":{"author":"00708d5abbb760df33ec6d75a87a603dcd40a886c295c8bc73f73340eeb2c93b","content":"hello-from-wn","createdAt":1794741534,"kind":9},"epoch":1,"groupId":"b58959d1bd2132315cbb8d7a096756a6","messageId":"4585e0f64405d721cc63cc02a096a828c22638b8705d0cdc828b04efe49c9d87","payload":"eyJpZCI6
+[11:18:54] spike sent message
+[11:18:54] wn decoded spike message: {"direction":"received","from":"02cbdf221280d1b65655286a2e6a71a89e94e26048f70b913669c6d06d7f7205","from_display_name":null,"group_id":"b58959d1bd2132315cbb8d7a096756a6","kind":9,"message_id":"8f24190fcb8254241c7755cc91930594cebd096813b06d446f05146ab1167611","plaintext":"hello-from-spike","received_a
+[11:18:54] spike A npub: npub1qt9a7gsjsrgmv4j49p4zu6n34z0ffcnqfrmshyfkd8rdqmtlwgzsgk5x03
+[11:18:54] wn created group gid2=e9e7f897ff6a4d3daab6c7c1fd2ebf9a
+[11:18:54] spike ingest welcome: {"outcome":"processed"}
+[11:18:54] spike joined group: members(e9e7f897ff6a…)=["00708d5abbb760df33ec6d75a87a603dcd40a886c295c8bc73f73340eeb2c93b","02cbdf221280d1b65655286a2e6a71a89e94e26048f70b913669c6d06d7f7205"] — same MLS group id
+[11:18:57] wn decoded s2 spike message
+[11:18:57] spike decoded wn s2 message
+[11:18:58] wn sent 25 messages in 951ms
+[11:18:58] spike sent 475 messages (h=345c01c42872…)
+[11:18:59] spike ingested 502 events ascending in 42ms (processed=25, wn bulk msgs decoded=25/25)
+[11:19:02] wn sees 475 spike bulk messages
+[11:19:02] spike C joined group 1: 3 members
+[11:19:03] C reads post-removal message: 1 delivery(ies); wn removed from roster on both spike members
+[11:19:08] wn groups members after removal: ok=true still-listed=false
+[11:19:08] wn sees post-removal plaintext: false (expected false)
+[11:19:08] wn removed spike A from group 2
+[11:19:08] spike A observes own removal: members(gid2)=["00708d5abbb760df33ec6d75a87a603dcd40a886c295c8bc73f73340eeb2c93b"]
+[11:19:08] bare-capability spike D KP + inbox published
+[11:19:08] wn create with bare KP: ok=false {"error":{"code":"missing_required_capabilities","had":"GroupCapabilities { proposals: {1, 2, 3, 4, 5, 6, 7, 8}, extensions: {1, 2, 3, 4, 5, 6}, app_components: AppComponentSet { ids: {1, 32769, 32771, 32777, 32780} } }","message":"missing required capabilities: required=GroupCapabilities { proposals: {8, 10}, extensions: {6, 62161}, app_components: AppComponentSet { ids: {32769, 32771, 32772, 327
+[11:19:08] s4 wn created group with all-but-0x800d founder: ok=true gid=b86408fa31c27cadb57c00edd02d2194
+[11:19:09] s4 wn add all-but-0x800d member to group 2: ok=false {"error":{"code":"missing_required_capabilities","had":"GroupCapabilities { proposals: {1, 2, 3, 4, 5, 6, 7, 8, 10}, extensions: {1, 2, 3, 4, 5, 6, 62161, 62162, 62164}, app_components: AppComponentSet { ids: {1, 32769, 32771, 32772, 32774, 32777, 32779, 32780} } }","message":"missing required capabilities: required=GroupCapabilities { proposals: {8, 10}, extensions: {6, 62161}, app_components: Ap
+[11:19:09] s4 confirmed: 0x800d required exactly when founding KPs advertise it — fresh group accepted E, group 2 refused E
+[11:19:09] {"scenario1":"PASS","scenario2":"PASS","scenario3":"PASS","scenario4":"PASS"}

@@ -1,0 +1,5 @@
+js/pkg/
+js/web/dist/
+results/*.wasm
+wasm/pkg/
+!results/*.log
