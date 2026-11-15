@@ -1,7 +1,32 @@
 [workspace]
-members  = []
-exclude  = ["spike"]
+members  = ["crates/mk-core"]
+exclude  = ["spike", "crates/interop", "fuzz"]
 resolver = "3"
+
+
+[workspace.dependencies]
+base64    = "0.22"
+getrandom = "0.3"
+hex       = "0.4"
+# MDK at the pinned tag v0.16.0 (upstream.json "mdk").
+cgka-traits            = { git = "https://github.com/marmot-protocol/mdk", rev = "a2e0558a634bbd20607cdd5afb93abc6220ee58d", version = "=0.16.0" }
+cgka-engine            = { git = "https://github.com/marmot-protocol/mdk", rev = "a2e0558a634bbd20607cdd5afb93abc6220ee58d", version = "=0.16.0" }
+storage-sqlite         = { git = "https://github.com/marmot-protocol/mdk", rev = "a2e0558a634bbd20607cdd5afb93abc6220ee58d", version = "=0.16.0", features = ["test-support"] }
+transport-nostr-peeler = { git = "https://github.com/marmot-protocol/mdk", rev = "a2e0558a634bbd20607cdd5afb93abc6220ee58d", version = "=0.16.0" }
+# Same exact sources as MDK's workspace so the OpenMLS types unify.
+openmls             = { git = "https://github.com/openmls/openmls.git", rev = "6100df3fb1d8c3eeab53e349fcbd621f98c44fe2", version = "=0.9.0", features = ["extensions-draft"] }
+openmls_rust_crypto = { git = "https://github.com/openmls/openmls.git", rev = "6100df3fb1d8c3eeab53e349fcbd621f98c44fe2", version = "=0.6.0", features = ["extensions-draft"] }
+openmls_traits      = { git = "https://github.com/openmls/openmls.git", rev = "6100df3fb1d8c3eeab53e349fcbd621f98c44fe2", version = "=0.6.0", features = ["extensions-draft"] }
+# The erskingardner/rust-nostr fork MDK requires; crates.io `nostr` types
+# do not unify with the ones MDK exposes.
+nostr      = { git = "https://github.com/erskingardner/rust-nostr", rev = "e93cc06b5624f06c21ecd8111a124176eb0c7589", version = "=0.45.5", default-features = false, features = ["std", "rand", "os-rng", "nip04", "nip49", "nip59"] }
+serde      = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2       = "0.10"
+thiserror  = "2"
+zeroize    = "1"
+proptest   = "1"
+tokio      = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
 
 [workspace.package]
 version      = "0.0.0"
