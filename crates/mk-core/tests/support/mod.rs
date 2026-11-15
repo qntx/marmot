@@ -16,7 +16,8 @@
     clippy::significant_drop_tightening,
     unreachable_pub,
     clippy::unused_async,
-    reason = "test harness code"
+    dead_code,
+    reason = "test harness code; each consumer uses a subset"
 )]
 
 use std::collections::BTreeMap;
@@ -112,15 +113,20 @@ pub fn welcomes_for(relay: &FakeRelay, url: &str, account_hex: &str) -> Vec<Even
     })
 }
 
-/// The newest kind-`30443` `KeyPackage` event authored by `account`.
-pub fn key_package_of(relay: &FakeRelay, url: &str, account_hex: &str) -> Event {
+/// The newest kind-`30443` `KeyPackage` event authored by `account`, if
+/// any was published.
+pub fn maybe_key_package_of(relay: &FakeRelay, url: &str, account_hex: &str) -> Option<Event> {
     relay
         .fetch(url, move |event| {
             event.kind == 30_443 && event.pubkey.to_hex() == account_hex
         })
         .into_iter()
         .next()
-        .expect("account published a KeyPackage")
+}
+
+/// The newest kind-`30443` `KeyPackage` event authored by `account`.
+pub fn key_package_of(relay: &FakeRelay, url: &str, account_hex: &str) -> Event {
+    maybe_key_package_of(relay, url, account_hex).expect("account published a KeyPackage")
 }
 
 /// The relay URLs an account's newest kind-10050 lists.
@@ -161,7 +167,8 @@ impl Member {
     }
 }
 
-fn session_config(
+/// The shared `SessionConfig` used by [`open_member`] / [`reopen_member`].
+pub fn session_config(
     signer: Arc<LocalSigner>,
     clock: Arc<ManualClock>,
     host: Arc<RecordingHost>,
