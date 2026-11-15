@@ -83,6 +83,8 @@ export interface LocalMemberOpts {
   keys: Keys;
   backend: KvBackend;
   nowMs?: number;
+  bareCapabilities?: boolean;
+  omitComponents?: number[];
 }
 
 /**
@@ -97,6 +99,8 @@ export class LocalMember implements MemberDriver {
   private pendingCommits: Promise<void> = Promise.resolve();
   private Client: any;
   private nowMs?: number;
+  private bareCapabilities?: boolean;
+  private omitComponents?: number[];
   readonly timings: Record<string, { n: number; ms: number }> = {};
 
   private async timed<T>(name: string, f: () => Promise<T>): Promise<T> {
@@ -115,6 +119,8 @@ export class LocalMember implements MemberDriver {
     this.keys = opts.keys;
     this.backend = opts.backend;
     this.nowMs = opts.nowMs;
+    this.bareCapabilities = opts.bareCapabilities;
+    this.omitComponents = opts.omitComponents;
   }
 
   static async open(opts: LocalMemberOpts): Promise<LocalMember> {
@@ -128,6 +134,8 @@ export class LocalMember implements MemberDriver {
       onCommit,
       signer: makeJsSigner(opts.keys),
       nowMs: opts.nowMs,
+      bareCapabilities: opts.bareCapabilities,
+      omitComponents: opts.omitComponents,
     });
     await m.flush();
     return m;

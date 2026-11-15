@@ -562,6 +562,18 @@ impl Client {
             .ok()
             .and_then(|v| v.as_f64())
             .map(|v| v as u64);
+        // bareCapabilities: publish only the engine-default component set —
+        // used to prove which capabilities wn actually requires of members.
+        let bare = Reflect::get(&opts, &JsValue::from_str("bareCapabilities"))
+            .ok()
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        // omitComponents: drop these ids from the advertised set — used to
+        // build a key package missing exactly one required component.
+        let omit: Vec<u16> = Reflect::get(&opts, &JsValue::from_str("omitComponents"))
+            .ok()
+            .and_then(|v| serde_wasm_bindgen::from_value(v).ok())
+            .unwrap_or_default();
 
         let entries_hex: Vec<(String, String)> =
             serde_wasm_bindgen::from_value(entries_v).map_err(err)?;
@@ -595,12 +607,20 @@ impl Client {
         });
         let peeler = NostrMlsPeeler::new().with_welcome_signer_arc(signer.clone());
         let clock = Arc::new(ManualConvergenceClock::new(0, 0));
-        let mut engine = EngineBuilder::new(provider.clone())
+        let mut builder = EngineBuilder::new(provider.clone())
             .identity(pubkey_bytes.to_vec())
             .account_identity_proof_signer(signer)
-            .protocol_profile(ProtocolProfile::Current)
-            .supported_app_components(supported_components())
-            .feature_registry(supported_features())
+            .protocol_profile(ProtocolProfile::Current);
+        if !bare {
+            let advertised: Vec<u16> = supported_components()
+                .into_iter()
+                .filter(|id| !omit.contains(id))
+                .collect();
+            builder = builder
+                .supported_app_components(advertised)
+                .feature_registry(supported_features());
+        }
+        let mut engine = builder
             .peeler(Box::new(peeler))
             .convergence_clock(clock.clone())
             .maintenance_sources(

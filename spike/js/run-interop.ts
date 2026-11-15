@@ -1,6 +1,7 @@
 // White Noise (wn/wnd at MDK v0.16.0) ↔ spike wasm client interop.
 // `bun spike/js/run-interop.ts` — a real WebSocket relay + the installed
 // wn binaries; logs to spike/results/interop-*.log via WN_LOG env.
+// Every claimed result is asserted; a failure exits non-zero.
 import init, { Client } from "../wasm/pkg/marmot_spike_wasm.js";
 import { serveFakeRelay } from "@qntx/nostr/testing";
 import { nip19Decode, npubEncode, signEvent } from "@qntx/nostr";
@@ -17,6 +18,10 @@ const log = (s: string) => {
   console.log(line);
   appendFileSync(LOG, line + "\n");
 };
+
+function assert(cond: unknown, what: string): asserts cond {
+  if (!cond) throw new Error(`assert failed: ${what}`);
+}
 
 const wnEnv = {
   ...process.env,
@@ -39,6 +44,26 @@ async function wn(...args: string[]): Promise<any> {
     return JSON.parse(out);
   } catch {
     throw new Error(`wn ${args.join(" ")} non-JSON: ${out.slice(0, 300)}`);
+  }
+}
+
+// wn variant that returns the parsed error payload instead of throwing —
+// used where a refusal IS the expected evidence.
+async function wnTry(...args: string[]): Promise<{ ok: boolean; parsed: any }> {
+  const p = Bun.spawn([WN, "--json", ...args], {
+    env: wnEnv,
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const out = await new Response(p.stdout).text();
+  const err = await new Response(p.stderr).text();
+  await p.exited;
+  const text = out || err;
+  try {
+    const parsed = JSON.parse(text);
+    return { ok: parsed?.ok === true, parsed };
+  } catch {
+    return { ok: false, parsed: { raw: text.slice(0, 500) } };
   }
 }
 
@@ -67,8 +92,14 @@ const publish = (ev: any) => {
   void relay.publish(ev);
   return true;
 };
-const mkMember = async (seed: string) =>
-  LocalMember.open({ Client, keys: await accountKeys(seed), backend: new MapBackend() });
+const mkMember = async (seed: string, opts: { bare?: boolean; omit?: number[] } = {}) =>
+  LocalMember.open({
+    Client,
+    keys: await accountKeys(seed),
+    backend: new MapBackend(),
+    bareCapabilities: opts.bare,
+    omitComponents: opts.omit,
+  });
 
 // wn requires invitees to publish a Marmot inbox relay list (kind 10050,
 // ["relay", url] tags, empty content — transport-nostr-adapter/relay_list.rs).
@@ -110,11 +141,11 @@ log(`wn keys publish: ${JSON.stringify(kpPub.result ?? kpPub).slice(0, 200)}`);
 
 // ---- scenario 1: spike creates group, invites wn ----------------------------
 const a = await mkMember("interop-a");
+const aMemberId = await a.memberId();
 const kpA = await a.publishKeyPackage();
 await relay.publish(kpA);
 await publishInbox(a, relayUrl);
-log("spike A inbox relay list published");
-log("spike A key package published");
+log("spike A inbox relay list + key package published");
 
 // fetch wn's key package from the relay (published by create-identity)
 const wnKps = await until(async () => {
@@ -137,7 +168,8 @@ const invite: any = await until(async () => {
   return arr.length ? arr[0] : false;
 }, "wn groups invites non-empty", 90000);
 const wnGid1 = invite.group_id ?? invite.id;
-log(`wn invite: ${JSON.stringify(invite).slice(0, 400)}`);
+log(`wn invite group_id=${wnGid1}`);
+assert(wnGid1 === gid1, `s1 group id match: spike=${gid1} wn=${wnGid1}`);
 
 await wn("--account", wnAcct, "groups", "accept", wnGid1);
 log("wn accepted invite");
@@ -163,7 +195,10 @@ await until(async () => {
   const mem = await a.members(gid1);
   return mem.length >= 2 ? mem : false;
 }, "spike sees wn as member");
-log("spike sees 2 members");
+const s1Members = await a.members(gid1);
+assert(s1Members.length === 2, `s1 spike sees 2 members, got ${s1Members.length}`);
+assert(s1Members.includes(wnPub), `s1 spike roster contains wn ${wnPub}`);
+log("spike sees 2 members (incl. wn)");
 
 // bidirectional messages: wn → spike
 await wn("--account", wnAcct, "messages", "send", wnGid1, "hello-from-wn");
@@ -200,7 +235,8 @@ const aNpub = npubEncode(aPk);
 log(`spike A npub: ${aNpub}`);
 const g2 = await wn("--account", wnAcct, "groups", "create", "interop-2", aNpub);
 const gid2 = g2.result?.group_id ?? g2.result?.id;
-log(`wn created group gid2=${gid2} : ${JSON.stringify(g2.result).slice(0, 300)}`);
+assert(typeof gid2 === "string" && gid2.length > 0, `s2 wn group id, got ${gid2}`);
+log(`wn created group gid2=${gid2}`);
 
 // spike picks up the gift-wrapped welcome addressed to A
 const wel = await until(async () => {
@@ -209,30 +245,28 @@ const wel = await until(async () => {
 }, "gift wrap for spike A", 90000);
 const joinOutcome = await a.ingest(wel[wel.length - 1]);
 log(`spike ingest welcome: ${JSON.stringify(joinOutcome).slice(0, 200)}`);
-const drained2 = await a.drainEvents();
-const joined = drained2.find((d: any) => JSON.stringify(d).includes("groupJoined") || JSON.stringify(d).includes("GroupJoined"));
-const gid2Spike = (() => {
-  for (const d of drained2) {
-    const g = (d as any).groupId;
-    if (g && g !== gid1) return g;
-  }
-  return undefined;
-})();
-log(`spike joined group: gid2Spike=${gid2Spike} (wn gid2=${gid2})`);
-if (!gid2Spike || gid2Spike !== gid2) log(`!! gid mismatch spike=${gid2Spike} wn=${gid2}`);
+assert(joinOutcome.outcome === "processed", `s2 welcome processed, got ${JSON.stringify(joinOutcome)}`);
+
+// "same group id": the spike engine is keyed by MLS group id; if the roster
+// resolves under wn's gid2, the spike joined exactly that group.
+const s2Members = await until(async () => {
+  const mem = await a.members(gid2).catch(() => null);
+  return mem && mem.length >= 2 ? mem : false;
+}, "spike roster under wn gid2", 60000);
+assert(
+  s2Members.includes(wnPub) && s2Members.includes(aMemberId),
+  `s2 same group id: spike members(gid2)=${JSON.stringify(s2Members)} wn=${wnPub} self=${aMemberId}`,
+);
+log(`spike joined group: members(${gid2.slice(0, 12)}…)=${JSON.stringify(s2Members)} — same MLS group id`);
 
 // let wnd install group-2 subscriptions (same settle as scenario 1)
 await sleep(3000);
 
 // spike → wn in group 2
 const r2 = await a.send(gid2, { type: "appMessage", content: "s2-hello-from-spike", createdAt: Math.floor(Date.now() / 1000) });
-log(`s2 send result: events=${r2.events?.length} pending=${JSON.stringify(r2.pending ?? null).slice(0, 80)}`);
+assert((r2.events?.length ?? 0) > 0, `s2 send produced an event: ${JSON.stringify(r2).slice(0, 200)}`);
 await publishResult(a, r2, publish);
-const nFlush = await flushOutbound(a, gid2, publish);
-log(`s2 flush published ${nFlush} events`);
-await relay.fetchRemote({ kinds: [KIND_GROUP_MESSAGE] });
-const s2Evs = relay.fetchAsc(KIND_GROUP_MESSAGE).filter((e: any) => e.tags?.some((t: string[]) => t[0] === "h"));
-log(`relay kind-445 events: ${s2Evs.length}`);
+await flushOutbound(a, gid2, publish);
 await until(async () => {
   const r = await wn("--account", wnAcct, "messages", "list", gid2, "--limit", "20");
   const arr = Array.isArray(r.result) ? r.result : (r.result?.messages ?? r.result?.items ?? []);
@@ -288,6 +322,7 @@ await flushOutbound(a, gid1, publish);
 const bulkDrained = await a.drainEvents();
 const wnBulkGot = bulkDrained.filter((d: any) => JSON.stringify(d).includes("bulk-wn-")).length;
 log(`spike ingested ${backlog.length} events ascending in ${Date.now() - tIngest}ms (processed=${delivered}, wn bulk msgs decoded=${wnBulkGot}/${WN_MSGS})`);
+assert(wnBulkGot === WN_MSGS, `s3 spike decoded ${WN_MSGS}/25 wn bulk messages, got ${wnBulkGot}`);
 
 // wn reads the spike's bulk messages
 const wnList = await until(async () => {
@@ -296,6 +331,7 @@ const wnList = await until(async () => {
   const found = arr.filter((m: any) => JSON.stringify(m).includes("bulk-spike-")).length;
   return found >= SPIKE_MSGS ? found : false;
 }, `wn sees ${SPIKE_MSGS} spike messages`, 120000);
+assert(wnList === SPIKE_MSGS, `s3 wn decoded ${SPIKE_MSGS}/475 spike messages, got ${wnList}`);
 log(`wn sees ${wnList} spike bulk messages`);
 
 // spike A adds a second spike member (C) to group 1
@@ -303,13 +339,21 @@ const c = await mkMember("interop-c");
 const kpC = await c.publishKeyPackage();
 await relay.publish(kpC);
 await publishInbox(c, relayUrl);
-log("spike C inbox relay list published");
 const inv = await a.send(gid1, { type: "invite", keyPackageEvents: [kpC] });
 await publishResult(a, inv, publish);
 await flushOutbound(a, gid1, publish);
 const cWel = await relay.fetchRemote({ kinds: [KIND_GIFT_WRAP], "#p": [c.keys.publicKey] });
-await c.ingest(cWel[cWel.length - 1]);
-log(`spike C joined group 1: ${JSON.stringify(await c.members(gid1)).slice(0, 200)}`);
+assert(cWel.length > 0, "s3 C welcome gift wrap on relay");
+const cJoin = await c.ingest(cWel[cWel.length - 1]);
+assert(cJoin.outcome === "processed", `s3 C join processed, got ${JSON.stringify(cJoin)}`);
+// C must ingest its add-commit and settle convergence before it can read —
+// same per-member flush the shared scenario does after every ingest pass.
+await relay.fetchRemote({ kinds: [KIND_GROUP_MESSAGE] });
+for (const ev of relay.fetchAsc(KIND_GROUP_MESSAGE, g1h)) await c.ingest(ev);
+await flushOutbound(c, gid1, publish);
+const cMembers = await c.members(gid1);
+assert(cMembers.length === 3, `s3 C sees 3 members, got ${JSON.stringify(cMembers)}`);
+log(`spike C joined group 1: 3 members`);
 
 // spike removes wn from group 1
 const rmWn = await a.send(gid1, { type: "removeMembers", memberIds: [wnPub] });
@@ -318,19 +362,34 @@ await flushOutbound(a, gid1, publish);
 const postRm = await a.send(gid1, { type: "appMessage", content: "post-removal-secret", createdAt: 1_800_100_000 });
 await publishResult(a, postRm, publish);
 await flushOutbound(a, gid1, publish);
+
+// A and C converge on the removal, then C must read the post-removal msg.
 await relay.fetchRemote({ kinds: [KIND_GROUP_MESSAGE] });
+for (const ev of relay.fetchAsc(KIND_GROUP_MESSAGE, g1h)) await a.ingest(ev);
+await flushOutbound(a, gid1, publish);
 for (const ev of relay.fetchAsc(KIND_GROUP_MESSAGE, g1h)) await c.ingest(ev);
+await flushOutbound(c, gid1, publish);
+const aAfter = await a.members(gid1);
+assert(aAfter.length === 2 && !aAfter.includes(wnPub), `s3 A sees wn removed, members=${JSON.stringify(aAfter)}`);
+const cAfter = await c.members(gid1);
+assert(cAfter.length === 2 && !cAfter.includes(wnPub), `s3 C sees wn removed, members=${JSON.stringify(cAfter)}`);
 const cDrained = await c.drainEvents();
-const cGot = cDrained.some((d: any) => JSON.stringify(d).includes("post-removal-secret"));
-log(`C reads post-removal message: ${cGot}`);
+const cGot = cDrained.filter((d: any) => JSON.stringify(d).includes("post-removal-secret")).length;
+assert(cGot >= 1, `s3 C decodes post-removal-secret (got ${cGot})`);
+log(`C reads post-removal message: ${cGot} delivery(ies); wn removed from roster on both spike members`);
 
 // wn observes removal + cannot read post-removal content
 await sleep(5000); // let wnd ingest the removal commit
-const wnAfter = await wn("--account", wnAcct, "groups", "members", wnGid1).catch((e: Error) => ({ err: String(e) }));
-log(`wn members after removal: ${JSON.stringify(wnAfter).slice(0, 300)}`);
-const wnMsgsAfter = await wn("--account", wnAcct, "messages", "list", wnGid1, "--limit", "600").catch((e: Error) => ({ err: String(e) }));
-const leaked = JSON.stringify(wnMsgsAfter).includes("post-removal-secret");
-log(`wn sees post-removal plaintext: ${leaked}`);
+const wnAfter = await wnTry("--account", wnAcct, "groups", "members", wnGid1);
+const wnMemberList = wnAfter.parsed?.result?.members ?? wnAfter.parsed?.result ?? [];
+const wnStillListed =
+  Array.isArray(wnMemberList) && wnMemberList.some((m: any) => JSON.stringify(m).includes(wnPub));
+log(`wn groups members after removal: ok=${wnAfter.ok} still-listed=${wnStillListed}`);
+assert(!wnStillListed, `s3 wn no longer in group-1 roster: ${JSON.stringify(wnMemberList).slice(0, 200)}`);
+const wnMsgsAfter = await wnTry("--account", wnAcct, "messages", "list", wnGid1, "--limit", "600");
+const leaked = JSON.stringify(wnMsgsAfter.parsed).includes("post-removal-secret");
+assert(!leaked, `s3 wn cannot read post-removal-secret`);
+log(`wn sees post-removal plaintext: ${leaked} (expected false)`);
 
 // wn (admin in group 2) removes spike A
 await wn("--account", wnAcct, "groups", "remove-members", gid2, aNpub);
@@ -338,23 +397,74 @@ log("wn removed spike A from group 2");
 await until(async () => {
   await relay.fetchRemote({ kinds: [KIND_GROUP_MESSAGE] });
   for (const ev of relay.fetchAsc(KIND_GROUP_MESSAGE)) await a.ingest(ev);
+  // removal commits are Buffered — drive convergence before checking
   await flushOutbound(a, gid2, publish).catch(() => 0);
-  const mem = await a.members(gid2).catch(() => []);
-  return mem.length === 0 || (await a.drainEvents()).length > 0 ? true : false;
-}, "spike observes own removal", 60000);
-log(`spike A members(gid2) after removal: ${JSON.stringify(await a.members(gid2).catch(() => "err"))}`);
+  const mem = await a.members(gid2).catch(() => null);
+  // A is out when the roster drops its member id — or the group is gone
+  // entirely (members() errors on a removed-from group).
+  if (mem === null) return [] as string[];
+  return !mem.includes(aMemberId) ? mem : false;
+}, "spike observes own removal from group 2", 90000);
+const aGid2After = await a.members(gid2).catch(() => [] as string[]);
+assert(
+  !aGid2After.includes(aMemberId),
+  `s3 spike A out of group-2 roster: ${JSON.stringify(aGid2After)}`,
+);
+log(`spike A observes own removal: members(gid2)=${JSON.stringify(aGid2After)}`);
 results.scenario3 = "PASS";
 
 // ---- scenario 4: 0x800d account-devices requirement ------------------------
-const show = await wn("--account", wnAcct, "groups", "show", gid2).catch((e: Error) => ({ err: String(e) }));
-const showStr = JSON.stringify(show);
-log(`groups show gid2 components: ${showStr.slice(0, 400)}`);
-// Evidence for 0x800d being required is the earlier preflight error:
-// wn refused the invite with missing_required_capabilities listing
-// app_components {…,32781(0x800d),…}; the join only succeeded after the
-// spike advertised it. `groups show` prints group app-data, where
-// account-devices correctly does not appear (member-level capability).
-results.scenario4 = "PASS: wn required_components incl. 0x800d (see INTEROP.md)";
+// Direct in-run evidence: a spike member D publishing the engine-default
+// (bare) capability set must be refused by wn's preflight, and the refusal
+// must name 0x800d (32781). Member A — same engine with 0x800d advertised —
+// joined group 2 in scenario 2.
+const d = await mkMember("interop-d", { bare: true });
+const kpD = await d.publishKeyPackage();
+await relay.publish(kpD);
+await publishInbox(d, relayUrl);
+const dNpub = npubEncode(d.keys.publicKey);
+log("bare-capability spike D KP + inbox published");
+
+const refused = await wnTry("--account", wnAcct, "groups", "create", "interop-4", dNpub);
+const refusalStr = JSON.stringify(refused.parsed);
+log(`wn create with bare KP: ok=${refused.ok} ${refusalStr.slice(0, 400)}`);
+assert(!refused.ok, "s4 wn refused the bare-capability invitee");
+assert(
+  refusalStr.includes("missing_required_capabilities"),
+  `s4 refusal is missing_required_capabilities: ${refusalStr.slice(0, 200)}`,
+);
+// 0x800d is CONDITIONALLY required (mdk: do_create_group requires
+// account-devices exactly when every founding KeyPackage advertises it).
+// Proof, in-run:
+//  (a) member E advertises everything EXCEPT 0x800d → wn accepts a fresh
+//      group (requirement dropped for non-advertising founders);
+//  (b) adding the SAME E to group 2 — created while founder A advertised
+//      0x800d — is refused, isolating 0x800d as the required component.
+const e = await mkMember("interop-e", { omit: [0x800d] });
+const kpE = await e.publishKeyPackage();
+await relay.publish(kpE);
+await publishInbox(e, relayUrl);
+const eNpub = npubEncode(e.keys.publicKey);
+
+const freshE = await wnTry("--account", wnAcct, "groups", "create", "interop-4e", eNpub);
+assert(freshE.ok, `s4 fresh group accepts non-0x800d founder: ${JSON.stringify(freshE.parsed).slice(0, 300)}`);
+const eGid = freshE.parsed?.result?.group_id ?? freshE.parsed?.result?.id;
+log(`s4 wn created group with all-but-0x800d founder: ok=true gid=${eGid}`);
+
+const addE = await wnTry("--account", wnAcct, "groups", "add-members", gid2, eNpub);
+const addStr = JSON.stringify(addE.parsed);
+log(`s4 wn add all-but-0x800d member to group 2: ok=${addE.ok} ${addStr.slice(0, 400)}`);
+assert(!addE.ok, "s4 wn refused 0x800d-less member for group 2");
+assert(
+  addStr.includes("missing_required_capabilities"),
+  `s4 add refusal is missing_required_capabilities: ${addStr.slice(0, 200)}`,
+);
+const eHad = addE.parsed?.error?.had ?? "";
+assert(eHad.includes("32779"), `s4 E advertised 0x800b: ${eHad.slice(0, 300)}`);
+assert(eHad.includes("32774"), `s4 E advertised 0x8006: ${eHad.slice(0, 300)}`);
+assert(!eHad.includes("32781"), `s4 E lacked only 0x800d: ${eHad.slice(0, 300)}`);
+log("s4 confirmed: 0x800d required exactly when founding KPs advertise it — fresh group accepted E, group 2 refused E");
+results.scenario4 = "PASS";
 
 log(JSON.stringify(results));
 relay.close();
