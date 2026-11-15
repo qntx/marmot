@@ -1,0 +1,73 @@
+{
+  "name": "@qntx/marmot",
+  "version": "0.0.0",
+  "description": "Marmot (MLS over Nostr) SDK for web, iOS and Android",
+  "keywords": [
+    "marmot",
+    "mls",
+    "nostr",
+    "sdk",
+    "typescript"
+  ],
+  "homepage": "https://github.com/qntx/marmot#readme",
+  "bugs": {
+    "url": "https://github.com/qntx/marmot/issues"
+  },
+  "license": "MIT OR Apache-2.0",
+  "author": "QuantX <x@qntx.org>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/qntx/marmot.git",
+    "directory": "packages/marmot"
+  },
+  "files": [
+    "dist",
+    "LICENSE-MIT",
+    "LICENSE-APACHE"
+  ],
+  "type": "module",
+  "sideEffects": false,
+  "types": "./dist/index.d.mts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.mts",
+      "import": "./dist/index.mjs",
+      "default": "./dist/index.mjs"
+    },
+    "./core": {
+      "types": "./dist/core.d.mts",
+      "import": "./dist/core.mjs",
+      "default": "./dist/core.mjs"
+    },
+    "./package.json": "./package.json"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "vp pack",
+    "dev": "vp pack --watch",
+    "test": "vp test",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.src.json",
+    "check:pkg": "vp pack && publint && attw --pack . --profile esm-only",
+    "pack:local": "vp pack && bun pm pack"
+  },
+  "devDependencies": {
+    "@arethetypeswrong/cli": "0.18.5",
+    "@qntx/tsconfig": "1.0.1",
+    "@types/node": "26.6.5",
+    "publint": "0.3.25",
+    "typescript": "7.0.2",
+    "vite-plus": "1.4.0"
+  },
+  "devEngines": {
+    "packageManager": {
+      "name": "bun",
+      "version": "1.4.0",
+      "onFail": "ignore"
+    }
+  },
+  "engines": {
+    "node": ">=20.19.0"
+  }
+}
