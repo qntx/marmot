@@ -180,6 +180,15 @@ pub(crate) fn key_package_event(
             protocol_profile: cgka_traits::group::ProtocolProfile::Current,
         })
         .map_err(|_| KeyPackageError::Invalid)?;
+    // transports/nostr.md (and wn's `require_multi_value_key_package_tag_matches`):
+    // the tag advertises only private-use component ids; 0x0001
+    // (`app_components` itself) and other reserved ids stay out.
+    let private_components = |ids: &[u16]| -> Vec<u16> {
+        ids.iter()
+            .copied()
+            .filter(|id| *id >= cgka_traits::app_components::PRIVATE_USE_APP_COMPONENT_ID_START)
+            .collect()
+    };
     let hex_id_list =
         |ids: &[u16]| -> Vec<String> { ids.iter().map(|id| format!("0x{id:04x}")).collect() };
     let mut tags = vec![
@@ -197,7 +206,7 @@ pub(crate) fn key_package_event(
             .chain(hex_id_list(&metadata.mls_proposals))
             .collect(),
         std::iter::once(APP_COMPONENTS_TAG.to_owned())
-            .chain(hex_id_list(&metadata.app_components))
+            .chain(hex_id_list(&private_components(&metadata.app_components)))
             .collect(),
     ];
     if let Some(name) = client_name {
