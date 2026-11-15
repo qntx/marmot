@@ -1,0 +1,23 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  ci:
+    uses: qntx/workflows/.github/workflows/ci-bun.yml@v2
+    permissions:
+      contents: read
+    # bun run build → vp run -r build (no crates yet — cargo fmt/deny and the
+    # cross matrix get wired here when the first crate lands)
+    # bun run test → vp run -r test + repo-level scripts/*.test.ts
