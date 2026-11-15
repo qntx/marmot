@@ -141,30 +141,56 @@ Current artifact (profile.wasm, strip on) section profile
 | function `name` custom section | 498 | ≈0 |
 | producers | 60 | ≈0 |
 
-`strip` already removes function names and debug info — a prior unstripped
-twiggy run attributed ~4.15 MB to the `name` section, so `strip` is the
-single biggest cheap lever and is already in the profile. The remaining
-data section (~1.6 MB) is Rust metadata: source/panic paths, panic/assert
-strings, type and symbol paths, MLS/Marmot error strings, URL/encoding
-tables — not removable without code changes.
+`strip` already removes function names and debug info — the
+`wasm-named` profile (same build, `strip = false`, `debug = false`)
+keeps a 5 135 334-byte `name` section (47.6 % of the named artifact),
+so `strip` is the single biggest cheap lever and is already in the
+profile. The remaining data section (~1.6 MB) is Rust metadata:
+source/panic paths, panic/assert strings, type and symbol paths,
+MLS/Marmot error strings, URL/encoding tables — not removable without
+code changes.
 
-Crate-level attribution from the earlier unstripped twiggy run (largest
-first): `cgka-engine` + `cgka-traits` + `marmot-forensics`; `serde` /
-`serde_json` / `serde-wasm-bindgen` (MDK's serialization choice — our KV
-values add little); OpenMLS + RustCrypto/HPKE stack; the spike KV provider;
-`std`; the erskingardner `nostr` fork; `wasm-bindgen` glue.
+## Crate-level attribution (twiggy, `wasm-named`, all 19 464 rows)
+
+`twiggy top --format csv` on the post-bindgen named artifact
+(`target/pkg-named/marmot_spike_wasm_bg.wasm`, 10 792 860 B), aggregated
+by first crate token in each symbol path; generic instantiations count
+toward the crate of the type they instantiate. Raw CSV:
+`results/twiggy-named-all.csv`. Code section ≈ 4 053 590 B.
+
+| crate bucket | shallow bytes | % of code |
+|---|---|---|
+| std/core/support (std, alloc, hashbrown, misc support crates) | 1 062 100 | 26.2 % |
+| MDK (`cgka_engine`+`cgka_traits`+`marmot_forensics`+`transport_nostr_peeler`+`fs_private`) | 986 840 | 24.3 % |
+| serde stack (`serde`, `serde_json`, `serde_wasm_bindgen`, `serde_bytes`) | 841 171 | 20.8 % |
+| OpenMLS stack (`openmls` + traits/credential/memory-storage helpers) | 424 306 | 10.5 % |
+| RustCrypto/HPKE (dalek, p256/p384/k256, secp256k1 C, aes/chacha20, hpke-rs, libcrux) | 403 512 | 10.0 % |
+| **marmot_spike (ours: provider + binding)** | **191 008** | **4.7 %** |
+| url/idna/unicode (`url`, `idna`, `icu_*` via the nostr fork's URL parsing) | 44 366 | 1.1 % |
+| wasm-bindgen/JS glue | 32 958 | 0.8 % |
+| nostr fork (erskingardner) | 32 307 | 0.8 % |
+| tls_codec/postcard, encoding, time, tracing, futures, other | ~26 000 | <0.7 % |
 
 ## Levers measured (each number = a build actually run)
 
 | lever | raw | gzip -9 | brotli -11 | verdict |
 |---|---|---|---|---|
-| baseline bindgen (opt z) | 5 660 049 | 2 537 879 | 2 141 934 | best compressed artifact |
-| `wasm-opt -Os` (+feature flags) | 5 140 006 | 2 669 444 | 2 236 202 | raw −9 %, compressed +5 %: lose |
-| `wasm-opt -Oz` (+feature flags) | 5 079 852 | 2 671 696 | 2 241 506 | same, worse |
+| baseline bindgen (`opt-level = "z"`, strip) | 5 662 935 | 2 537 058 | 2 144 310 | **best compressed artifact** |
+| Rust `opt-level = "s"` (same profile otherwise) | 6 289 827 | 2 759 354 | 2 254 250 | strictly worse than `z` (+9 % gzip): lose |
+| Rust `opt-level = 3` (same profile otherwise) | 7 420 879 | 3 174 347 | 2 515 598 | much worse (+25 % gzip): lose |
+| `opt-level = "z"` WITHOUT strip (`wasm-named`) | 10 792 860 | 3 067 086 | 2 371 481 | strip saves ~5.1 MB raw / ~0.5 MB gzip |
+| `wasm-opt -Os` on the `z` build | 5 140 006 | 2 669 444 | 2 236 202 | raw −9 %, compressed +5 %: lose |
+| `wasm-opt -Oz` on the `z` build | 5 079 852 | 2 671 696 | 2 241 506 | same, worse |
 | `panic = "abort"` | — | — | — | no-op: wasm32 panic is abort already; `catch_unwind` appears only in MDK tests (`candidate_replay.rs`, `rewind_restore_fault.rs`), never in production code paths |
-| strip name/producers | (in profile) | — | — | already applied; ~4 MB saved vs unstripped |
 
-**Floor:** ≈ 5.6 MB raw / 2.54 MB gzip / 2.14 MB brotli as built. A ≤ 1.5 MB
-gzip artifact is **not** reachable without patching MDK itself — the headroom
-sits in MDK's own dependency graph (forensics, serde_json paths, OpenMLS
-feature surface), which a spike cannot prune from outside.
+**Floor:** 5.66 MB raw / **2.54 MB gzip** / 2.14 MB brotli as built. To hit
+1.5 MB gzip (≈ 3.3 MB raw at the observed ratio) the code section would
+have to shrink by ~2.2 MB raw — more than std/core (1.06 MB) + serde
+(0.84 MB) **combined**, and every one of those bytes is pulled in by MDK's
+own dependency graph (the engine needs serde + OpenMLS + RustCrypto; the
+nostr fork pulls url/idna). **Our own crate contributes 191 KB of code
+(4.7 %)** — deleting all of it would save well under 0.1 MB gzip. The
+1.5 MB threshold is therefore **not reachable without changing MDK
+itself** (e.g. a feature-gated lite engine surface, replacing
+`serde_json` event codecs, or pruning forensics), not through profile or
+post-processing knobs on our side.

@@ -70,9 +70,24 @@ Facts only. `mdk:` paths = MDK v0.16.0 source; `spike:` = this spike.
 3. `Promise::from(non-promise)` never resolves — JS async hooks must return
    real Promises.
 4. `getrandom` without `js` → trap at first RNG call — feature is on.
-5. No `SystemTime::now`/`Instant` traps: engine uses `web_time`.
-   `maintenance.rs:101` uses `SystemTime` — compiled only on non-wasm paths
-   (the wasm build links cleanly, so it is cfg'd or unused there).
+5. Clock calls audited across `cgka-engine` + `transport-nostr-peeler` +
+   `traits` (v0.16.0): **every production wall/monotonic clock goes through
+   `web_time`**, which is wasm-safe (`performance.now`/`Date.now`):
+   - `mdk:crates/cgka-engine/src/maintenance.rs:29,101` —
+     `use web_time::{SystemTime, UNIX_EPOCH}`; the `SystemTime::now()` at
+     :101 IS web_time's wasm-safe alias, not `std::time`. (Corrects an
+     earlier reading that flagged it as a possible trap.)
+   - `convergence_clock.rs:10,33,47`, `identity.rs:21,100`,
+     `message_processor/mod.rs:83` + all `Instant::now()` sites in that
+     file, `openmls_projection/resumable.rs:5,27,35,40` — all `web_time`.
+   - `transport-nostr-peeler/src/event.rs:11,300` — `web_time::SystemTime`.
+   - The only literal `std::time::SystemTime::now()` in the three crates is
+     `peeler.rs:986`, inside a `#[tokio::test]` — test-only, never in the
+     wasm artifact. `use std::time::Duration` sites are durations, not
+     clock reads.
+   Our Bun/Chromium flows exercised welcome wrap/peel, kind-445 wrap/peel,
+   key-package creation, commits and convergence — all green, consistent
+   with no reachable std clock on these paths.
 
 ## Sync storage + sync signer
 
