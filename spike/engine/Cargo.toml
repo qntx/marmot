@@ -1,0 +1,39 @@
+[workspace]
+members  = ["."]
+resolver = "3"
+
+[workspace.package]
+version      = "0.0.0"
+edition      = "2024"
+rust-version = "1.99"
+license      = "MIT OR Apache-2.0"
+publish      = false
+
+[package]
+name    = "marmot-spike"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+# MDK at the pinned tag v0.16.0 (upstream.json "mdk").
+cgka-traits            = { git = "https://github.com/marmot-protocol/mdk", rev = "a2e0558a634bbd20607cdd5afb93abc6220ee58d" }
+cgka-engine            = { git = "https://github.com/marmot-protocol/mdk", rev = "a2e0558a634bbd20607cdd5afb93abc6220ee58d" }
+transport-nostr-peeler = { git = "https://github.com/marmot-protocol/mdk", rev = "a2e0558a634bbd20607cdd5afb93abc6220ee58d" }
+# Same exact sources as MDK's workspace so types unify.
+openmls              = { git = "https://github.com/openmls/openmls.git", rev = "6100df3fb1d8c3eeab53e349fcbd621f98c44fe2", features = ["extensions-draft"] }
+openmls_rust_crypto  = { git = "https://github.com/openmls/openmls.git", rev = "6100df3fb1d8c3eeab53e349fcbd621f98c44fe2", features = ["extensions-draft"] }
+openmls_traits       = { git = "https://github.com/openmls/openmls.git", rev = "6100df3fb1d8c3eeab53e349fcbd621f98c44fe2", features = ["extensions-draft"] }
+nostr = { git = "https://github.com/erskingardner/rust-nostr", rev = "e93cc06b5624f06c21ecd8111a124176eb0c7589", default-features = false, features = ["std", "rand", "os-rng", "nip04", "nip49", "nip59"] }
+base64      = "0.22"
+hex         = "0.4"
+postcard    = { version = "1", features = ["alloc"] }
+serde       = { version = "1", features = ["derive"] }
+serde_json  = "1"
+sha2        = "0.10"
+thiserror   = "2"
+tokio       = { version = "1", features = ["macros", "rt", "sync", "time"] }
+zeroize     = "1"
+
+[dev-dependencies]
+tokio     = { version = "1", features = ["rt-multi-thread"] }
