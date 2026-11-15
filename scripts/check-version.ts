@@ -10,6 +10,22 @@ declare const Bun: {
 
 type JsonObject = Record<string, unknown>;
 
+export type PackageEntry = { path: string; pkg: unknown };
+
+/**
+ * Crate directory names (relative to `crates/`) the root workspace `exclude`s: those are standalone
+ * projects with their own lockfile and versioning, so they take no part in workspace member
+ * checks.
+ */
+export function excludedCrates(cargoToml: unknown): Set<string> {
+  const excludeList = asRecord(asRecord(cargoToml)["workspace"])["exclude"];
+  return new Set(
+    (Array.isArray(excludeList) ? excludeList : [])
+      .filter((v): v is string => typeof v === "string")
+      .map((v) => v.replace(/^crates\//, "")),
+  );
+}
+
 function isRecord(value: unknown): value is JsonObject {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -21,8 +37,6 @@ function asRecord(value: unknown): JsonObject {
 function escapeRegExp(text: string): string {
   return text.replaceAll(/[.*+?^${}()|[\]\\]/g, String.raw`\$&`);
 }
-
-export type PackageEntry = { path: string; pkg: unknown };
 
 /**
  * Lockstep check: every workspace package manifest's `version` must equal
@@ -173,10 +187,11 @@ if (import.meta.main) {
       return { path, pkg: JSON.parse(readFileSync(path, "utf8")) as unknown };
     });
   const cargoText = readFileSync("Cargo.toml", "utf8");
+  const excluded = excludedCrates(Bun.TOML.parse(cargoText));
   const memberTomls: Record<string, unknown> = {};
   if (existsSync("crates")) {
     for (const entry of readdirSync("crates", { withFileTypes: true })) {
-      if (!entry.isDirectory()) {
+      if (!entry.isDirectory() || excluded.has(entry.name)) {
         continue;
       }
       const path = join("crates", entry.name, "Cargo.toml");
