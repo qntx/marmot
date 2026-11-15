@@ -22,20 +22,25 @@ binary is the better artifact; `-Oz` only wins if shipping raw.
 
 ## Runtime measurements
 
+Values from the committed `results/bun.json` and `results/chromium.json`
+(final run). The group operations are single samples (n = 1). An earlier run
+measured add-1 commit at 168 ms (Bun) and 205 ms (Chromium) and 50-member
+create at 342 ms and 404 ms, so expect large run-to-run variance there.
+
 | metric | Bun 1.4.4 | Chromium 142 (headless) |
 |---|---|---|
-| scenario total (7 steps, 500 msgs) | ~97 s | ~99 s |
-| KeyPackage generation | median 1.0 ms (n = 24) | median 1.1 ms (n = 24) |
-| ascending ingest, 507 events | 199 ms total, 0.39 ms/msg | 320 ms total, 0.63 ms/msg |
-| 50-member create (49 KPs, one commit) | 342 ms | 404 ms |
-| joiner Welcome processing (50-member) | 29 ms | 36 ms |
-| add-1-member commit (50-member group) | 168 ms | 205 ms |
-| existing-member ingest of add-1 commit | 0.12 ms | 0.30 ms |
-| peak memory | rss 275 MB, heapUsed 175 MB, wasm buffer 57.7 MB | JSHeapUsed 19.5 MB, wasm buffer 45.9 MB |
+| scenario total (7 steps, 500 msgs) | ~97 s (earlier run) | 135 s |
+| KeyPackage generation | median 1.68 ms (n = 24) | median 1.80 ms (n = 24) |
+| ascending ingest, 507 events | 255 ms total, 0.50 ms/event | 342 ms total, 0.67 ms/event (in-page, single evaluate) |
+| 50-member create (49 KPs, one commit) | 506 ms | 633 ms |
+| joiner Welcome processing (50-member) | 41 ms | 52 ms |
+| add-1-member commit (50-member group) | 26 ms | 31.5 ms |
+| existing-member ingest of add-1 commit | 0.16 ms | 0.20 ms |
+| peak memory | rss 660 MB, heapUsed 178 MB, wasm buffer 58.9 MB | JSHeapUsed 19.8 MB, wasm buffer 46.3 MB |
 
-Chromium ingest includes a `page.evaluate` round-trip per event; the pure
-in-wasm cost is closer to Bun's number. The scenario total is dominated by 500
-sequential `send` + `ingest` calls over the JS boundary.
+The scenario total comes mostly from the harness, which re-ingests the whole
+accumulated backlog for each member at every step (see C0 below). It is not
+an engine cost.
 
 ## wasm32 traps / blockers encountered
 
@@ -126,8 +131,8 @@ event once. `send` 508 calls ≈ 2.74 s median 5.4 ms; `advance` 40 calls
 
 `run-chromium.ts` now measures the full 507-event ascending backlog inside a
 single `page.evaluate` (no per-event round-trip): **342.2 ms total,
-0.675 ms/event** (chromium.json `ingestMs`). Comparable to Bun's 199 ms /
-0.39 ms; both far under any 1 s threshold.
+0.675 ms/event** (chromium.json `ingestMs`). Bun's final run took 255 ms
+(0.50 ms/event). Both are well under the 1 s threshold.
 
 ## Size attribution
 
