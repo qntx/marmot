@@ -173,6 +173,32 @@ pub struct ProofRejected {
     pub error: ProofError,
 }
 
+/// The typed pre-checks `provide_account_proof` runs before MDK's own
+/// verification: the signer must be this session's account, the event id
+/// must equal the request's canonical id, and the signature must verify.
+/// Returns the verified 64-byte signature on success.
+pub(crate) fn check_account_proof(
+    account: AccountId,
+    request: &AccountIdentityProofRequest,
+    signed: &Event,
+) -> Result<[u8; 64], ProofError> {
+    if signed.pubkey != account {
+        return Err(ProofError::WrongAccount);
+    }
+    let expected_id = request
+        .proof_event_id()
+        .map_err(|_| ProofError::InvalidSignature)?;
+    if signed.id.0 != expected_id {
+        return Err(ProofError::WrongEvent);
+    }
+    let nostr_signed = signed
+        .to_nostr_event()
+        .ok_or(ProofError::InvalidSignature)?;
+    request
+        .signature_from_signed_event(nostr_signed)
+        .map_err(|_| ProofError::InvalidSignature)
+}
+
 /// A session open paused at the account-identity-proof handshake. Holds the
 /// provider and request so `provide_account_proof` can finish the open
 /// without re-deriving the device's MLS signature key.
@@ -212,37 +238,13 @@ impl PendingProof {
     /// # Errors
     /// [`ProofRejected`] carrying the pending open back for retry.
     pub fn provide_account_proof(self, signed: &Event) -> Result<Session, ProofRejected> {
-        if signed.pubkey != self.signer.account() {
-            return Err(ProofRejected {
+        match check_account_proof(self.signer.account(), &self.request, signed) {
+            Ok(signature) => self.finish(signature),
+            Err(error) => Err(ProofRejected {
                 pending: Box::new(self),
-                error: ProofError::WrongAccount,
-            });
+                error,
+            }),
         }
-        let Ok(expected_id) = self.request.proof_event_id() else {
-            return Err(ProofRejected {
-                pending: Box::new(self),
-                error: ProofError::InvalidSignature,
-            });
-        };
-        if signed.id.0 != expected_id {
-            return Err(ProofRejected {
-                pending: Box::new(self),
-                error: ProofError::WrongEvent,
-            });
-        }
-        let Some(nostr_signed) = signed.to_nostr_event() else {
-            return Err(ProofRejected {
-                pending: Box::new(self),
-                error: ProofError::InvalidSignature,
-            });
-        };
-        let Ok(signature) = self.request.signature_from_signed_event(nostr_signed) else {
-            return Err(ProofRejected {
-                pending: Box::new(self),
-                error: ProofError::InvalidSignature,
-            });
-        };
-        self.finish(signature)
     }
 
     fn finish(self, signature: [u8; 64]) -> Result<Session, ProofRejected> {
@@ -446,6 +448,20 @@ pub enum SessionError {
     /// is unresolved. Retry after [`Session::tick`].
     #[error("group unsettled")]
     GroupBusy,
+    /// An own-commit confirm collided on the checkpoint a previous confirm
+    /// of the byte-identical commit left behind: the checkpoint id derives
+    /// from the commit digest and the epoch matches, but the captured blob
+    /// embeds `OpenMLS` `added_at` (stamped at merge time), so a re-confirm
+    /// after convergence replayed the commit is neither an exact retry nor
+    /// a new checkpoint and upstream storage answers `AlreadyExists`.
+    ///
+    /// The artifact was relay-accepted, so the session never rolls the
+    /// commit back locally: it keeps the fanout obligation outstanding and
+    /// reports this error instead. Retrying the same report repeats the
+    /// collision until convergence resolves the pending through another
+    /// branch (upstream defect; `tests/upstream.rs`).
+    #[error("own-commit confirm conflicted with a retained checkpoint")]
+    ConfirmConflict,
     /// An [`OutboundId`] no live obligation matches.
     #[error("unknown outbound")]
     UnknownOutbound,
@@ -892,7 +908,10 @@ impl Session {
     ///
     /// # Errors
     /// [`SessionError::UnknownOutbound`] when `id` is not a live
-    /// obligation; [`SessionError`] for storage/engine failures.
+    /// obligation; [`SessionError::ConfirmConflict`] when an accepted
+    /// own commit's confirm collides on a retained checkpoint (upstream
+    /// defect — the obligation stays outstanding and is never rolled
+    /// back); [`SessionError`] for storage/engine failures.
     pub async fn report_publish(
         &mut self,
         id: &OutboundId,
@@ -1011,14 +1030,7 @@ impl Session {
         let outcome = fanout.outcome();
         let mut resolution = PublishResolution::Pending;
         if outcome.mls_confirmation_required {
-            let pending = fanout
-                .pending_ref()
-                .ok_or(SessionError::Internal("fanout pending"))?;
-            self.engine
-                .confirm_published_fanout(pending, &mut fanout)
-                .await
-                .map_err(session_engine_error)?;
-            resolution = PublishResolution::Confirmed;
+            resolution = self.confirm_fanout_mls(&mut fanout).await?;
         } else if outcome.fanout_complete
             && outcome.accepted_targets == 0
             && !fanout.possible_exposure()
@@ -1089,6 +1101,32 @@ impl Session {
                 .map_err(session_engine_error)?;
         }
         Ok(resolution)
+    }
+
+    /// Confirm the fanout's own-commit obligation with the engine once at
+    /// least one relay accepted the artifact.
+    async fn confirm_fanout_mls(
+        &mut self,
+        fanout: &mut OutboundFanout,
+    ) -> Result<PublishResolution, SessionError> {
+        let pending = fanout
+            .pending_ref()
+            .ok_or(SessionError::Internal("fanout pending"))?;
+        match self.engine.confirm_published_fanout(pending, fanout).await {
+            Ok(_) => Ok(PublishResolution::Confirmed),
+            // A relay already accepted the artifact, so the commit must
+            // never be rolled back locally. Persist the fanout with the
+            // relay verdicts it already collected, keep the obligation
+            // outstanding and surface the conflict — see
+            // `SessionError::ConfirmConflict`.
+            Err(EngineError::Storage(StorageError::AlreadyExists)) => {
+                self.engine
+                    .put_outbound_fanout(fanout)
+                    .map_err(session_engine_error)?;
+                Err(SessionError::ConfirmConflict)
+            }
+            Err(error) => Err(session_engine_error(error)),
+        }
     }
 
     // ---- account publications ----

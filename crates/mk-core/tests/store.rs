@@ -243,6 +243,20 @@ fn batch_decode_rejects_zero_ops() {
     assert!(KvBatch::decode(&bytes).is_err());
 }
 
+#[test]
+fn batch_decode_bounds_op_count_allocation() {
+    // Regression for the kv_batch fuzz OOM: a declared op count of u32::MAX
+    // over a short input must fail truncated, not try to allocate for it.
+    let mut bytes = vec![1u8];
+    bytes.extend_from_slice(&1u64.to_be_bytes());
+    bytes.extend_from_slice(&u32::MAX.to_be_bytes());
+    bytes.extend_from_slice(&[0u8; 32]);
+    assert!(matches!(
+        KvBatch::decode(&bytes),
+        Err(BatchCodecError::Truncated)
+    ));
+}
+
 // --- schema version at open ---
 
 #[test]

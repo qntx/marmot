@@ -159,7 +159,12 @@ impl KvBatch {
         if op_count == 0 {
             return Err(BatchCodecError::Empty);
         }
-        let mut ops = Vec::with_capacity(op_count as usize);
+        // An op needs at least a tag byte and a key length on the wire, so
+        // the remaining input bounds the decodable count; a corrupt count
+        // must not drive the pre-allocation.
+        let mut ops = Vec::with_capacity(
+            (op_count as usize).min(cursor.bytes.len().saturating_sub(cursor.pos) / 5),
+        );
         for _ in 0..op_count {
             let tag = cursor.u8()?;
             let key_len = cursor.u32()? as usize;

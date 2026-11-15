@@ -315,3 +315,43 @@ impl AccountSigner for LocalSigner {
         Box::pin(async move { result })
     }
 }
+
+/// A fixed account-identity-proof request bound to an account.
+///
+/// Validates arbitrary signed events with the same checks
+/// [`crate::PendingProof::provide_account_proof`] applies. Fuzz and replay
+/// harnesses build one fixed request once, then exercise the decoder and
+/// verifier against every input event.
+#[derive(Debug)]
+pub struct ProofRequest {
+    account: AccountId,
+    request: cgka_engine::account_identity_proof::AccountIdentityProofRequest,
+}
+
+impl ProofRequest {
+    /// A deterministic current-profile request: fixed account, MLS
+    /// signature key, ciphersuite and timestamp.
+    #[must_use]
+    pub fn fixed() -> Self {
+        Self {
+            account: AccountId([0x11; 32]),
+            request: cgka_engine::account_identity_proof::AccountIdentityProofRequest::current(
+                vec![0x11; 32],
+                vec![0x22; 32],
+                openmls::prelude::Ciphersuite::MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519,
+                openmls::prelude::SignatureScheme::ED25519,
+                1_700_000_000,
+            ),
+        }
+    }
+
+    /// Run the proof pre-checks `provide_account_proof` runs before the
+    /// engine rebuild; the returned signature is discarded by callers that
+    /// only validate.
+    ///
+    /// # Errors
+    /// [`crate::ProofError`] classifying the rejection.
+    pub fn check(&self, signed: &Event) -> Result<[u8; 64], crate::ProofError> {
+        crate::session::check_account_proof(self.account, &self.request, signed)
+    }
+}
