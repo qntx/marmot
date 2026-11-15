@@ -1,0 +1,61 @@
+{
+  "rows": [
+    "| 1. key packages published (kind 30443)                     | A B C |",
+    "| 2. group created, B joined via welcome                     | epoch=1 members=2 |",
+    "| 3. published 500 kind-445 messages                         | 500 |",
+    "| 3a. reader on pre-ingest state, NEWEST-FIRST               | processed=100 buffered=0 deferred=0 own_echo=250 ignored=0 local=0 stale=150 rejected=0 other=0 delivered=100 |",
+    "| 4. mid-ingest restart of B (125 + 125 ascending)           | processed=250 buffered=0 deferred=0 own_echo=0 ignored=0 local=0 stale=0 rejected=0 other=0 delivered=250 dups=0 |",
+    "| 4b. A reads the same backlog ascending                     | processed=250 buffered=0 deferred=0 own_echo=250 ignored=0 local=0 stale=0 rejected=0 other=0 delivered=250 |",
+    "| 5. A added C; three-way messages readable                  | epoch=2 members=3 |",
+    "| 6. A removed B; post-removal msg unreadable by B           | members=2 |",
+    "| 7. publish_failed + retry keeps group consistent           | epoch=4 |",
+    "| relay events stored                                        | 512 |",
+    "| scenario total                                             | 99136ms |"
+  ],
+  "ingestMs": {
+    "events": 507,
+    "totalMs": 320.16975000000093,
+    "perMessageMs": 0.631498520710061,
+    "note": "includes page.evaluate round-trip per event"
+  },
+  "keyPackageMs": {
+    "n": 24,
+    "median": 1.1000000014901161,
+    "times": [
+      1,
+      1,
+      1,
+      1,
+      1,
+      1.0999999977648258,
+      1.0999999977648258,
+      1.0999999977648258,
+      1.0999999977648258,
+      1.0999999977648258,
+      1.1000000014901161,
+      1.1000000014901161,
+      1.1000000014901161,
+      1.1000000014901161,
+      1.1000000014901161,
+      1.1000000014901161,
+      1.1000000014901161,
+      1.199999999254942,
+      1.199999999254942,
+      1.199999999254942,
+      1.199999999254942,
+      1.2000000029802322,
+      1.300000000745058,
+      1.5
+    ]
+  },
+  "group50": {
+    "create50Ms": 404.1000000014901,
+    "welcomeJoin50Ms": 36.19999999925494,
+    "add1CommitMs": 204.80000000074506,
+    "add1IngestMs": 0.30000000074505806
+  },
+  "memory": {
+    "JSHeapUsedSize": 19542920,
+    "wasmBufferBytes": 45940736
+  }
+}

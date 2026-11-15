@@ -1,0 +1,75 @@
+{
+  "rows": [
+    "| 1. key packages published (kind 30443)                     | A B C |",
+    "| 2. group created, B joined via welcome                     | epoch=1 members=2 |",
+    "| 3. published 500 kind-445 messages                         | 500 |",
+    "| 3a. reader on pre-ingest state, NEWEST-FIRST               | processed=100 buffered=0 deferred=0 own_echo=250 ignored=0 local=0 stale=150 rejected=0 other=0 delivered=100 |",
+    "| 4. mid-ingest restart of B (125 + 125 ascending)           | processed=250 buffered=0 deferred=0 own_echo=0 ignored=0 local=0 stale=0 rejected=0 other=0 delivered=250 dups=0 |",
+    "| 4b. A reads the same backlog ascending                     | processed=250 buffered=0 deferred=0 own_echo=250 ignored=0 local=0 stale=0 rejected=0 other=0 delivered=250 |",
+    "| 5. A added C; three-way messages readable                  | epoch=2 members=3 |",
+    "| 6. A removed B; post-removal msg unreadable by B           | members=2 |",
+    "| 7. publish_failed + retry keeps group consistent           | epoch=4 |",
+    "| relay events stored                                        | 512 |",
+    "| scenario total                                             | 97176ms |"
+  ],
+  "wasmSize": {
+    "bindgen": {
+      "raw": 5652968,
+      "gzip9": 2536020,
+      "brotli11": 2141151
+    },
+    "wasmOptOz": {
+      "raw": 5074027,
+      "gzip9": 2670235,
+      "brotli11": 2237651
+    },
+    "jsGlue": {
+      "raw": 37175,
+      "gzip9": 7833
+    }
+  },
+  "keyPackageMs": {
+    "n": 24,
+    "median": 0.9761249999864958,
+    "times": [
+      1.7616249999846332,
+      1.6078750000160653,
+      1.0735839999979362,
+      1.2497499999881256,
+      1.2345409999834374,
+      1.074583999987226,
+      1.459792000008747,
+      0.8922909999964759,
+      0.9182499999878928,
+      0.9298330000019632,
+      0.8887499999837019,
+      0.879625000001397,
+      0.8941249999916181,
+      0.938916999992216,
+      0.8599169999943115,
+      0.887458000011975,
+      0.9077920000127051,
+      0.9435839999932796,
+      1.0431249999965075,
+      1.1359579999989364,
+      0.9761249999864958,
+      0.9772919999959413,
+      0.9873329999973066,
+      0.9280420000141021
+    ]
+  },
+  "ingestMs": {
+    "events": 507,
+    "totalMs": 199.42237499999464,
+    "perMessageMs": 0.3933380177514687
+  },
+  "create50Ms": 342.05187500000466,
+  "welcomeJoin50Ms": 29.231082999991486,
+  "add1CommitMs": 167.82816699999967,
+  "add1IngestMs": 0.1190000000060536,
+  "memory": {
+    "rss": 274662600,
+    "heapUsed": 174799213,
+    "wasmBufferBytes": 57737216
+  }
+}
