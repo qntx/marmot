@@ -41,7 +41,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use mk_core::testing::{LocalSigner, RecordingHost};
 use mk_core::{
-    AccountId, AccountSigner, Clock, Event, GroupId, KvHost, Opened, Outbound, RelayPolicy,
+    AccountId, AccountSigner, Clock, DestinationPolicy, Event, GroupId, KvHost, Opened, Outbound,
     RelayResult, RelayStatus, Session, SessionConfig, SessionEvent, Time,
 };
 use nostr::prelude::{
@@ -135,7 +135,8 @@ fn wn_run(
         .arg(socket)
         .env("WN_HOME", home)
         .env("WN_SECRET_STORE", "file")
-        .env("WN_ALLOW_LOOPBACK_RELAYS", "1");
+        .env("WN_ALLOW_LOOPBACK_RELAYS", "1")
+        .env("WN_ALLOW_LOOPBACK_BLOB_ENDPOINTS", "1");
     if let Some(account) = account {
         cmd.arg("--account").arg(account);
     }
@@ -205,6 +206,7 @@ pub async fn spawn_wnd(home: &Path, socket: &Path, logs: &Path, relay_url: &str)
         .env("WN_HOME", home)
         .env("WN_SECRET_STORE", "file")
         .env("WN_ALLOW_LOOPBACK_RELAYS", "1")
+        .env("WN_ALLOW_LOOPBACK_BLOB_ENDPOINTS", "1")
         .stdout(Stdio::from(out))
         .stderr(Stdio::from(err))
         .spawn()
@@ -227,6 +229,7 @@ pub async fn spawn_wnd(home: &Path, socket: &Path, logs: &Path, relay_url: &str)
                 .env("WN_HOME", home)
                 .env("WN_SECRET_STORE", "file")
                 .env("WN_ALLOW_LOOPBACK_RELAYS", "1")
+                .env("WN_ALLOW_LOOPBACK_BLOB_ENDPOINTS", "1")
                 .output();
             if probe.is_ok_and(|out| out.status.success()) {
                 break;
@@ -416,7 +419,7 @@ pub async fn open_member() -> Member {
         host: host_cfg,
         rows: Vec::new(),
         clock: clock_cfg,
-        relay_policy: RelayPolicy {
+        destination_policy: DestinationPolicy {
             allow_loopback: true,
         },
         client_name: None,
@@ -589,11 +592,12 @@ pub async fn ingest(member: &mut Member, events: Vec<Event>) -> Vec<SessionEvent
         .ingest_batch(events)
         .await
         .expect("ingest_batch");
-    let drained = member.session.drain_events();
+    let drained = member.session.drain_events().unwrap();
     let ids: Vec<_> = drained
         .iter()
         .filter_map(|event| match event {
             SessionEvent::MessageReceived { message, .. } => Some(message.transport_id),
+            SessionEvent::AgentStreamStarted { start, .. } => Some(start.transport_id),
             _ => None,
         })
         .collect();
@@ -706,4 +710,146 @@ pub fn wn_send(rig: &Rig, group: &str, text: &str) {
 /// Hex pubkey of an npub.
 pub fn npub_to_hex(npub: &str) -> String {
     PublicKey::from_bech32(npub).expect("npub").to_hex()
+}
+
+/// Blob store shared by the axum routes and the test-side `put`/`get`.
+#[derive(Clone, Debug)]
+struct BlossomState {
+    /// `http://127.0.0.1:<port>` (no trailing slash).
+    url: String,
+    blobs: Arc<std::sync::Mutex<std::collections::HashMap<String, Vec<u8>>>>,
+}
+
+/// A minimal Blossom (BUD-01/BUD-02) dev server on axum over the test's
+/// tokio runtime: `PUT /upload` requires an `Authorization: Nostr …` header
+/// and answers the descriptor `wn` parses (`{url, sha256, size, type,
+/// uploaded}`); `GET /<sha256>` serves the stored blob and `HEAD /<sha256>`
+/// answers headers only (axum serves both on the GET route). The test
+/// host's mk-core side uses `put`/`get` directly — no HTTP for our half.
+#[derive(Debug)]
+pub struct BlossomServer {
+    /// `http://127.0.0.1:<port>` (no trailing slash).
+    pub url: String,
+    state: BlossomState,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl BlossomServer {
+    /// Bind loopback, spawn the axum server on the current tokio runtime.
+    pub fn new() -> Self {
+        let std_listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind blossom");
+        std_listener.set_nonblocking(true).expect("nonblocking");
+        let address = std_listener.local_addr().expect("addr");
+        let listener = tokio::net::TcpListener::from_std(std_listener).expect("tokio listener");
+        let state = BlossomState {
+            url: format!("http://{address}"),
+            blobs: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        };
+        let app = axum::Router::new()
+            .route("/upload", axum::routing::put(upload))
+            .route("/:sha256", axum::routing::get(download))
+            .with_state(state.clone());
+        let task = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("blossom serve");
+        });
+        Self {
+            url: state.url.clone(),
+            state,
+            task,
+        }
+    }
+
+    /// Store `bytes` under `hash_hex` (the test's "upload").
+    pub fn put(&self, hash_hex: &str, bytes: &[u8]) {
+        self.state
+            .blobs
+            .lock()
+            .expect("blobs")
+            .insert(hash_hex.to_owned(), bytes.to_vec());
+    }
+
+    /// Fetch the blob stored under `hash_hex` (the test's "download").
+    pub fn get(&self, hash_hex: &str) -> Option<Vec<u8>> {
+        self.state
+            .blobs
+            .lock()
+            .expect("blobs")
+            .get(hash_hex)
+            .cloned()
+    }
+}
+
+impl Drop for BlossomServer {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+/// `PUT /upload`: requires `Authorization: Nostr …`; stores the body under
+/// its sha256 and answers the BUD-02 blob descriptor `wn` parses.
+async fn upload(
+    axum::extract::State(state): axum::extract::State<BlossomState>,
+    headers: axum::http::HeaderMap,
+    body: axum::body::Bytes,
+) -> (axum::http::StatusCode, axum::Json<Value>) {
+    let authed = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.to_ascii_lowercase().contains("nostr"));
+    if !authed {
+        return (
+            axum::http::StatusCode::UNAUTHORIZED,
+            axum::Json(serde_json::json!({"reason": "missing Nostr authorization"})),
+        );
+    }
+    let hash = sha256_hex(&body);
+    state
+        .blobs
+        .lock()
+        .expect("blobs")
+        .insert(hash.clone(), body.to_vec());
+    (
+        axum::http::StatusCode::OK,
+        axum::Json(serde_json::json!({
+            "url": format!("{}/{hash}", state.url),
+            "sha256": hash,
+            "size": body.len(),
+            "type": "application/octet-stream",
+            "uploaded": SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_or(0, |d| d.as_secs()),
+        })),
+    )
+}
+
+/// `GET /<sha256>`: the stored blob with an explicit `Content-Length`, or
+/// 404. axum answers `HEAD` on the same route with the headers kept and the
+/// body stripped.
+async fn download(
+    axum::extract::State(state): axum::extract::State<BlossomState>,
+    axum::extract::Path(sha256): axum::extract::Path<String>,
+) -> axum::response::Response {
+    let found = state.blobs.lock().expect("blobs").get(&sha256).cloned();
+    found.map_or_else(
+        || {
+            axum::response::IntoResponse::into_response((
+                axum::http::StatusCode::NOT_FOUND,
+                "not found",
+            ))
+        },
+        |bytes| {
+            axum::response::Response::builder()
+                .status(axum::http::StatusCode::OK)
+                .header(axum::http::header::CONTENT_TYPE, "application/octet-stream")
+                .header(axum::http::header::CONTENT_LENGTH, bytes.len())
+                .body(axum::body::Body::from(bytes))
+                .expect("response")
+        },
+    )
+}
+
+/// SHA-256 of `data` as lowercase hex.
+pub fn sha256_hex(data: &[u8]) -> String {
+    use sha2::Digest as _;
+    hex::encode(sha2::Sha256::digest(data))
 }

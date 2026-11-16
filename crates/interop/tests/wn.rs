@@ -33,7 +33,11 @@ mod support;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use mk_core::{AccountId, AppMessage, CreateGroup, GroupId, GroupState, Invitee, SessionEvent};
+use mk_core::media::Locator;
+use mk_core::{
+    AccountId, AppMessage, AttachmentInput, CreateGroup, GroupId, GroupState, Invitee,
+    MediaMessage, SessionEvent,
+};
 use serde_json::Value;
 use support::*;
 use tokio::time::sleep;
@@ -110,6 +114,7 @@ async fn mk_group_with_wn(rig: &Arc<Rig>, a: &mut Member, name: &str) -> GroupId
                 inbox_relays: vec![rig.url.clone()],
             }],
             admins: Vec::new(),
+            components: Vec::new(),
         })
         .await
         .expect("create_group");
@@ -255,18 +260,6 @@ async fn member_says(rig: &Arc<Rig>, member: &mut Member, gid: &GroupId, wn_gid:
     .await;
 }
 
-/// Extract `"required"`/`"had"` style lists from a wn refusal payload for
-/// the scenario report.
-fn refusal_ids(parsed: &Value) -> String {
-    let error = parsed.pointer("/error").cloned().unwrap_or(Value::Null);
-    let compact = serde_json::to_string(&error).unwrap_or_else(|_| parsed.to_string());
-    if compact == "null" {
-        parsed.to_string()
-    } else {
-        compact
-    }
-}
-
 // ---- scenario 1: mk-core creates a group and invites wn -------------------
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -299,25 +292,12 @@ async fn scenario2_wn_invites_mk_core() {
     let a_npub = a.npub();
     let a_hex = a.account_hex();
 
-    let (ok, created) = wn_try(
+    let created = wn(
         &rig.home,
         &rig.socket,
         Some(&rig.wn_npub),
         &["groups", "create", "interop-2", &a_npub],
     );
-    if !ok {
-        let text = refusal_ids(&created);
-        assert!(
-            text.contains("missing_required_capabilities"),
-            "s2 refusal must be capability negotiation: {text}"
-        );
-        rig.relay.shutdown();
-        eprintln!(
-            "SCENARIO-2 REFUSED {text} {:.1}s",
-            start.elapsed().as_secs_f64()
-        );
-        return;
-    }
     let wn_gid = wn_group_id(&created);
     let gid = hex_group(&wn_gid);
 
@@ -544,29 +524,15 @@ async fn scenario3_bulk_and_membership() {
         "s3 wn cannot read post-removal-secret"
     );
 
-    // wn, as admin of a group it founded, removes mk-core A. If wn's
-    // capability preflight refuses our honest `KeyPackage`, assert the
-    // precise refusal instead — that refusal is the evidence.
+    // wn, as admin of a group it founded, removes mk-core A. With the new
+    // capability set our KeyPackage satisfies the group's requirements.
     let a_npub = a.npub();
-    let (ok, created) = wn_try(
+    let created = wn(
         &rig.home,
         &rig.socket,
         Some(&rig.wn_npub),
         &["groups", "create", "interop-3b", &a_npub],
     );
-    if !ok {
-        let text = refusal_ids(&created);
-        assert!(
-            text.contains("missing_required_capabilities"),
-            "s3b refusal must be capability negotiation: {text}"
-        );
-        rig.relay.shutdown();
-        eprintln!(
-            "SCENARIO-3 PASS + 3b REFUSED ({text}) {:.1}s",
-            start.elapsed().as_secs_f64()
-        );
-        return;
-    }
     let wn_gid2 = wn_group_id(&created);
     let gid2 = hex_group(&wn_gid2);
     join_wn_group(&rig, &mut a, &gid2).await;
@@ -628,8 +594,10 @@ async fn scenario4_capability_requirements() {
     let a_npub = a.npub();
     let a_hex = a.account_hex();
 
-    // Record exactly what our `KeyPackage` advertises — only what mk-core
-    // implements (no 0x8006/0x800B/0xF2D1 padding).
+    // Our `KeyPackage` advertises exactly what mk-core implements:
+    // proposals {0x0008, 0x000a}, extension 0xf2d1 (receive), app
+    // components {0x8001,0x8003,0x8004,0x8006,0x8009,0x800b,0x800c,0x800d},
+    // and never the send/fanout/media-v1 ids.
     let kp = fetch_key_package(&rig, &a_hex)
         .await
         .expect("A key package");
@@ -640,86 +608,485 @@ async fn scenario4_capability_requirements() {
             .map(|tag| tag[1..].to_vec())
             .unwrap_or_default()
     };
-    let proposals = advertised("mls_proposals");
-    let extensions = advertised("mls_extensions");
-    let components = advertised("app_components");
+    let mut proposals = advertised("mls_proposals");
+    let mut extensions = advertised("mls_extensions");
+    let mut components = advertised("app_components");
+    proposals.sort();
+    extensions.sort();
+    components.sort();
     eprintln!(
         "s4: our KP advertises proposals={proposals:?} extensions={extensions:?} app_components={components:?}"
     );
-    for padding in ["0xf2d1", "0x8006", "0x800b", "62161", "32774", "32779"] {
+    assert_eq!(proposals, ["0x0008", "0x000a"], "s4 proposal set");
+    assert_eq!(
+        components,
+        [
+            "0x8001", "0x8003", "0x8004", "0x8006", "0x8009", "0x800b", "0x800c", "0x800d"
+        ],
+        "s4 app-component set"
+    );
+    assert!(
+        extensions.contains(&"0xf2d1".to_owned()),
+        "s4 must advertise the receive extension: {extensions:?}"
+    );
+    for forbidden in ["0xf2d2", "0xf2d4", "0x8008"] {
         assert!(
             !proposals
                 .iter()
                 .chain(&extensions)
                 .chain(&components)
-                .any(|v| v == padding),
-            "s4 honest advertisement must not include {padding}"
+                .any(|v| v == forbidden),
+            "s4 honest advertisement must not include {forbidden}"
         );
     }
 
-    // (a) wn inviting our `KeyPackage` into a NEW group: the group's
-    // RequiredCapabilities are computed from the founding set
-    // (INTEROP.md / mdk#2628), so wn may accept with a reduced requirement
-    // — record and assert the actual behaviour either way.
-    let (ok_new, created) = wn_try(
+    // (a) wn invites our `KeyPackage` into a fresh group -> we join.
+    let created = wn(
         &rig.home,
         &rig.socket,
         Some(&rig.wn_npub),
         &["groups", "create", "interop-4", &a_npub],
     );
-    if ok_new {
-        let wn_gid = wn_group_id(&created);
-        let gid = hex_group(&wn_gid);
-        join_wn_group(&rig, &mut a, &gid).await;
-        eprintln!("s4(a): wn accepted our KP into a fresh group {wn_gid} — join processed");
-    } else {
-        let text = refusal_ids(&created);
-        assert!(
-            text.contains("missing_required_capabilities"),
-            "s4a refusal must be capability negotiation: {text}"
-        );
-        eprintln!("s4(a): REFUSED fresh-group invite: {text}");
-    }
+    let wn_gid = wn_group_id(&created);
+    let gid = hex_group(&wn_gid);
+    join_wn_group(&rig, &mut a, &gid).await;
+    until_member(
+        &mut a,
+        |a| {
+            let gid = gid.clone();
+            let rig = Arc::clone(&rig);
+            Box::pin(async move {
+                let _ = sync(&mut *a, &rig, &gid).await;
+                a.roster(&gid).contains(&rig.wn_pub).then_some(())
+            })
+        },
+        "A joins wn group (s4a)",
+        90_000,
+    )
+    .await;
 
-    // (b) wn inviting our `KeyPackage` into an EXISTING group founded by
-    // members advertising the full wn set: the requirement is fixed at
-    // creation, so this must name what we lack.
-    let founded = wn(
+    // (b) a second wn identity on the same wnd: a group founded by two wn
+    // devices requires 0x800d; adding us must still succeed, we join, and
+    // one message travels each way.
+    let second = wn(&rig.home, &rig.socket, None, &["create-identity"]);
+    let second_npub = second
+        .pointer("/result/npub")
+        .and_then(Value::as_str)
+        .expect("create-identity npub")
+        .to_owned();
+    wn(
+        &rig.home,
+        &rig.socket,
+        Some(&second_npub),
+        &["keys", "publish"],
+    );
+    let created_b = wn(
         &rig.home,
         &rig.socket,
         Some(&rig.wn_npub),
-        &["groups", "create", "interop-4b"],
+        &["groups", "create", "interop-4b", &second_npub],
     );
-    let full_gid = wn_group_id(&founded);
-    let (ok_add, added) = wn_try(
+    let wn_gid_b = wn_group_id(&created_b);
+    let shown = wn(
         &rig.home,
         &rig.socket,
         Some(&rig.wn_npub),
-        &["groups", "add-members", &full_gid, &a_npub],
+        &["groups", "show", &wn_gid_b],
     );
-    if ok_add {
-        eprintln!("s4(b): wn accepted our KP into the full-capability group {full_gid}");
-    } else {
-        let text = refusal_ids(&added);
-        assert!(
-            text.contains("missing_required_capabilities"),
-            "s4b refusal must be capability negotiation: {text}"
-        );
-        let had = added
-            .pointer("/error/had")
-            .map(Value::to_string)
-            .unwrap_or_default();
-        assert!(
-            !had.contains("32774") && !had.contains("32779") && !had.contains("62161"),
-            "s4b `had` must lack 0x8006/0x800B/0xF2D1: {had}"
-        );
-        eprintln!("s4(b): REFUSED add to full-capability group: {text}");
-    }
+    eprintln!("s4(b): group state: {shown}");
+    // The wn-founded group must require 0x800d — that is the whole point of
+    // (b): our KeyPackage has to satisfy it for add-members to succeed.
+    let required = shown
+        .pointer("/result/mls/required_app_components")
+        .and_then(Value::as_array)
+        .expect("groups show must report required_app_components");
+    assert!(
+        required.iter().any(|v| v.as_u64() == Some(32_781)),
+        "0x800d must be required: {required:?}"
+    );
+    wn(
+        &rig.home,
+        &rig.socket,
+        Some(&rig.wn_npub),
+        &["groups", "add-members", &wn_gid_b, &a_npub],
+    );
+    let gid_b = hex_group(&wn_gid_b);
+    join_wn_group(&rig, &mut a, &gid_b).await;
+    until_member(
+        &mut a,
+        |a| {
+            let gid_b = gid_b.clone();
+            let rig = Arc::clone(&rig);
+            Box::pin(async move {
+                let _ = sync(&mut *a, &rig, &gid_b).await;
+                a.roster(&gid_b).contains(&rig.wn_pub).then_some(())
+            })
+        },
+        "A joins the 0x800d group (s4b)",
+        120_000,
+    )
+    .await;
+    sleep(Duration::from_millis(WND_SETTLE_MS)).await;
+    member_says(&rig, &mut a, &gid_b, &wn_gid_b, "s4b-hello-from-mk-core").await;
+    wn_says(&rig, &mut a, &gid_b, &wn_gid_b, "s4b-hello-from-wn").await;
 
     rig.relay.shutdown();
-    eprintln!(
-        "SCENARIO-4 {} {:.1}s",
-        if ok_new && ok_add { "PASS" } else { "REFUSED" },
-        start.elapsed().as_secs_f64()
+    eprintln!("SCENARIO-4 PASS {:.1}s", start.elapsed().as_secs_f64());
+}
+
+// ---- scenario 5: encrypted media round trip -------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs wn/wnd from the pinned MDK rev; see CONTRIBUTING"]
+async fn scenario5_media_round_trip() {
+    let start = Instant::now();
+    let rig = Arc::new(rig("s5").await);
+    let blossom = BlossomServer::new();
+    let mut a = open_member().await;
+    publish_identity(&mut a, &rig).await;
+    let a_npub = a.npub();
+
+    // Deterministic non-trivial plaintext (200 KiB).
+    let plaintext: Vec<u8> = (0u32..200 * 1024).map(|n| (n % 251) as u8).collect();
+    let file = std::env::temp_dir().join(format!("s5-plain-{}.bin", std::process::id()));
+    std::fs::write(&file, &plaintext).expect("write media file");
+
+    // wn founds the group (its defaults carry the encrypted-media-v2
+    // policy) and invites us.
+    let created = wn(
+        &rig.home,
+        &rig.socket,
+        Some(&rig.wn_npub),
+        &["groups", "create", "interop-5", &a_npub],
     );
+    let wn_gid = wn_group_id(&created);
+    let gid = hex_group(&wn_gid);
+    join_wn_group(&rig, &mut a, &gid).await;
+    until_member(
+        &mut a,
+        |a| {
+            let gid = gid.clone();
+            let rig = Arc::clone(&rig);
+            Box::pin(async move {
+                let _ = sync(&mut *a, &rig, &gid).await;
+                a.roster(&gid).contains(&rig.wn_pub).then_some(())
+            })
+        },
+        "A joins wn group (s5)",
+        90_000,
+    )
+    .await;
+    assert!(
+        a.session
+            .group(&gid)
+            .expect("group")
+            .expect("exists")
+            .encrypted_media
+            .is_some(),
+        "s5 group must carry the encrypted-media policy"
+    );
+    sleep(Duration::from_millis(WND_SETTLE_MS)).await;
+
+    // wn → mk-core: wn encrypts + uploads to the dev Blossom server and
+    // sends the imeta reference; we ingest, fetch by locator, open.
+    let file_str = file.to_str().expect("utf8 path").to_owned();
+    let uploaded = wn(
+        &rig.home,
+        &rig.socket,
+        Some(&rig.wn_npub),
+        &[
+            "media",
+            "upload",
+            &wn_gid,
+            &file_str,
+            "--server",
+            &blossom.url,
+            "--send",
+            "--message",
+            "s5-wn-media",
+        ],
+    );
+    eprintln!("s5: wn upload result: {uploaded}");
+    let (reference, transport_id, group_id) = until_member(
+        &mut a,
+        |a| {
+            let gid = gid.clone();
+            let rig = Arc::clone(&rig);
+            Box::pin(async move {
+                let events = sync(&mut *a, &rig, &gid).await;
+                events.iter().find_map(|event| match event {
+                    SessionEvent::MessageReceived { group, message }
+                        if !message.attachments.is_empty() =>
+                    {
+                        let reference = message.attachments.iter().find_map(|r| r.as_ref().ok())?;
+                        Some((reference.clone(), message.transport_id, group.clone()))
+                    }
+                    _ => None,
+                })
+            })
+        },
+        "mk receives wn media attachment",
+        120_000,
+    )
+    .await;
+    eprintln!(
+        "s5: wn->mk attachment locators={:?} media_type={}",
+        reference.locators, reference.media_type
+    );
+    let blob_hash = hex::encode(reference.ciphertext_sha256);
+    let ciphertext = blossom
+        .get(&blob_hash)
+        .expect("wn's upload stored on the dev server");
+    let opened = a
+        .session
+        .open_attachment(&group_id, &transport_id, &reference, &ciphertext)
+        .expect("open_attachment");
+    assert_eq!(opened, plaintext, "s5 wn->mk plaintext matches");
+
+    // mk-core → wn: seal, "upload" into the dev server's store, send the
+    // reference with the loopback locator, then `wn media download`.
+    let sealed = a
+        .session
+        .seal_attachment(
+            &gid,
+            AttachmentInput {
+                plaintext: plaintext.clone(),
+                media_type: "application/octet-stream".to_owned(),
+                filename: "s5.bin".to_owned(),
+                dim: None,
+                thumbhash: None,
+            },
+        )
+        .expect("seal_attachment");
+    let cipher_hash = hex::encode(sealed.ciphertext_sha256);
+    blossom.put(&cipher_hash, &sealed.ciphertext);
+    a.session
+        .send_media(
+            &gid,
+            MediaMessage {
+                caption: "s5-mk-media".to_owned(),
+                attachments: vec![(
+                    sealed.pending,
+                    vec![Locator {
+                        kind: "blossom-v1".to_owned(),
+                        value: format!("{}/{cipher_hash}", blossom.url),
+                    }],
+                )],
+                tags: Vec::new(),
+            },
+        )
+        .await
+        .expect("send_media");
+    flush(&mut a, &rig).await;
+
+    let plain_hash = sha256_hex(&plaintext);
+    let out_path = std::env::temp_dir().join(format!("s5-out-{}.bin", std::process::id()));
+    let out_str = out_path.to_str().expect("utf8 path").to_owned();
+    let downloaded = until(
+        || {
+            let rig = Arc::clone(&rig);
+            let wn_gid = wn_gid.clone();
+            let plain_hash = plain_hash.clone();
+            let out_str = out_str.clone();
+            async move {
+                let (ok, parsed) = wn_try(
+                    &rig.home,
+                    &rig.socket,
+                    Some(&rig.wn_npub),
+                    &[
+                        "media",
+                        "download",
+                        &wn_gid,
+                        &plain_hash,
+                        "--output",
+                        &out_str,
+                    ],
+                );
+                (ok && out_path_exists(&out_str)).then_some(parsed)
+            }
+        },
+        "wn media download",
+        120_000,
+        3_000,
+    )
+    .await;
+    eprintln!("s5: wn download result: {downloaded}");
+    assert_eq!(
+        std::fs::read(&out_path).expect("read downloaded"),
+        plaintext,
+        "s5 mk->wn plaintext matches"
+    );
+
+    rig.relay.shutdown();
+    eprintln!("SCENARIO-5 PASS {:.1}s", start.elapsed().as_secs_f64());
+}
+
+fn out_path_exists(path: &str) -> bool {
+    std::path::Path::new(path).is_file()
+}
+
+// ---- scenario 6: agent text stream anchors --------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs wn/wnd from the pinned MDK rev; see CONTRIBUTING"]
+async fn scenario6_stream_anchors() {
+    let start = Instant::now();
+    let rig = Arc::new(rig("s6").await);
+    let mut a = open_member().await;
+    publish_identity(&mut a, &rig).await;
+    let a_npub = a.npub();
+
+    let created = wn(
+        &rig.home,
+        &rig.socket,
+        Some(&rig.wn_npub),
+        &["groups", "create", "interop-6", &a_npub],
+    );
+    let wn_gid = wn_group_id(&created);
+    let gid = hex_group(&wn_gid);
+    join_wn_group(&rig, &mut a, &gid).await;
+    until_member(
+        &mut a,
+        |a| {
+            let gid = gid.clone();
+            let rig = Arc::clone(&rig);
+            Box::pin(async move {
+                let _ = sync(&mut *a, &rig, &gid).await;
+                a.roster(&gid).contains(&rig.wn_pub).then_some(())
+            })
+        },
+        "A joins wn group (s6)",
+        90_000,
+    )
+    .await;
+    sleep(Duration::from_millis(WND_SETTLE_MS)).await;
+
+    // wn anchors a stream start (no broker needs to run).
+    let stream_id = "07".repeat(32);
+    let started = wn(
+        &rig.home,
+        &rig.socket,
+        Some(&rig.wn_npub),
+        &[
+            "stream",
+            "start",
+            &wn_gid,
+            "--stream-id",
+            &stream_id,
+            "--quic-candidate",
+            "quic://127.0.0.1:4450",
+        ],
+    );
+    eprintln!("s6: wn stream start result: {started}");
+    // `stream start` reports transport message ids; the kind-9 final
+    // references the inner app-event id, which `wn messages list` exposes as
+    // `message_id` on the kind-1200 row.
+    let start_event_id = until(
+        || {
+            let rig = Arc::clone(&rig);
+            let wn_gid = wn_gid.clone();
+            let stream_id = stream_id.clone();
+            async move {
+                wn_messages(&rig, &wn_gid, 50).into_iter().find_map(|m| {
+                    let stream = m.pointer("/agent_text_stream")?;
+                    if stream.get("kind") == Some(&Value::from("start"))
+                        && stream.get("stream_id") == Some(&Value::from(stream_id.as_str()))
+                    {
+                        m.get("message_id")?.as_str().map(str::to_owned)
+                    } else {
+                        None
+                    }
+                })
+            }
+        },
+        "wn projects the kind-1200 start row",
+        60_000,
+        1_000,
+    )
+    .await;
+
+    let anchor = until_member(
+        &mut a,
+        |a| {
+            let gid = gid.clone();
+            let rig = Arc::clone(&rig);
+            let stream_id = stream_id.clone();
+            Box::pin(async move {
+                let events = sync(&mut *a, &rig, &gid).await;
+                events.iter().find_map(|event| match event {
+                    SessionEvent::AgentStreamStarted { start, .. }
+                        if hex::encode(start.stream_id) == stream_id =>
+                    {
+                        Some(start.clone())
+                    }
+                    _ => None,
+                })
+            })
+        },
+        "mk surfaces AgentStreamStarted",
+        120_000,
+    )
+    .await;
+    assert_eq!(hex::encode(anchor.stream_id), stream_id);
+    assert_eq!(anchor.id, start_event_id, "start anchor ids match");
+
+    // wn commits the final: kind-9 with stream-final anchors.
+    let transcript_hash = "ab".repeat(32);
+    let finished = wn(
+        &rig.home,
+        &rig.socket,
+        Some(&rig.wn_npub),
+        &[
+            "stream",
+            "finish",
+            &wn_gid,
+            "--stream-id",
+            &stream_id,
+            "--start-event-id",
+            &start_event_id,
+            "--transcript-hash",
+            &transcript_hash,
+            "--chunk-count",
+            "3",
+            "final text",
+        ],
+    );
+    eprintln!("s6: wn stream finish result: {finished}");
+
+    let (content, final_) = until_member(
+        &mut a,
+        |a| {
+            let gid = gid.clone();
+            let rig = Arc::clone(&rig);
+            let stream_id = stream_id.clone();
+            Box::pin(async move {
+                let events = sync(&mut *a, &rig, &gid).await;
+                events.iter().find_map(|event| match event {
+                    SessionEvent::MessageReceived { message, .. } => {
+                        let final_ = message.stream_final?;
+                        (hex::encode(final_.stream_id) == stream_id)
+                            .then(|| (message.content.clone(), final_))
+                    }
+                    _ => None,
+                })
+            })
+        },
+        "mk surfaces stream final",
+        120_000,
+    )
+    .await;
+    assert_eq!(content, "final text");
+    assert_eq!(hex::encode(final_.stream_id), stream_id);
+    assert_eq!(hex::encode(final_.start_event_id), start_event_id);
+    assert_eq!(hex::encode(final_.transcript_hash), transcript_hash);
+    assert_eq!(final_.chunk_count, 3);
+
+    // Receive role is pure delivery: nothing staged for the wire.
+    assert!(
+        a.session.take_outbound().expect("outbound").is_empty(),
+        "s6 receive must produce no outbound"
+    );
+
+    rig.relay.shutdown();
+    eprintln!("SCENARIO-6 PASS {:.1}s", start.elapsed().as_secs_f64());
 }
