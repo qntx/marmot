@@ -2,8 +2,12 @@
 
 Marmot (MLS over Nostr) SDK for web, iOS and Android.
 
-**Status: pre-alpha skeleton.** There is no public API yet — `packages/marmot`
-currently ships typed spec registries and the shared result vocabulary only.
+**Status: pre-alpha.** `crates/mk-core` provides the pure-Rust core: a
+persistent KV storage provider for the pinned MDK engine and a public
+`Session` API (account-device session with injected storage, signing, clock
+and transport boundaries); there are no platform bindings yet.
+`packages/marmot` currently ships typed spec registries and the shared
+result vocabulary only.
 Layering rules and invariants for contributors live in
 [AGENTS.md](AGENTS.md); changes are tracked in [CHANGELOG.md](CHANGELOG.md);
 how to build and test is in [CONTRIBUTING.md](CONTRIBUTING.md).

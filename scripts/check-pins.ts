@@ -14,13 +14,45 @@ function asRecord(value: unknown): JsonObject {
 }
 
 /**
- * The pin named `spec` is the Marmot spec checkout: `*.md` files under `vectors/spec/foundation`
- * are recorded byte-for-byte copies of `<checkout>/foundation/*.md`, compared only when the
- * checkout sits exactly at its pinned rev.
+ * Recorded-copy checks. Each pin may carry directories of byte-for-byte upstream copies under
+ * `vectors/`; when that pin's checkout sits exactly at its pinned rev, every recorded file must
+ * match its source. We record subsets of the source trees, not whole directories.
  */
-const SPEC_PIN = "spec";
-const SPEC_RECORDED = "vectors/spec/foundation";
-const SPEC_SOURCE = "foundation";
+type RecordedRoot = {
+  /** Directory of recorded copies, repo-relative. */
+  recorded: string;
+  /** Source directory inside the upstream checkout. */
+  source: string;
+  /** Only files with this suffix are compared. */
+  extension: string;
+};
+
+const RECORDED: Record<string, RecordedRoot[]> = {
+  spec: [
+    {
+      recorded: "vectors/spec/foundation",
+      source: "foundation",
+      extension: ".md",
+    },
+  ],
+  mdk: [
+    {
+      recorded: "vectors/mdk",
+      source: "crates/cgka-conformance-simulator/vectors",
+      extension: ".json",
+    },
+    {
+      recorded: "vectors/mdk/incidents",
+      source: "crates/cgka-conformance-simulator/vectors/incidents",
+      extension: ".json",
+    },
+    {
+      recorded: "vectors/mdk/byte-fixtures",
+      source: "crates/cgka-conformance-simulator/vectors/byte-fixtures",
+      extension: ".json",
+    },
+  ],
+};
 
 export type PinProbe = {
   /** HEAD of a checkout directory, or undefined when the directory is absent. */
@@ -44,9 +76,9 @@ function sameBytes(a: Uint8Array, b: Uint8Array): boolean {
  * Validates the upstream.json pin file: every pin needs an https repository, a full 40-hex rev and
  * a checkout path (optional `tag` for the pinned release name). For each pin whose checkout
  * directory exists locally, the checkout HEAD must equal the pinned rev; absent checkouts are
- * skipped with a note (CI has no 3rdparty). When the `spec` checkout is at the pin, every recorded
- * spec copy under `vectors/spec/foundation` must match its `foundation/` source byte-for-byte (we
- * record a subset of the spec files, not the whole directory).
+ * skipped with a note (CI has no 3rdparty). When a checkout is at the pin, every recorded copy
+ * under the pin's `RECORDED` roots (spec `*.md`, mdk vector `*.json`) must match its upstream
+ * source byte-for-byte (we record subsets of the source trees, not whole directories).
  */
 export function checkPins(upstream: unknown, probe: PinProbe): PinsResult {
   const errors: string[] = [];
@@ -86,22 +118,21 @@ export function checkPins(upstream: unknown, probe: PinProbe): PinsResult {
       continue;
     }
 
-    if (name !== SPEC_PIN) {
-      continue;
-    }
-    // The spec checkout sits at the pinned rev: every recorded copy must be
-    // byte-identical to its source under <checkout>/foundation/.
-    for (const file of probe.listFiles(SPEC_RECORDED).filter((f) => f.endsWith(".md"))) {
-      const copy = probe.readBytes(join(SPEC_RECORDED, file));
-      const original = probe.readBytes(join(checkout, SPEC_SOURCE, file));
-      if (original === undefined) {
-        errors.push(
-          `${name}: ${SPEC_RECORDED}/${file} has no source in ${checkout}/${SPEC_SOURCE}`,
-        );
-      } else if (copy === undefined || !sameBytes(copy, original)) {
-        errors.push(
-          `${name}: ${SPEC_RECORDED}/${file} differs from ${checkout}/${SPEC_SOURCE}/${file}`,
-        );
+    // The checkout sits at the pinned rev: every recorded copy must be
+    // byte-identical to its source under <checkout>/<source>/.
+    for (const root of RECORDED[name] ?? []) {
+      for (const file of probe.listFiles(root.recorded).filter((f) => f.endsWith(root.extension))) {
+        const copy = probe.readBytes(join(root.recorded, file));
+        const original = probe.readBytes(join(checkout, root.source, file));
+        if (original === undefined) {
+          errors.push(
+            `${name}: ${root.recorded}/${file} has no source in ${checkout}/${root.source}`,
+          );
+        } else if (copy === undefined || !sameBytes(copy, original)) {
+          errors.push(
+            `${name}: ${root.recorded}/${file} differs from ${checkout}/${root.source}/${file}`,
+          );
+        }
       }
     }
   }

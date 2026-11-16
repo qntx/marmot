@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vite-plus/test";
 
-import { checkVersion } from "./check-version.ts";
+import { checkVersion, excludedCrates } from "./check-version.ts";
 
 const MARMOT = {
   path: "packages/marmot/package.json",
@@ -275,5 +275,14 @@ describe("check-version", () => {
     expect(errors).toStrictEqual([
       'Cargo.lock: workspace member "mk-core" has version "0.9.1", expected "0.9.0"',
     ]);
+  });
+
+  test("excludedCrateDirs strips the crates/ prefix and skips non-members", () => {
+    expect(
+      excludedCrates({
+        workspace: { exclude: ["crates/interop", "spike", "fuzz", 3] },
+      }),
+    ).toStrictEqual(new Set(["interop", "spike", "fuzz"]));
+    expect(excludedCrates({ workspace: {} })).toStrictEqual(new Set());
   });
 });

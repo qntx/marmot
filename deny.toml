@@ -16,8 +16,15 @@ feature-depth = 1
 [advisories]
 db-path = "~/.cargo/advisory-db"
 db-urls = ["https://github.com/rustsec/advisory-db"]
-yanked  = "deny"
-ignore  = []
+ignore = [
+  # libsqlite3-sys 0.38.2 (rusqlite 0.40, storage-sqlite dev-dep only, pinned
+  # MDK rev): fix needs rusqlite 0.41 which the pinned MDK does not accept.
+  { id = "RUSTSEC-2026-0459", reason = "dev-dependency of pinned MDK storage-sqlite; upgrade blocked on upstream rusqlite bump" },
+  # proc-macro-error2 via openmls_rust_crypto -> libcrux (pinned git dep).
+  # Unmaintained only; no safe upgrade path at the pinned revs.
+  { id = "RUSTSEC-2026-0173", reason = "transitive dep of pinned OpenMLS git rev; unmaintained advisory, no upgrade available" },
+]
+yanked = "deny"
 
 [licenses]
 allow                = ["MIT", "Apache-2.0", "BSD-3-Clause", "CDLA-Permissive-2.0", "ISC", "MPL-2.0", "Unicode-3.0", "CC0-1.0", "Zlib"]
@@ -37,4 +44,6 @@ skip-tree         = []
 unknown-registry = "deny"
 unknown-git      = "deny"
 allow-registry   = ["https://github.com/rust-lang/crates.io-index"]
-allow-git        = []
+# MDK is a git dependency by design (upstream.json pins the tag/rev), and it
+# pulls OpenMLS and its rust-nostr fork from git so the types unify.
+allow-git = ["https://github.com/marmot-protocol/mdk", "https://github.com/openmls/openmls", "https://github.com/erskingardner/rust-nostr"]

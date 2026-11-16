@@ -18,6 +18,113 @@ jobs:
     uses: qntx/workflows/.github/workflows/ci-bun.yml@v2
     permissions:
       contents: read
-    # bun run build → vp run -r build (no crates yet — cargo fmt/deny and the
-    # cross matrix get wired here when the first crate lands)
+    # bun run build → vp run -r build
     # bun run test → vp run -r test + repo-level scripts/*.test.ts
+    # bun run check:pins skips absent 3rdparty checkouts (CI has none) but
+    # still verifies the vectors/ byte copies. No `rust:` — no bun script
+    # invokes cargo.
+
+  rust:
+    uses: qntx/workflows/.github/workflows/ci-rust.yml@v2
+    permissions:
+      contents: read
+    with:
+      # rust-version omitted: rust-toolchain.toml pins the toolchain.
+      # 45 min: a cold `cargo test -p mk-core --all-features --release`
+      # (full MDK/OpenMLS dep graph build + the ~100s crash suite) measures
+      # ~8 min on an M-series Mac; margin for shared-runner speed.
+      timeout-minutes: 45
+      deny: true
+      doc: true
+      each-feature: true
+      packages: mk-core
+      # No package-check: every crate here is `publish = false`.
+
+  rust-minimal:
+    uses: qntx/workflows/.github/workflows/ci-rust.yml@v2
+    permissions:
+      contents: read
+    with:
+      packages: mk-core
+      features: --no-default-features
+
+  # secp256k1-sys compiles C on every target; ci-rust-cross supplies the wasm
+  # clang and Android NDK toolchains. forbid-deps forbids the sqlite C
+  # library only — the runtime graph must stay pure Rust; tokio is a normal
+  # engine dependency so it cannot be forbidden.
+  portable:
+    uses: qntx/workflows/.github/workflows/ci-rust-cross.yml@v2
+    permissions:
+      contents: read
+    with:
+      targets: wasm32-unknown-unknown aarch64-apple-ios aarch64-linux-android
+      packages: mk-core
+      forbid-deps: rusqlite libsqlite3-sys
+
+  # crates/interop is a standalone project (own workspace/lockfile/deny.toml);
+  # it compiles and lints here and runs its non-ignored tests. The wn/wnd
+  # scenario tests stay #[ignore] until a CI job can pin the wn binaries.
+  interop:
+    uses: qntx/workflows/.github/workflows/ci-rust.yml@v2
+    permissions:
+      contents: read
+    with:
+      working-directory: crates/interop
+      deny: true
+      doc: false
+
+  # crates/conformance replays the recorded MDK vectors through our Session
+  # API; its cgka-conformance-simulator dep pulls marmot-markdown, which
+  # compiles Odin sources at build time — the job needs the pinned Odin
+  # toolchain (dev-2026-10, rev 84bc3fc; see marmot-markdown/build.rs).
+  conformance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: "1.99"
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      # URL + SHA-256 are the linux-x86_64 asset pinned by MDK's own
+      # checksum-pinned installer, scripts/install-odin.sh at mdk rev
+      # a2e0558a634bbd20607cdd5afb93abc6220ee58d (upstream dev-2026-10 →
+      # commit 84bc3fc).
+      - name: Install pinned Odin
+        run: |
+          set -euo pipefail
+          asset=odin-linux-amd64-dev-2026-10.tar.gz
+          curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error \
+            -o "$RUNNER_TEMP/$asset" \
+            "https://github.com/odin-lang/Odin/releases/download/dev-2026-10/$asset"
+          echo 'c3c8b095621fd0c75f7f73e3a0829f1b4d45324225f20ba11ed8dc4da310a8ab  '"$RUNNER_TEMP/$asset" \
+            | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/odin-bin"
+          tar -xzf "$RUNNER_TEMP/$asset" -C "$RUNNER_TEMP/odin-bin" --strip-components=1
+          echo "ODIN=$RUNNER_TEMP/odin-bin/odin" >> "$GITHUB_ENV"
+          "$RUNNER_TEMP/odin-bin/odin" version | tee /dev/stderr | grep -q 'dev-2026-10.*84bc3fc'
+      - run: cargo fmt --all --check
+        working-directory: crates/conformance
+      - run: cargo clippy --all-targets -- -D warnings
+        working-directory: crates/conformance
+      - run: cargo test --release
+        working-directory: crates/conformance
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          command: check
+          manifest-path: crates/conformance/Cargo.toml
+
+  # cargo fuzz starts from an empty corpus when fuzz/corpus/<target> is
+  # absent (it is gitignored; seeds regenerate via fuzz's gen_corpus bin).
+  fuzz:
+    uses: qntx/workflows/.github/workflows/ci-rust-fuzz.yml@v2
+    permissions:
+      contents: read
+    with:
+      fuzz-directory: fuzz
+      max-total-time: 60
