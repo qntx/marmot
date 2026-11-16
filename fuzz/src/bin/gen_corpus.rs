@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use mk_core::testing::{LocalSigner, ManualClock, RecordingHost};
-use mk_core::{AccountSigner, Opened, RelayPolicy, Session, SessionConfig};
+use mk_core::{AccountSigner, DestinationPolicy, Opened, Session, SessionConfig};
 
 fn config(
     signer: Arc<LocalSigner>,
@@ -25,7 +25,7 @@ fn config(
         host,
         rows,
         clock,
-        relay_policy: RelayPolicy {
+        destination_policy: DestinationPolicy {
             allow_loopback: true,
         },
         client_name: None,
@@ -33,7 +33,9 @@ fn config(
 }
 
 fn write(corpus: &std::path::Path, target: &str, name: &str, bytes: &[u8]) {
-    let path = corpus.join(target).join(name);
+    let dir = corpus.join(target);
+    std::fs::create_dir_all(&dir).unwrap_or_else(|err| panic!("mkdir {dir:?}: {err}"));
+    let path = dir.join(name);
     std::fs::write(&path, bytes).unwrap_or_else(|err| panic!("write {path:?}: {err}"));
 }
 
@@ -112,4 +114,31 @@ async fn main() {
         kv_rows.extend_from_slice(value);
     }
     write(&corpus, "kv_rows", "rows-0", &kv_rows);
+
+    // imeta_tag: a real `imeta` tag plus a mutated one.
+    write(
+        &corpus,
+        "imeta_tag",
+        "imeta-valid",
+        b"v encrypted-media-v2\0locator blossom-v1 https://blossom.example/aa\0ciphertext_sha256 0000000000000000000000000000000000000000000000000000000000000001\0plaintext_sha256 0000000000000000000000000000000000000000000000000000000000000002\0nonce aaaaaaaaaaaaaaaaaaaaaaaa\0m image/png\0filename pic.png",
+    );
+
+    // stream_anchor: a valid stream-start tag set, newline/tab format.
+    write(
+        &corpus,
+        "stream_anchor",
+        "stream-start",
+        format!(
+            "stream\t{}\nstream-type\ttext\nfinal-kind\t9\nparent\t{}\nroute\tquic\nbroker\tquic://b1\nbroker\tquic://b2",
+            "07".repeat(32),
+            "08".repeat(32),
+        )
+        .as_bytes(),
+    );
+    // stream_anchor: a real encoded 0x8006 policy (from_component path).
+    if let Ok(component) =
+        mk_core::agent_stream::AgentStreamPolicy::user_to_agent_default().to_component()
+    {
+        write(&corpus, "stream_anchor", "policy-0x8006", &component.data);
+    }
 }
