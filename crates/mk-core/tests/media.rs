@@ -83,7 +83,8 @@ mod crypto_kats {
             let media_type = case["media_type"].as_str().unwrap();
             let filename = case["filename"].as_str().unwrap();
 
-            let key = media::derive_file_key(&secret, &plaintext_sha256, media_type, filename);
+            let key =
+                media::derive_file_key(&secret, &plaintext_sha256, media_type, filename).unwrap();
             assert_eq!(
                 key.as_bytes(),
                 &hex32(case["file_key_hex"].as_str().unwrap()),
@@ -113,7 +114,8 @@ mod crypto_kats {
             let ciphertext = hex_bytes(case["ciphertext_hex"].as_str().unwrap());
             let ciphertext_sha256 = hex32(case["ciphertext_sha256"].as_str().unwrap());
 
-            let key = media::derive_file_key(&secret, &plaintext_sha256, media_type, filename);
+            let key =
+                media::derive_file_key(&secret, &plaintext_sha256, media_type, filename).unwrap();
             let aad = media::media_aad(&plaintext_sha256, media_type, filename);
             assert_eq!(
                 media::encrypt_file(&key, &nonce, &aad, &plaintext).unwrap(),

@@ -1666,7 +1666,7 @@ impl Session {
     /// # Errors
     /// [`SessionError::MediaNotEnabled`] when the group carries no `0x800b`
     /// component; [`SessionError::Media`] for an invalid media type,
-    /// filename, or an oversized plaintext.
+    /// filename, an oversized plaintext, or a key-derivation failure.
     pub fn seal_attachment(
         &self,
         group: &GroupId,
@@ -1684,7 +1684,7 @@ impl Session {
             .epoch_pin(&group_id)
             .map_err(session_engine_error)?;
         let secret = self.media_secret(&group_id)?;
-        let key = media::derive_file_key(&secret, &plaintext_sha256, &media_type, &input.filename);
+        let key = media::derive_file_key(&secret, &plaintext_sha256, &media_type, &input.filename)?;
         let mut nonce = [0u8; 12];
         getrandom::fill(&mut nonce).map_err(|_| SessionError::Internal("rng"))?;
         let aad = media::media_aad(&plaintext_sha256, &media_type, &input.filename);

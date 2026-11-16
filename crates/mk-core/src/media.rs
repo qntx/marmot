@@ -358,6 +358,9 @@ pub enum MediaError {
     /// only failure `encrypt_file` can produce.
     #[error("payload too large")]
     PayloadTooLarge,
+    /// HKDF rejected the media secret or the requested output length.
+    #[error("key derivation failed")]
+    KeyDerivation,
 }
 
 /// The per-file key: HKDF-SHA256 expand-only over the epoch's 32-byte media
@@ -417,26 +420,24 @@ pub fn media_aad(plaintext_sha256: &[u8; 32], media_type: &str, filename: &str) 
 
 /// Derive one file's key from the epoch's 32-byte media secret (HKDF-SHA256,
 /// expand-only, `from_prk`).
-#[must_use]
+///
+/// # Errors
+/// [`MediaError::KeyDerivation`] when HKDF rejects the media secret or the
+/// requested output length.
 pub fn derive_file_key(
     media_secret: &[u8; 32],
     plaintext_sha256: &[u8; 32],
     media_type: &str,
     filename: &str,
-) -> FileKey {
-    // `from_prk` rejects only PRKs shorter than SHA-256's 32-byte output;
-    // `media_secret` is exactly 32 bytes, so this never fails.
-    let Ok(hkdf) = Hkdf::<Sha256>::from_prk(media_secret) else {
-        return FileKey(Zeroizing::new([0u8; 32]));
-    };
+) -> Result<FileKey, MediaError> {
+    let hkdf = Hkdf::<Sha256>::from_prk(media_secret).map_err(|_| MediaError::KeyDerivation)?;
     let mut key = Zeroizing::new([0u8; 32]);
-    // A 32-byte output can never exceed HKDF-SHA256's length ceiling.
     hkdf.expand(
         &media_key_info(plaintext_sha256, media_type, filename),
         &mut *key,
     )
-    .unwrap_or(());
-    FileKey(key)
+    .map_err(|_| MediaError::KeyDerivation)?;
+    Ok(FileKey(key))
 }
 
 /// Encrypt `plaintext` under `key`/`nonce` with `aad` (ChaCha20-Poly1305).
@@ -467,9 +468,10 @@ pub fn encrypt_file(
 /// AEAD-open with the reference's AAD, then verify `sha256(plaintext)`.
 ///
 /// # Errors
-/// [`MediaError::CiphertextHashMismatch`], [`MediaError::DecryptionFailed`]
-/// (which also covers a wrong filename or media type — the AAD no longer
-/// matches) and [`MediaError::PlaintextHashMismatch`].
+/// [`MediaError::CiphertextHashMismatch`], [`MediaError::KeyDerivation`],
+/// [`MediaError::DecryptionFailed`] (which also covers a wrong filename or
+/// media type — the AAD no longer matches) and
+/// [`MediaError::PlaintextHashMismatch`].
 pub fn decrypt_file(
     media_secret: &[u8; 32],
     reference: &MediaReference,
@@ -484,7 +486,7 @@ pub fn decrypt_file(
         &reference.plaintext_sha256,
         &reference.media_type,
         &reference.filename,
-    );
+    )?;
     let aad = media_aad(
         &reference.plaintext_sha256,
         &reference.media_type,
