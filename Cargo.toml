@@ -22,7 +22,7 @@ openmls_traits      = { git = "https://github.com/openmls/openmls.git", rev = "6
 nostr      = { git = "https://github.com/erskingardner/rust-nostr", rev = "e93cc06b5624f06c21ecd8111a124176eb0c7589", version = "=0.45.5", default-features = false, features = ["std", "rand", "os-rng", "nip04", "nip49", "nip59"] }
 serde      = { version = "1", features = ["derive"] }
 serde_json = "1"
-sha2       = "0.10"
+sha2       = "0.11"
 thiserror  = "2"
 url        = "2"
 zeroize    = "1"
