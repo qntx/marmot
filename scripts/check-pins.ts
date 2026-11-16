@@ -51,6 +51,11 @@ const RECORDED: Record<string, RecordedRoot[]> = {
       source: "crates/cgka-conformance-simulator/vectors/byte-fixtures",
       extension: ".json",
     },
+    {
+      recorded: "vectors/mdk/encrypted-media",
+      source: "fixtures/encrypted-media",
+      extension: ".json",
+    },
   ],
 };
 

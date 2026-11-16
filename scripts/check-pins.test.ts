@@ -134,9 +134,13 @@ describe("checkPins", () => {
       new TextEncoder().encode("not recorded"),
     "3rdparty/mdk/crates/cgka-conformance-simulator/vectors/incidents/i.v1.json":
       new TextEncoder().encode("incident i"),
+    "3rdparty/mdk/fixtures/encrypted-media/imeta-v1.json": new TextEncoder().encode("imeta v1"),
+    "3rdparty/mdk/fixtures/encrypted-media/imeta-v2.json": new TextEncoder().encode("imeta v2"),
     "vectors/mdk/a.v1.json": new TextEncoder().encode("vector a"),
     "vectors/mdk/PROVENANCE.md": new TextEncoder().encode("provenance"),
     "vectors/mdk/incidents/i.v1.json": new TextEncoder().encode("incident i"),
+    "vectors/mdk/encrypted-media/imeta-v1.json": new TextEncoder().encode("imeta v1"),
+    "vectors/mdk/encrypted-media/imeta-v2.json": new TextEncoder().encode("imeta v2"),
   };
 
   test("compares recorded mdk vectors when the mdk checkout is at the pin", () => {
