@@ -6,7 +6,7 @@ resolver = "3"
 
 [workspace.dependencies]
 base64    = "0.22"
-getrandom = "0.3"
+getrandom = "0.4"
 hex       = "0.4"
 # MDK at the pinned tag v0.16.0 (upstream.json "mdk").
 cgka-traits            = { git = "https://github.com/marmot-protocol/mdk", rev = "a2e0558a634bbd20607cdd5afb93abc6220ee58d", version = "=0.16.0" }
