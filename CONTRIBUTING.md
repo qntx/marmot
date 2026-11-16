@@ -86,7 +86,7 @@ cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo deny che
 
 ## White Noise interop (`crates/interop`)
 
-Four scenario tests (`tests/wn.rs`) drive the public `Session` API against a
+Six scenario tests (`tests/wn.rs`) drive the public `Session` API against a
 real White Noise `wn`/`wnd` pair built from the pinned MDK rev, over a real
 in-process NIP-01 WebSocket relay (`nostr-sdk`'s `LocalRelay` from the
 `erskingardner/rust-nostr` fork MDK itself pins). `wnd` is spawned and
@@ -115,14 +115,17 @@ WND_BIN=$PWD/../../spike/target/wn/bin/wnd \
 ```
 
 Each run uses a fresh temporary `WN_HOME` (`WN_SECRET_STORE=file`,
-`WN_ALLOW_LOOPBACK_RELAYS=1`), removed when the `Wnd` guard drops; `wnd`
+`WN_ALLOW_LOOPBACK_RELAYS=1`,
+`WN_ALLOW_LOOPBACK_BLOB_ENDPOINTS=1` — scenario 5's dev
+Blossom server binds loopback), removed when the `Wnd` guard drops; `wnd`
 logs land under `crates/interop/target/wn-logs/`. Per-scenario
 `SCENARIO-N PASS|REFUSED <evidence> <seconds>` lines print to stderr.
 
 ## Fuzzing (`fuzz/`)
 
-Five libFuzzer targets cover every decoder mk-core owns (kv batch, kv rows,
-event JSON, account proof, key-package event). The seed corpus is generated
+Seven libFuzzer targets cover every decoder mk-core owns (kv batch, kv rows,
+event JSON, account proof, key-package event, imeta parse, agent-stream
+tags). The seed corpus is generated
 from real session artifacts and is gitignored — regenerate it when the row
 formats change:
 
