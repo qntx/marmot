@@ -103,8 +103,10 @@ use tokio as _;
 use base64 as _;
 use cgka_engine as _;
 use cgka_traits as _;
+use chacha20poly1305 as _;
 use getrandom as _;
 use hex as _;
+use hkdf as _;
 use nostr as _;
 use openmls as _;
 use openmls_rust_crypto as _;
@@ -348,7 +350,7 @@ mod crash {
 
         /// Drain session events into the effect ledgers.
         fn drain(&mut self, member: usize) {
-            for event in self.world.members[member].session.drain_events() {
+            for event in self.world.members[member].session.drain_events().unwrap() {
                 match event {
                     SessionEvent::MessageReceived { message, .. } => {
                         assert!(
@@ -622,6 +624,7 @@ mod crash {
                             relays: vec![RELAY.to_owned()],
                             invitees: invites,
                             admins: admin_accounts,
+                            components: Vec::new(),
                         })
                         .await
                         .expect("create_group");
@@ -1400,6 +1403,7 @@ mod crash {
                     relays: vec![RELAY.to_owned()],
                     invitees,
                     admins: Vec::new(),
+                    components: Vec::new(),
                 })
                 .await
                 .expect("create_group")
@@ -1493,6 +1497,7 @@ mod crash {
                 relays: vec![RELAY.to_owned()],
                 invitees,
                 admins: Vec::new(),
+                components: Vec::new(),
             })
             .await
             .expect("create_group");
@@ -1552,6 +1557,7 @@ mod crash {
                         matches!(g.state, GroupState::Recovering | GroupState::Unrecoverable)
                     }) || session
                         .drain_events()
+                        .unwrap()
                         .iter()
                         .any(|e| matches!(e, SessionEvent::HydrationQuarantined { .. }));
                     if groups.is_empty() {

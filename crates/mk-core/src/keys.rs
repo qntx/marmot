@@ -93,6 +93,10 @@ pub(crate) enum Table {
     /// replacement for the engine's in-memory `queued_intent_by_message`
     /// (cgka-engine `message_processor/mod.rs:1773`).
     QueuedIntentLink = 35,
+    /// Epoch exporter secrets captured per delivered media message, keyed
+    /// `group/transport_id` — the only custody of the key material
+    /// `open_attachment` needs after the source epoch is pruned.
+    MediaSecret = 36,
 }
 
 /// Meta row keys inside [`Table::Meta`].

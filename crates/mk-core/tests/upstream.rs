@@ -32,17 +32,27 @@ mod harness;
 use std::sync::Arc;
 
 use cgka_engine::convergence_clock::ManualConvergenceClock;
-use cgka_engine::{Engine, EngineBuilder};
-use cgka_traits::engine::{CgkaEngine, CreateGroupRequest, SendIntent, SendResult};
+use cgka_engine::{Engine, EngineBuilder, FeatureRegistry};
+use cgka_traits::agent_text_stream::{
+    AGENT_TEXT_STREAM_QUIC_RECEIVE_CAPABILITY, AGENT_TEXT_STREAM_QUIC_RECEIVE_FEATURE,
+    AgentTextStreamQuicPolicyV1,
+};
+use cgka_traits::app_components::{AGENT_TEXT_STREAM_QUIC_COMPONENT_ID, AppComponentData};
+use cgka_traits::capabilities::{Capability, CapabilityRequirement, Feature, RequirementLevel};
+use cgka_traits::engine::{
+    CgkaEngine, CreateGroupRequest, KeyPackageSource, SendIntent, SendResult,
+};
 use cgka_traits::engine_state::PendingStateRef;
 use cgka_traits::error::EngineError;
 use cgka_traits::group::ProtocolProfile;
+use cgka_traits::ingest::IngestOutcome;
 use cgka_traits::storage::{MessageStorage, StorageError};
-use cgka_traits::types::GroupId;
+use cgka_traits::types::{GroupId, MessageId};
 use harness::{
     HostAccountSigner, RELAY_URL, account_keys, routing_component, supported_components,
     supported_features,
 };
+use mk_core::agent_stream::{AgentStreamPolicy, StreamRoles};
 use storage_sqlite::{SqlCipherKey, SqliteAccountStorage};
 use transport_nostr_peeler::NostrMlsPeeler;
 
@@ -57,6 +67,14 @@ struct SqliteMember {
 }
 
 fn open_sqlite_member(path: &std::path::Path, seed: &str) -> SqliteMember {
+    open_sqlite_member_with_features(path, seed, supported_features())
+}
+
+fn open_sqlite_member_with_features(
+    path: &std::path::Path,
+    seed: &str,
+    registry: FeatureRegistry,
+) -> SqliteMember {
     let signer = HostAccountSigner::new(account_keys(seed));
     let storage = SqliteAccountStorage::open_encrypted(path, &SqlCipherKey::raw([0x42; 32]))
         .expect("sqlite opens");
@@ -67,7 +85,7 @@ fn open_sqlite_member(path: &std::path::Path, seed: &str) -> SqliteMember {
         .account_identity_proof_signer(signer.clone())
         .protocol_profile(ProtocolProfile::Current)
         .supported_app_components(supported_components())
-        .feature_registry(supported_features())
+        .feature_registry(registry)
         .peeler(Box::new(peeler))
         .convergence_clock(clock.clone())
         .build()
@@ -207,4 +225,191 @@ async fn reconfirm_of_same_own_commit_after_rewind_errors_already_exists() {
         matches!(error, EngineError::Storage(StorageError::AlreadyExists)),
         "expected AlreadyExists, got {error:?}"
     );
+}
+
+/// Settle one member's convergence on `group_id`: advance the manual clock
+/// past every pass deadline, advance stored inputs, run the full advance and
+/// confirm every publish obligation it surfaces, like the session's `drive()`
+/// minus relay delivery. Without the clock advance a collecting pass never
+/// reaches its quiescence cutoff and retained input stays buffered forever.
+async fn settle(member: &mut SqliteMember, group_id: &GroupId) {
+    for _ in 0..10 {
+        member.clock.advance_ms(60_000);
+        let _ = member
+            .engine
+            .prepare_convergence_cutoff_delay_ms(group_id)
+            .expect("arm convergence pass");
+        member
+            .engine
+            .advance_convergence_inputs_until_settled(group_id, 0)
+            .await
+            .expect("settle inputs");
+        let results = member
+            .engine
+            .advance_convergence(group_id)
+            .await
+            .expect("advance convergence");
+        let mut progressed = !results.is_empty();
+        for result in results {
+            if let SendResult::GroupEvolution { pending, .. }
+            | SendResult::GroupCreated { pending, .. } = result
+            {
+                member
+                    .engine
+                    .confirm_published(pending)
+                    .await
+                    .expect("confirm");
+            }
+        }
+        for obligation in member.engine.drain_auto_publish() {
+            progressed = true;
+            member
+                .engine
+                .confirm_published(obligation.pending)
+                .await
+                .expect("confirm auto-publish");
+        }
+        let _ = member.engine.drain_auto_proposals();
+        if !progressed {
+            return;
+        }
+    }
+}
+
+/// mk-core's feature registry (`Session::feature_registry`): `SelfRemove`
+/// required, the agent-text-stream receive role optional, send and fanout
+/// never registered.
+fn receive_only_features() -> FeatureRegistry {
+    let mut registry = FeatureRegistry::new();
+    registry.register(
+        Feature("self-remove"),
+        CapabilityRequirement {
+            requires: Capability::Proposal(10),
+            level: RequirementLevel::Required,
+            description: "MIP-03 SelfRemove group departure",
+        },
+    );
+    registry.register(
+        AGENT_TEXT_STREAM_QUIC_RECEIVE_FEATURE.clone(),
+        CapabilityRequirement {
+            requires: AGENT_TEXT_STREAM_QUIC_RECEIVE_CAPABILITY,
+            level: RequirementLevel::Optional,
+            description: "receive QUIC-backed agent text stream previews",
+        },
+    );
+    registry
+}
+
+/// spec `app-components/agent-text-stream-quic-v1.md` "Validation": a
+/// component update adding a required member role is valid only when every
+/// member of the resulting epoch advertises it. The pinned engine enforces
+/// `required_member_roles` on the invite and join paths only
+/// (`required_role_capabilities_from_group`), so an `AppDataUpdate` commit
+/// that tightens the mask stages, confirms and applies on every member even
+/// though none holds the send capability. Current upstream behaviour; a pin
+/// bump that enforces the invariant flips this test. mk-core refuses the
+/// same state at its own-commit gate instead.
+#[tokio::test(flavor = "current_thread")]
+async fn component_update_tightening_unheld_role_stages_and_applies() {
+    let dir = std::env::temp_dir().join(format!("mk-upstream-roles-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let mut a =
+        open_sqlite_member_with_features(&dir.join("a.db"), "upstream-a", receive_only_features());
+    let mut b =
+        open_sqlite_member_with_features(&dir.join("b.db"), "upstream-b", receive_only_features());
+
+    // B's KeyPackage advertises receive only. A founds a group carrying the
+    // user-to-agent `0x8006` policy (required: receive).
+    let mut b_key_package = b.engine.fresh_key_package().await.expect("b key package");
+    b_key_package.source = Some(KeyPackageSource {
+        event_id: MessageId::new(vec![0x77; 32]),
+    });
+    let stream = AgentStreamPolicy::user_to_agent_default()
+        .to_component()
+        .expect("component");
+    let req = CreateGroupRequest {
+        name: "upstream-roles".into(),
+        description: String::new(),
+        members: vec![b_key_package],
+        required_features: Vec::new(),
+        app_components: vec![
+            routing_component(&a.engine.self_id(), &[RELAY_URL.to_string()]),
+            AppComponentData {
+                component_id: stream.component_id,
+                data: stream.data,
+            },
+        ],
+        initial_admins: Vec::new(),
+    };
+    let (group_id, create_result) = a.engine.create_group(req).await.expect("create_group");
+    let SendResult::FoundingGroupCreated { welcomes } = create_result else {
+        panic!("expected FoundingGroupCreated, got {create_result:?}");
+    };
+    let welcome = welcomes.into_iter().next().expect("one welcome for B");
+    let joined = b
+        .engine
+        .join_welcome(welcome)
+        .await
+        .expect("b joins via welcome");
+    assert_eq!(joined, group_id);
+
+    // The join leaves B publish-before-apply obligations of its own; settle
+    // them or the group stays non-ingestible and A's commit only buffers.
+    settle(&mut b, &group_id).await;
+
+    // Tighten `required_member_roles` to receive|send. The spec's
+    // resulting-epoch invariant forbids it — no member advertises send —
+    // but upstream stages and applies the commit anyway.
+    let tightened = AgentStreamPolicy {
+        required_roles: StreamRoles::RECEIVE.union(StreamRoles::SEND),
+        allowed_roles: StreamRoles::RECEIVE.union(StreamRoles::SEND),
+        ..AgentStreamPolicy::user_to_agent_default()
+    }
+    .to_component()
+    .expect("component");
+    let result = a
+        .engine
+        .send(SendIntent::UpdateAppComponents {
+            group_id: group_id.clone(),
+            updates: vec![AppComponentData {
+                component_id: tightened.component_id,
+                data: tightened.data,
+            }],
+        })
+        .await
+        .expect("the update stages");
+    let SendResult::GroupEvolution {
+        msg,
+        welcomes,
+        pending,
+    } = result
+    else {
+        panic!("expected GroupEvolution, got {result:?}");
+    };
+    assert!(welcomes.is_empty(), "a component update stages no welcomes");
+    a.engine
+        .confirm_published(pending)
+        .await
+        .expect("confirm_published");
+
+    // A commit at the current epoch always enters distributed convergence
+    // (`commit_should_enter_convergence`), so first delivery can only be
+    // `Buffered` — `Processed` is reserved for accepted input once the pass
+    // settles. Once the clock clears the pass's quiescence cutoff the pass
+    // freezes, selects the commit and applies it: the invalid update lands
+    // on the receiver's canonical state unchallenged.
+    let outcome = b.engine.ingest(msg).await.expect("b ingests the commit");
+    assert!(
+        matches!(outcome, IngestOutcome::Buffered { .. }),
+        "expected Buffered (retained for convergence), got {outcome:?}"
+    );
+    settle(&mut b, &group_id).await;
+    let bytes = b
+        .engine
+        .app_component(&group_id, AGENT_TEXT_STREAM_QUIC_COMPONENT_ID)
+        .expect("app_component")
+        .expect("component present");
+    let policy =
+        AgentTextStreamQuicPolicyV1::decode_component_state(&bytes).expect("policy decodes");
+    assert_eq!(policy.required_member_roles, 0x03);
 }

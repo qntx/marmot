@@ -25,7 +25,7 @@ use std::sync::{Arc, Mutex};
 
 use mk_core::testing::{LocalSigner, ManualClock, RecordingHost};
 use mk_core::{
-    AccountSigner, Event, GroupId, Opened, Outbound, RelayPolicy, RelayResult, RelayStatus,
+    AccountSigner, DestinationPolicy, Event, GroupId, Opened, Outbound, RelayResult, RelayStatus,
     Session, SessionConfig, SessionEvent,
 };
 
@@ -179,7 +179,7 @@ pub fn session_config(
         host,
         rows,
         clock,
-        relay_policy: RelayPolicy {
+        destination_policy: DestinationPolicy {
             allow_loopback: true,
         },
         client_name: None,
@@ -290,7 +290,7 @@ pub async fn ingest_backlog(member: &mut Member, events: &[Event]) -> Vec<Sessio
         .ingest_batch(events.to_vec())
         .await
         .expect("ingest_batch");
-    let drained = member.session.drain_events();
+    let drained = member.session.drain_events().unwrap();
     let ids: Vec<_> = drained
         .iter()
         .filter_map(|event| match event {
@@ -334,7 +334,7 @@ pub async fn sync_member(
             .ingest_batch(backlog)
             .await
             .expect("ingest_batch");
-        let drained = member.session.drain_events();
+        let drained = member.session.drain_events().unwrap();
         let ids: Vec<_> = drained
             .iter()
             .filter_map(|event| match event {
