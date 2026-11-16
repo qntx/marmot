@@ -52,8 +52,8 @@ use cgka_traits::types::{MemberId, MessageId};
 use mk_core::AccountSigner;
 use mk_core::testing::{LocalSigner, ManualClock, RecordingHost};
 use mk_core::{
-    AccountId, AppMessage, Clock, ComponentUpdate, CreateGroup, Event, EventId, GroupChange,
-    GroupId, Invitee, Opened, OutboundPurpose, RelayPolicy, RelayResult, RelayStatus, Session,
+    AccountId, AppMessage, Clock, ComponentUpdate, CreateGroup, DestinationPolicy, Event, EventId,
+    GroupChange, GroupId, Invitee, Opened, OutboundPurpose, RelayResult, RelayStatus, Session,
     SessionConfig, SessionEvent,
 };
 
@@ -185,7 +185,7 @@ fn session_config(
         host,
         rows,
         clock,
-        relay_policy: RelayPolicy {
+        destination_policy: DestinationPolicy {
             allow_loopback: true,
         },
         client_name: None,
@@ -352,7 +352,7 @@ impl SessionSubject {
                         .map_err(session_error)?;
                     ack_gate(client);
                 }
-                client.session.drain_events();
+                client.session.drain_events().map_err(session_error)?;
             }
             if subject.client(label)?.key_package.is_none() {
                 return Err(subject_error(
@@ -592,6 +592,7 @@ impl ConvergenceSubject for SessionSubject {
                     relays: vec![RELAY.to_owned()],
                     invitees,
                     admins,
+                    components: Vec::new(),
                 })
                 .await
                 .map_err(session_error)?
@@ -758,7 +759,7 @@ impl ConvergenceSubject for SessionSubject {
                 // The app acknowledges every delivered application message;
                 // the drained events stay buffered for `observe` (the
                 // harness's engine event drain has the same semantics).
-                let mut drained = client.session.drain_events();
+                let mut drained = client.session.drain_events().map_err(session_error)?;
                 let ids: Vec<EventId> = drained
                     .iter()
                     .filter_map(|event| match event {
@@ -905,7 +906,7 @@ impl ConvergenceSubject for SessionSubject {
         for label in clients {
             let client = self.client_mut(label)?;
             let mut events = std::mem::take(&mut client.pending_events);
-            events.extend(client.session.drain_events());
+            events.extend(client.session.drain_events().map_err(session_error)?);
             let snapshot = gid
                 .as_ref()
                 .and_then(|gid| client.session.group(gid).ok().flatten());
@@ -1071,7 +1072,7 @@ impl ConvergenceSubject for SessionSubject {
     fn clear_events(&mut self, clients: &[String]) -> Result<(), SubjectError> {
         for label in clients {
             let client = self.client_mut(label)?;
-            client.session.drain_events();
+            client.session.drain_events().map_err(session_error)?;
             client.pending_events.clear();
         }
         Ok(())
