@@ -3140,7 +3140,7 @@ dependencies = [
  "base64 0.22.1",
  "cgka-engine",
  "cgka-traits",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "hex",
  "nostr 0.45.5",
  "openmls",
