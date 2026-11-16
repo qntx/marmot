@@ -30,8 +30,8 @@ use cgka_traits::app_components::{
     decode_encrypted_media_policy_v2, encode_encrypted_media_policy_v2, is_loopback_host,
     is_loopback_ip, is_public_ip, reject_non_public_ip,
 };
+use chacha20poly1305::ChaCha20Poly1305;
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
-use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
 use hkdf::Hkdf;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -451,10 +451,10 @@ pub fn encrypt_file(
     aad: &[u8],
     plaintext: &[u8],
 ) -> Result<Vec<u8>, MediaError> {
-    let cipher = ChaCha20Poly1305::new(Key::from_slice(&*key.0));
+    let cipher = ChaCha20Poly1305::new((&*key.0).into());
     cipher
         .encrypt(
-            Nonce::from_slice(nonce),
+            nonce.into(),
             Payload {
                 msg: plaintext,
                 aad,
@@ -490,10 +490,10 @@ pub fn decrypt_file(
         &reference.media_type,
         &reference.filename,
     );
-    let cipher = ChaCha20Poly1305::new(Key::from_slice(&*key.0));
+    let cipher = ChaCha20Poly1305::new((&*key.0).into());
     let plaintext = cipher
         .decrypt(
-            Nonce::from_slice(&reference.nonce),
+            (&reference.nonce).into(),
             Payload {
                 msg: ciphertext,
                 aad: &aad,
