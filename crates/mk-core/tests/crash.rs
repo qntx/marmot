@@ -65,18 +65,22 @@
 //!   the removed member realizes its local-leaf removal. Disband is not
 //!   in the session API (M5) — there is nothing to interrupt.
 //!
-//! Upstream-blocked case: at the cut points where a restarted member
-//! re-confirms a byte-identical deterministic own commit after
-//! convergence restored its own-commit checkpoint, MDK's
+//! Upstream-blocked case: at the leaving-flow cuts where the step-down's
+//! staging is durable but its fanout is not, the reopened leaver keeps the
+//! never-published step-down's `Sent` row (hydration clears only its
+//! pending commit), re-drives and confirms a byte-identical step-down, and
+//! the next convergence pass selects the stale row, invalidates the
+//! confirmed copy, rewinds the group and re-issues the step-down. That
+//! confirm meets the first confirm's checkpoint and MDK's
 //! `create_group_state_checkpoint` answers `AlreadyExists` (same id and
-//! epoch, a blob differing only in `OpenMLS` `added_at` — reproduced on
-//! `Engine<SqliteAccountStorage>` in `tests/upstream.rs`, so not a KV
-//! provider divergence). The session reports `ConfirmConflict`, never
-//! rolls the accepted commit back, and keeps the fanout obligation
-//! outstanding; a pending that can never resolve can then wedge that
-//! member's group evolution, so `matrix` relaxes `obligations_clear` on
-//! flagged runs and accepts a divergent terminal state as the documented
-//! upstream failure mode.
+//! epoch, blobs differing only in `OpenMLS` `added_at`). Each step is
+//! reproduced on `Engine<SqliteAccountStorage>` in `tests/upstream.rs`, so
+//! it is not a KV provider divergence. The session reports
+//! `ConfirmConflict`, never rolls the accepted commit back, and keeps the
+//! fanout obligation outstanding; a pending that can never resolve can then
+//! wedge that member's group evolution, so `matrix` relaxes
+//! `obligations_clear` on flagged runs and accepts a divergent terminal
+//! state as the documented upstream failure mode.
 
 #![allow(
     clippy::missing_docs_in_private_items,

@@ -24,6 +24,8 @@
     clippy::str_to_string,
     clippy::missing_assert_message,
     clippy::tests_outside_test_module,
+    clippy::excessive_nesting,
+    clippy::too_many_lines,
     reason = "test code"
 )]
 
@@ -46,6 +48,7 @@ use cgka_traits::engine_state::PendingStateRef;
 use cgka_traits::error::EngineError;
 use cgka_traits::group::ProtocolProfile;
 use cgka_traits::ingest::IngestOutcome;
+use cgka_traits::message::MessageState;
 use cgka_traits::storage::{MessageStorage, StorageError};
 use cgka_traits::types::{GroupId, MessageId};
 use harness::{
@@ -131,7 +134,9 @@ async fn send_deterministic_commit(
 }
 
 /// mdk defect: a re-confirm of an own commit collides on its own-commit
-/// checkpoint.
+/// checkpoint. This test reaches the state with a manual rollback; the
+/// production paths are `refused_step_down_staged_again_collides_after_the_next_pass`
+/// and `crashed_step_down_redriven_before_the_pass_collides` below.
 ///
 /// `confirm_published` keys the checkpoint by commit digest
 /// (`openmls-own-commit-v1-…`) and captures the full openmls state as the
@@ -412,4 +417,567 @@ async fn component_update_tightening_unheld_role_stages_and_applies() {
     let policy =
         AgentTextStreamQuicPolicyV1::decode_component_state(&bytes).expect("policy decodes");
     assert_eq!(policy.required_member_roles, 0x03);
+}
+
+fn temp_dir(tag: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("mk-upstream-{tag}-{}", std::process::id()));
+    drop(std::fs::remove_dir_all(&dir));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    dir
+}
+
+/// A member as mk-core's session opens it: every stored group hydrated, so a
+/// stranded pending commit is recovered at open.
+fn open_hydrated(path: &std::path::Path, seed: &str) -> SqliteMember {
+    let mut member = open_sqlite_member(path, seed);
+    member
+        .engine
+        .hydrate_all_stored_groups()
+        .expect("hydrate all stored groups");
+    member
+}
+
+async fn found_alone(member: &mut SqliteMember) -> GroupId {
+    let req = CreateGroupRequest {
+        name: "repro".into(),
+        description: String::new(),
+        members: Vec::new(),
+        required_features: Vec::new(),
+        app_components: vec![routing_component(
+            &member.engine.self_id(),
+            &[RELAY_URL.to_string()],
+        )],
+        initial_admins: Vec::new(),
+    };
+    member
+        .engine
+        .create_group(req)
+        .await
+        .expect("create_group")
+        .0
+}
+
+/// A founds a group with B as a second admin; B joins and settles.
+async fn two_admins(dir: &std::path::Path) -> (SqliteMember, SqliteMember, GroupId) {
+    let mut a = open_hydrated(&dir.join("a.db"), "two-admins-a");
+    let mut b = open_hydrated(&dir.join("b.db"), "two-admins-b");
+    let mut b_key_package = b.engine.fresh_key_package().await.expect("b key package");
+    b_key_package.source = Some(KeyPackageSource {
+        event_id: MessageId::new(vec![0x55; 32]),
+    });
+    let req = CreateGroupRequest {
+        name: "two-admins".into(),
+        description: String::new(),
+        members: vec![b_key_package],
+        required_features: Vec::new(),
+        app_components: vec![routing_component(
+            &a.engine.self_id(),
+            &[RELAY_URL.to_string()],
+        )],
+        initial_admins: vec![b.engine.self_id()],
+    };
+    let (group_id, created) = a.engine.create_group(req).await.expect("create_group");
+    let SendResult::FoundingGroupCreated { welcomes } = created else {
+        panic!("expected FoundingGroupCreated, got {created:?}");
+    };
+    let welcome = welcomes.into_iter().next().expect("one welcome for B");
+    b.engine.join_welcome(welcome).await.expect("b joins");
+    settle(&mut b, &group_id).await;
+    (a, b, group_id)
+}
+
+/// B asks to leave; the leave re-drive stages its step-down.
+async fn stage_step_down(b: &mut SqliteMember, group_id: &GroupId) -> cgka_traits::AutoPublish {
+    let requested = b
+        .engine
+        .send(SendIntent::StepDownAndLeave {
+            group_id: group_id.clone(),
+        })
+        .await
+        .expect("leave");
+    assert!(
+        matches!(requested, SendResult::LeaveRequested { .. }),
+        "{requested:?}"
+    );
+    b.engine
+        .advance_convergence(group_id)
+        .await
+        .expect("advance");
+    let mut staged = b.engine.drain_auto_publish();
+    assert_eq!(staged.len(), 1, "the step-down");
+    staged.remove(0)
+}
+
+/// One host convergence timer: arm the cutoff, wait it out, advance. Nothing
+/// is confirmed; returns the own commits the advance staged and the number of
+/// proposals it produced.
+async fn wake(member: &mut SqliteMember, group_id: &GroupId) -> (Vec<PendingStateRef>, usize) {
+    let _ = member
+        .engine
+        .prepare_convergence_cutoff_delay_ms(group_id)
+        .expect("arm convergence pass");
+    member.clock.advance_ms(60_000);
+    member
+        .engine
+        .advance_convergence_inputs_until_settled(group_id, 0)
+        .await
+        .expect("settle inputs");
+    let mut staged = Vec::new();
+    for result in member
+        .engine
+        .advance_convergence(group_id)
+        .await
+        .expect("advance convergence")
+    {
+        if let SendResult::GroupEvolution { pending, .. } = result {
+            staged.push(pending);
+        }
+    }
+    staged.extend(
+        member
+            .engine
+            .drain_auto_publish()
+            .into_iter()
+            .map(|auto| auto.pending),
+    );
+    let proposals = member.engine.drain_auto_proposals().len();
+    (staged, proposals)
+}
+
+fn row_state(member: &SqliteMember, id: &MessageId) -> MessageState {
+    member.storage.get_message(id).expect("message row").state
+}
+
+fn record_epoch(member: &SqliteMember, group_id: &GroupId) -> u64 {
+    member
+        .engine
+        .group_record(group_id)
+        .expect("group record")
+        .epoch
+        .0
+}
+
+fn is_admin(member: &SqliteMember, group_id: &GroupId) -> bool {
+    let own = member.engine.self_id();
+    member
+        .engine
+        .admin_pubkeys(group_id)
+        .expect("admins")
+        .iter()
+        .any(|admin| admin.as_slice() == own.as_slice())
+}
+
+/// mdk defect: a rolled-back own commit is applied by a later convergence
+/// pass. `publish_failed` rewinds the MLS state but leaves the commit's own
+/// `Sent` message row, and `Sent` is a convergence graph input
+/// (`OPENMLS_GRAPH_INPUT_STATES`, `PASS_OPENING_STATES`): the next pass takes
+/// the row as a branch candidate and applies the commit no relay accepted.
+#[tokio::test(flavor = "current_thread")]
+async fn rolled_back_own_commit_is_applied_by_a_later_pass() {
+    let dir = temp_dir("rolled-back");
+    let mut member = open_hydrated(&dir.join("m.db"), "rolled-back");
+    let group_id = found_alone(&mut member).await;
+    let result = member
+        .engine
+        .send(SendIntent::UpdateGroupData {
+            group_id: group_id.clone(),
+            name: Some("pinned".into()),
+            description: None,
+        })
+        .await
+        .expect("send");
+    let SendResult::GroupEvolution { msg, pending, .. } = result else {
+        panic!("expected GroupEvolution, got {result:?}");
+    };
+    member
+        .engine
+        .publish_failed(pending)
+        .await
+        .expect("publish_failed");
+    assert_eq!(record_epoch(&member, &group_id), 0);
+    assert_eq!(row_state(&member, &msg.id), MessageState::Sent);
+
+    let (staged, _) = wake(&mut member, &group_id).await;
+
+    assert!(staged.is_empty(), "nothing was confirmed");
+    assert_eq!(record_epoch(&member, &group_id), 1);
+    assert_eq!(
+        member.engine.group_record(&group_id).expect("record").name,
+        "pinned"
+    );
+    assert_eq!(row_state(&member, &msg.id), MessageState::Processed);
+}
+
+/// The same defect through reopen: hydration clears a stranded pending
+/// commit (`PendingCommitRecovered`, `engine.rs` "A staged commit that
+/// survived process restart") but not its `Sent` row.
+#[tokio::test(flavor = "current_thread")]
+async fn own_commit_cleared_at_reopen_is_applied_by_a_later_pass() {
+    let dir = temp_dir("cleared-at-reopen");
+    let path = dir.join("m.db");
+    let mut member = open_hydrated(&path, "cleared-at-reopen");
+    let group_id = found_alone(&mut member).await;
+    let (commit, _pending) = {
+        let result = member
+            .engine
+            .send(SendIntent::UpdateGroupData {
+                group_id: group_id.clone(),
+                name: Some("pinned".into()),
+                description: None,
+            })
+            .await
+            .expect("send");
+        let SendResult::GroupEvolution { msg, pending, .. } = result else {
+            panic!("expected GroupEvolution, got {result:?}");
+        };
+        (msg.id, pending)
+    };
+    drop(member.engine);
+    member.storage.close().expect("close sqlite");
+
+    let mut member = open_hydrated(&path, "cleared-at-reopen");
+    assert!(
+        member.engine.drain_events().iter().any(|event| matches!(
+            event,
+            cgka_traits::GroupEvent::PendingCommitRecovered { .. }
+        )),
+        "the stranded pending commit is recovered at open"
+    );
+    assert_eq!(record_epoch(&member, &group_id), 0);
+    assert_eq!(row_state(&member, &commit), MessageState::Sent);
+
+    let (staged, _) = wake(&mut member, &group_id).await;
+
+    assert!(staged.is_empty(), "nothing was confirmed");
+    assert_eq!(record_epoch(&member, &group_id), 1);
+    assert_eq!(
+        member.engine.group_record(&group_id).expect("record").name,
+        "pinned"
+    );
+    assert_eq!(row_state(&member, &commit), MessageState::Processed);
+}
+
+/// The production trigger of the own-commit checkpoint collision, with no
+/// crash: the leave re-drive stages a refused step-down again (mdk#3014) and
+/// the second, byte-identical step-down is confirmed. The next pass takes the
+/// refused copy's `Sent` row as the branch (same commit digest), invalidates
+/// the confirmed copy, rewinds the group to the parent epoch and re-issues
+/// the step-down; that confirm meets the first confirm's checkpoint.
+#[tokio::test(flavor = "current_thread")]
+async fn refused_step_down_staged_again_collides_after_the_next_pass() {
+    let dir = temp_dir("refused-step-down");
+    let (_a, mut b, group_id) = Box::pin(two_admins(&dir)).await;
+    let epoch = record_epoch(&b, &group_id);
+    let refused = stage_step_down(&mut b, &group_id).await;
+    b.engine
+        .publish_failed(refused.pending)
+        .await
+        .expect("publish_failed");
+    b.engine
+        .advance_convergence(&group_id)
+        .await
+        .expect("advance");
+    let accepted = b.engine.drain_auto_publish().remove(0);
+    b.engine
+        .confirm_published(accepted.pending)
+        .await
+        .expect("confirm the re-staged step-down");
+    assert_eq!(record_epoch(&b, &group_id), epoch + 1);
+
+    let (reissued, _) = wake(&mut b, &group_id).await;
+
+    assert_eq!(row_state(&b, &refused.msg.id), MessageState::Processed);
+    assert_eq!(
+        row_state(&b, &accepted.msg.id),
+        MessageState::EpochInvalidated
+    );
+    assert_eq!(record_epoch(&b, &group_id), epoch);
+    assert_eq!(reissued.len(), 1, "the step-down is re-issued");
+    let error = b
+        .engine
+        .confirm_published(reissued[0])
+        .await
+        .expect_err("the re-issued step-down collides");
+    assert!(
+        matches!(error, EngineError::Storage(StorageError::AlreadyExists)),
+        "expected AlreadyExists, got {error:?}"
+    );
+}
+
+/// The crash-matrix path (`tests/crash.rs` `restart_boundary_leaving`, cut
+/// "durable 16"): the step-down's staging is durable, its fanout is not. At
+/// reopen the pending commit is cleared and its `Sent` row kept. When the
+/// leave re-drive runs before any convergence cutoff is armed, it stages and
+/// confirms the byte-identical step-down; the next pass then collides exactly
+/// like the refused case.
+#[tokio::test(flavor = "current_thread")]
+async fn crashed_step_down_redriven_before_the_pass_collides() {
+    let dir = temp_dir("crashed-redriven");
+    let (_a, mut b, group_id) = Box::pin(two_admins(&dir)).await;
+    let epoch = record_epoch(&b, &group_id);
+    let stranded = stage_step_down(&mut b, &group_id).await;
+    drop(b.engine);
+    b.storage.close().expect("close sqlite");
+
+    let mut b = open_hydrated(&dir.join("b.db"), "two-admins-b");
+    assert_eq!(record_epoch(&b, &group_id), epoch);
+    assert_eq!(row_state(&b, &stranded.msg.id), MessageState::Sent);
+    b.engine
+        .advance_convergence(&group_id)
+        .await
+        .expect("advance");
+    let redriven = b.engine.drain_auto_publish().remove(0);
+    b.engine
+        .confirm_published(redriven.pending)
+        .await
+        .expect("confirm the re-driven step-down");
+
+    let (reissued, _) = wake(&mut b, &group_id).await;
+
+    assert_eq!(row_state(&b, &stranded.msg.id), MessageState::Processed);
+    assert_eq!(
+        row_state(&b, &redriven.msg.id),
+        MessageState::EpochInvalidated
+    );
+    assert_eq!(record_epoch(&b, &group_id), epoch);
+    assert_eq!(reissued.len(), 1, "the step-down is re-issued");
+    let error = b
+        .engine
+        .confirm_published(reissued[0])
+        .await
+        .expect_err("the re-issued step-down collides");
+    assert!(
+        matches!(error, EngineError::Storage(StorageError::AlreadyExists)),
+        "expected AlreadyExists, got {error:?}"
+    );
+}
+
+/// The other order after the same crash: a convergence cutoff armed before
+/// the first advance opens a pass over the stranded `Sent` row, which holds
+/// the re-drive back; when the pass fires it applies the never-published
+/// step-down with no confirm, and the leave goes on to its `SelfRemove`.
+/// No collision, but the member is past a commit no relay holds.
+#[tokio::test(flavor = "current_thread")]
+async fn crashed_step_down_applied_when_the_pass_runs_first() {
+    let dir = temp_dir("crashed-pass-first");
+    let (_a, mut b, group_id) = Box::pin(two_admins(&dir)).await;
+    let epoch = record_epoch(&b, &group_id);
+    let stranded = stage_step_down(&mut b, &group_id).await;
+    drop(b.engine);
+    b.storage.close().expect("close sqlite");
+
+    let mut b = open_hydrated(&dir.join("b.db"), "two-admins-b");
+    let (staged, proposals) = wake(&mut b, &group_id).await;
+
+    assert!(staged.is_empty(), "nothing was re-staged or confirmed");
+    assert_eq!(row_state(&b, &stranded.msg.id), MessageState::Processed);
+    assert_eq!(record_epoch(&b, &group_id), epoch + 1);
+    assert!(
+        !is_admin(&b, &group_id),
+        "the unpublished step-down applied"
+    );
+    assert_eq!(proposals, 1, "the SelfRemove follows");
+}
+
+/// The collision's blob difference, measured rather than read from code: on
+/// the refused-step-down path, the first confirm's checkpoint and the one the
+/// re-issued confirm captures (written after releasing the first) differ in
+/// exactly one `OpenMLS` row, `MessageSecrets`, and only inside its
+/// `added_at` timestamp (`OpenMLS` `past_secrets.rs` stamps `SystemTime::now()`
+/// at merge). Every other row, the group record and the validated-tree
+/// marker are byte-identical. On mk-core's own provider, whose checkpoint
+/// rows the test can read.
+#[tokio::test(flavor = "current_thread")]
+async fn colliding_checkpoints_differ_only_in_added_at() {
+    let mut a = harness::Member::fresh("a", "blob-diff-a");
+    let mut b = harness::Member::fresh("b", "blob-diff-b");
+    let mut b_key_package = b.engine.fresh_key_package().await.expect("b key package");
+    b_key_package.source = Some(KeyPackageSource {
+        event_id: MessageId::new(vec![0x55; 32]),
+    });
+    let req = CreateGroupRequest {
+        name: "blob-diff".into(),
+        description: String::new(),
+        members: vec![b_key_package],
+        required_features: Vec::new(),
+        app_components: vec![routing_component(
+            &a.engine.self_id(),
+            &[RELAY_URL.to_string()],
+        )],
+        initial_admins: vec![b.engine.self_id()],
+    };
+    let (group_id, created) = a.engine.create_group(req).await.expect("create_group");
+    let SendResult::FoundingGroupCreated { welcomes } = created else {
+        panic!("expected FoundingGroupCreated, got {created:?}");
+    };
+    let welcome = welcomes.into_iter().next().expect("one welcome for B");
+    b.engine.join_welcome(welcome).await.expect("b joins");
+    for _ in 0..4 {
+        b.clock.advance_ms(60_000);
+        let _ = b
+            .engine
+            .prepare_convergence_cutoff_delay_ms(&group_id)
+            .expect("arm convergence pass");
+        b.engine
+            .advance_convergence_inputs_until_settled(&group_id, 0)
+            .await
+            .expect("settle inputs");
+        for result in b
+            .engine
+            .advance_convergence(&group_id)
+            .await
+            .expect("advance")
+        {
+            if let SendResult::GroupEvolution { pending, .. } = result {
+                b.engine.confirm_published(pending).await.expect("confirm");
+            }
+        }
+    }
+
+    let requested = b
+        .engine
+        .send(SendIntent::StepDownAndLeave {
+            group_id: group_id.clone(),
+        })
+        .await
+        .expect("leave");
+    assert!(matches!(requested, SendResult::LeaveRequested { .. }));
+    b.engine
+        .advance_convergence(&group_id)
+        .await
+        .expect("advance");
+    let refused = b.engine.drain_auto_publish().remove(0);
+    b.engine
+        .publish_failed(refused.pending)
+        .await
+        .expect("publish_failed");
+    b.engine
+        .advance_convergence(&group_id)
+        .await
+        .expect("advance");
+    let accepted = b.engine.drain_auto_publish().remove(0);
+    b.engine
+        .confirm_published(accepted.pending)
+        .await
+        .expect("confirm");
+    let first = checkpoint_image(&b.host);
+
+    let _ = b
+        .engine
+        .prepare_convergence_cutoff_delay_ms(&group_id)
+        .expect("arm convergence pass");
+    b.clock.advance_ms(60_000);
+    b.engine
+        .advance_convergence_inputs_until_settled(&group_id, 0)
+        .await
+        .expect("settle inputs");
+    let _ = b
+        .engine
+        .advance_convergence(&group_id)
+        .await
+        .expect("advance");
+    let reissued = b.engine.drain_auto_publish().remove(0);
+    let error = b
+        .engine
+        .confirm_published(reissued.pending)
+        .await
+        .expect_err("collides");
+    assert!(matches!(
+        error,
+        EngineError::Storage(StorageError::AlreadyExists)
+    ));
+    let checkpoints = b
+        .provider
+        .list_group_state_checkpoints(&group_id)
+        .expect("list checkpoints");
+    assert_eq!(checkpoints.len(), 1);
+    b.provider
+        .release_group_state_checkpoint(&group_id, &checkpoints[0].id)
+        .expect("release checkpoint");
+    b.engine
+        .confirm_published(reissued.pending)
+        .await
+        .expect("confirm once the first checkpoint is gone");
+    let second = checkpoint_image(&b.host);
+
+    assert_ne!(first, second);
+    assert_eq!(first["group"], second["group"], "group record");
+    assert_eq!(
+        first["validated_tree_marker"], second["validated_tree_marker"],
+        "validated-tree marker"
+    );
+    let rows_a = first["openmls"].as_array().expect("openmls rows");
+    let rows_b = second["openmls"].as_array().expect("openmls rows");
+    assert_eq!(rows_a.len(), rows_b.len());
+    let mut differing = Vec::new();
+    for (row_a, row_b) in rows_a.iter().zip(rows_b) {
+        assert_eq!(row_a[0], row_b[0], "same row keys in the same order");
+        if row_a[1] != row_b[1] {
+            differing.push((
+                json_bytes(&row_a[0]),
+                json_bytes(&row_a[1]),
+                json_bytes(&row_b[1]),
+            ));
+        }
+    }
+    assert_eq!(differing.len(), 1, "exactly one OpenMLS row differs");
+    let (key, value_a, value_b) = &differing[0];
+    assert!(contains(key, b"MessageSecrets"), "the MessageSecrets row");
+    assert_eq!(value_a.len(), value_b.len());
+    let span = |value: &[u8]| {
+        let start = rfind(value, b"\"added_at\":{").expect("an added_at stamp");
+        let end = start
+            + value[start..]
+                .iter()
+                .position(|byte| *byte == b'}')
+                .expect("closing brace");
+        start..end
+    };
+    let (span_a, span_b) = (span(value_a), span(value_b));
+    assert_eq!(span_a, span_b);
+    for (index, (byte_a, byte_b)) in value_a.iter().zip(value_b.iter()).enumerate() {
+        if byte_a != byte_b {
+            assert!(
+                span_a.contains(&index),
+                "byte {index} differs outside added_at"
+            );
+        }
+    }
+}
+
+/// The single checkpoint row on `host`, decoded to its `GroupStateImage`
+/// JSON: row = `[u32 len][u64 epoch][u32 len][blob]`, blob = `[tag 1][json]`.
+fn checkpoint_image(host: &harness::TestHost) -> serde_json::Value {
+    let rows: Vec<_> = host
+        .durable_rows()
+        .into_iter()
+        .filter(|(key, _)| key.first() == Some(&30))
+        .collect();
+    assert_eq!(rows.len(), 1, "one checkpoint row");
+    let row = &rows[0].1;
+    let len = u32::from_be_bytes(row[12..16].try_into().expect("blob length")) as usize;
+    let blob = &row[16..16 + len];
+    assert_eq!(blob[0], 1, "blob tag");
+    serde_json::from_slice(&blob[1..]).expect("checkpoint image json")
+}
+
+fn json_bytes(value: &serde_json::Value) -> Vec<u8> {
+    value
+        .as_array()
+        .expect("byte array")
+        .iter()
+        .map(|n| u8::try_from(n.as_u64().expect("byte")).expect("byte"))
+        .collect()
+}
+
+fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack
+        .windows(needle.len())
+        .any(|window| window == needle)
+}
+
+fn rfind(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack
+        .windows(needle.len())
+        .rposition(|window| window == needle)
 }
