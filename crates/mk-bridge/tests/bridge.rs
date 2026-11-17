@@ -435,11 +435,7 @@ async fn full_flow() {
     a.sync(&mut relay, &group).await;
 
     for i in 0..500 {
-        let started = std::time::Instant::now();
         a.send_chat(&mut relay, &group, &format!("m{i}")).await;
-        if matches!(i, 0 | 99 | 249 | 499) {
-            eprintln!("send_chat[{i}]: {:.3} ms", started.elapsed().as_secs_f64() * 1_000.0);
-        }
     }
     let route = b.route_hex(&group).await;
     // One ingest delivers the whole backlog: `drain_events` is not

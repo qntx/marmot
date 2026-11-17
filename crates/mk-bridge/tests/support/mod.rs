@@ -133,16 +133,6 @@ impl MemHost {
         self.state.lock().unwrap().history.len()
     }
 
-    /// Row count of the durable set `load` would serve.
-    pub fn rows_len(&self) -> usize {
-        let state = self.state.lock().unwrap();
-        let mut rows = BTreeMap::new();
-        for batch in &state.history {
-            apply(&mut rows, batch);
-        }
-        rows.len()
-    }
-
     /// Fail every commit once `n` batches have been accepted.
     pub fn fail_after(&self, n: usize) {
         self.state.lock().unwrap().fail_after = Some(n);
@@ -510,15 +500,9 @@ impl Member {
     /// come back `ready` — the proof is persisted.
     pub async fn restart(&mut self) {
         self.bridge.close();
-        let started = std::time::Instant::now();
         self.bridge = Bridge::new(self.host.clone());
         self.acked = 0;
         let response = self.open().await;
-        eprintln!(
-            "restart: {} rows, {:.3} ms",
-            self.host.rows_len(),
-            started.elapsed().as_secs_f64() * 1_000.0
-        );
         assert!(
             matches!(response, OpenResponse::Ready { .. }),
             "restart must be ready"
