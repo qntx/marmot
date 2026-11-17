@@ -23,4 +23,8 @@ artifact does not export the `test-panic` feature's `triggerPanic`.
 
 Regenerate with `bun run build:wasm` (requires Rust + the pinned
 wasm-bindgen CLI); `src/generated/` is the committed wasm-bindgen
-`--target web` glue and `check:generated` diffs it.
+`--target web` glue and `check:generated` diffs it against fresh
+output, normalizing the per-build `wasm_bindgen_<16 hex>` shim
+hash — it is not reproducible across machines (the `.wasm` is not
+byte-identical either, e.g. secp256k1 C objects differ per host
+clang), while every other difference still fails.

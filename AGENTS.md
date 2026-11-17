@@ -65,7 +65,10 @@ cargo check -p mk-core -p mk-bridge --target aarch64-linux-android
 # wasm (see CONTRIBUTING.md for wasm-bindgen/binaryen/Playwright):
 bun run --cwd packages/marmot-wasm build:wasm
 bun run --cwd packages/marmot-wasm check:size
-bun run --cwd packages/marmot-wasm check:generated
+bun run --cwd packages/marmot-wasm check:generated   # diffs committed glue vs fresh output
+                                                   # with the per-build wasm_bindgen shim
+                                                   # hash normalized (not reproducible
+                                                   # across machines)
 bun run --cwd packages/marmot-wasm test:wasm
 bun run --cwd packages/marmot-wasm test:browser
 

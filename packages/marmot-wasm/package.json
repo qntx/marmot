@@ -49,7 +49,7 @@
     "test": "vp test tests/unit",
     "test:wasm": "vp test tests/wasm && bun test tests/bun",
     "check:size": "bun ../../scripts/check-wasm-size.ts",
-    "check:generated": "bun ../../scripts/build-wasm.ts --glue-only && git diff --exit-code -- src/generated",
+    "check:generated": "bun ../../scripts/check-generated.ts",
     "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.src.json",
     "check:pkg": "vp pack && publint && attw --pack . --profile esm-only",
     "test:browser": "bun e2e/build.ts && playwright test flow.spec.ts locks.spec.ts kill.spec.ts perf.spec.ts",
