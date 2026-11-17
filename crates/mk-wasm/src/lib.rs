@@ -20,8 +20,14 @@
 //! artifact — `mk-bridge` itself takes time through the host.
 #![allow(unsafe_code, reason = "wasm-bindgen emits unsafe extern glue")]
 
+#[cfg(target_family = "wasm")]
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
+
+#[cfg(not(target_family = "wasm"))]
+use universal_time as _;
+#[cfg(not(target_family = "wasm"))]
+use web_time as _;
 
 use js_sys::{Function, Uint8Array};
 use mk_bridge::{Bridge, BridgeError, Host, HostError, encode_error};
@@ -41,10 +47,14 @@ pub fn install_panic_hook() {
 }
 
 /// `web-time`-backed provider for the `universal-time` facade the nostr
-/// fork calls on wasm32 (`Timestamp::now`, `Instant::now`).
+/// fork calls on wasm32 (`Timestamp::now`, `Instant::now`). The facade's
+/// API only exists on wasm targets, so the whole block is cfg'd out on
+/// hosts to keep workspace builds compiling.
+#[cfg(target_family = "wasm")]
 #[derive(Debug)]
 struct WebTime;
 
+#[cfg(target_family = "wasm")]
 impl universal_time::WallClock for WebTime {
     fn system_time(&self) -> universal_time::SystemTime {
         let since_epoch = web_time::SystemTime::now()
@@ -54,6 +64,7 @@ impl universal_time::WallClock for WebTime {
     }
 }
 
+#[cfg(target_family = "wasm")]
 impl universal_time::MonotonicClock for WebTime {
     fn instant(&self) -> universal_time::Instant {
         // `universal_time::Instant` ticks are opaque; anchor them at first
@@ -65,6 +76,7 @@ impl universal_time::MonotonicClock for WebTime {
     }
 }
 
+#[cfg(target_family = "wasm")]
 universal_time::define_time_provider!(WebTime);
 
 /// `Host` over two injected JavaScript functions: `load() -> Uint8Array`
