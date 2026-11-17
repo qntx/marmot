@@ -57,6 +57,12 @@ operations are numbered per bridge and answered exactly once each
 (`unknown_signer_request` otherwise; a result kind that does not fit the
 operation is `invalid_request { reason: "value" }`).
 
+Result payloads that carry more than their request implies:
+
+| Request        | Result          | Note                                                                                                                        |
+| -------------- | --------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| `create_group` | `group_created` | The full `GroupSnapshot`, not just the group id — hosts need `nostr_group_id`, the 32-byte transport route publishes carry. |
+
 ## Timing
 
 Engine futures register timers through the surrounding async runtime: on
