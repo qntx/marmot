@@ -22,17 +22,29 @@ export function webLocks(manager: LockManagerLike): LockPort {
       const held = new Promise<void>((resolve) => {
         release = resolve;
       });
-      const acquired = new Promise<boolean>((resolve) => {
-        void manager.request(name, { ifAvailable: true }, async (lock) => {
-          if (typeof lock !== "object" || lock === null) {
-            resolve(false);
-            return;
-          }
-          resolve(true);
-          await held;
-        });
+      const outcome: { ok?: boolean; error?: unknown; wake?: () => void } = {};
+      const signal = new Promise<void>((resolve) => {
+        outcome.wake = resolve;
       });
-      return (await acquired) ? release : undefined;
+      void (async () => {
+        try {
+          await manager.request(name, { ifAvailable: true }, async (lock) => {
+            outcome.ok = typeof lock === "object" && lock !== null;
+            outcome.wake?.();
+            if (outcome.ok) {
+              await held;
+            }
+          });
+        } catch (error) {
+          outcome.error = error;
+          outcome.wake?.();
+        }
+      })();
+      await signal;
+      if ("error" in outcome) {
+        throw outcome.error;
+      }
+      return outcome.ok === true ? release : undefined;
     },
   };
 }
