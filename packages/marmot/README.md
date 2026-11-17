@@ -2,13 +2,31 @@
 
 Marmot (MLS over Nostr) SDK for web, iOS and Android.
 
-**Status: pre-alpha skeleton.** No public API yet — the package currently
-ships typed spec registries and the shared result vocabulary under
-`@qntx/marmot` and `@qntx/marmot/core`.
+**Status: pre-alpha.** The package ships the typed engine surface plus its
+storage and testing support under dedicated subpaths:
 
-```ts
-import { APP_COMPONENTS, EVENT_KINDS } from "@qntx/marmot/core";
-```
+- `@qntx/marmot` / `@qntx/marmot/core` — spec registries and the shared
+  result vocabulary.
+- `@qntx/marmot/backend` — the `Backend` port (byte-oriented bridge calls),
+  wire codecs, and `Engine`, the typed facade over it:
+
+  ```ts
+  import { Engine } from "@qntx/marmot/backend";
+
+  const engine = await Engine.open({ backend, kv, signer, clock });
+  ```
+
+- `@qntx/marmot/storage` — `indexedDbKv`, the durable KV driver for
+  browsers. It **requires** an injected `cipher` (encrypts every stored
+  value) and `lock` (e.g. `webLocks(navigator.locks)`) — a driver that
+  cannot take the exclusive lock reports `StorageError` kind `locked`, and
+  a driver is terminal after a failed `commit`.
+- `@qntx/marmot/testing` — `memoryKv`, `manualClock`, `fakeRelay` and
+  `runFlow` for engine-level suites without a browser.
+
+All `src/` code is platform-neutral and Hermes V1-safe (no Node- or
+browser-only globals, no `node:*` imports, no ES2023+ array methods);
+platform capabilities arrive through the injected ports.
 
 ## License
 

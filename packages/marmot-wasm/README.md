@@ -16,6 +16,11 @@ After a trap, the backend poisons: every later `open`/`call`/`drain` on
 every handle returns the encoded `{"type":"error","error":{"kind":"poisoned"}}`
 envelope.
 
+The shipped release build (`opt-level = "z"` + `wasm-opt -Oz`) measured
+5,305,909 bytes raw and 2,744,694 bytes gzipped (gzip -9, 2026-02);
+`check:size` enforces the 3,000,000-byte gzip gate and asserts the release
+artifact does not export the `test-panic` feature's `triggerPanic`.
+
 Regenerate with `bun run build:wasm` (requires Rust + the pinned
 wasm-bindgen CLI); `src/generated/` is the committed wasm-bindgen
 `--target web` glue and `check:generated` diffs it.

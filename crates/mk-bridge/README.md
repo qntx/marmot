@@ -50,7 +50,9 @@ refused with `too_large`. Encoding rules: UTF-8 JSON; bytes as lowercase hex;
 emitted and decoding to `null`; internally-tagged enums with snake_case
 variant names; `deny_unknown_fields`. Serde error messages are never
 surfaced — decode failures map to `invalid_request` with a fixed reason
-label.
+label. Any change to an existing message's shape bumps `PROTOCOL_VERSION`;
+every protocol variant has a canonical encoding in `vectors/bridge` (see
+`vectors/bridge/README.md`), replayed by `tests/vectors.rs`.
 
 `monotonic_ms` may never regress across calls (`clock_regressed`). Signer
 operations are numbered per bridge and answered exactly once each

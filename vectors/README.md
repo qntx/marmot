@@ -14,6 +14,12 @@ local `3rdparty/marmot` checkout when present.
   (input categories, dispositions, named outcomes). Parsed by
   `packages/marmot/tests/errors.test.ts` the same way.
 
+- `bridge/` — canonical JSON encodings for the `mk-bridge` host protocol,
+  one file per wire enum plus `config.json`/`call.json` envelopes (see
+  `bridge/README.md`). `crates/mk-bridge/tests/vectors.rs` round-trips every
+  entry and checks the key set equals the serde-derived variant set, so a
+  variant without a vector fails the suite.
+
 Shared cross-language test vectors (MDK conformance replays, our own) land
 here alongside `parity.json` in later milestones.
 
