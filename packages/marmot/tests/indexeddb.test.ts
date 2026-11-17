@@ -34,6 +34,21 @@ const cipher: Cipher = {
   },
 };
 
+/** A cipher that throws a plain error on its `nth` (1-based) seal call. */
+function flakyCipher(nth: number): Cipher {
+  let seals = 0;
+  return {
+    seal: async (plain) => {
+      seals += 1;
+      if (seals === nth) {
+        throw new Error("seal unavailable");
+      }
+      return cipher.seal(plain);
+    },
+    open: cipher.open,
+  };
+}
+
 /** A lock port that grants each name to one holder until released. */
 function fakeLock(): { port: LockPort; held: () => boolean } {
   const held = new Set<string>();
@@ -275,6 +290,21 @@ describe("indexedDbKv", () => {
     const third = kv.commit(batch(3n, [{ type: "put", key: 3, value: [3] }]));
     await Promise.all([first, second, third]);
     expect(sortedHex(await kv.load())).toStrictEqual(["2=2", "3=3"]);
+    await kv.close();
+  });
+
+  test("a failed commit makes every later commit reject with io without applying", async () => {
+    const name = dbName("poison");
+    const lock = fakeLock();
+    const kv = await indexedDbKv(factory, name, { lock: lock.port, cipher: flakyCipher(2) });
+    await kv.commit(batch(1n, [{ type: "put", key: 1, value: [1] }]));
+    // Commit 2 fails inside apply; commit 3 was already queued behind it.
+    const failed = kv.commit(batch(2n, [{ type: "put", key: 2, value: [2] }]));
+    const queued = kv.commit(batch(3n, [{ type: "put", key: 3, value: [3] }]));
+    const later = capture(kv.commit(batch(4n, [{ type: "put", key: 4, value: [4] }])));
+    const outcomes = await Promise.all([capture(failed), capture(queued), later]);
+    expect(outcomes.map(kindOf)).toStrictEqual(["io", "io", "io"]);
+    expect(sortedHex(await kv.load())).toStrictEqual(["1=1"]);
     await kv.close();
   });
 

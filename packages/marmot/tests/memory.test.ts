@@ -59,4 +59,33 @@ describe("memoryKv", () => {
     expect(outcome).toMatchObject({ kind: "io" });
     await kv.close();
   });
+
+  test("a failed commit makes every later commit fail with io", async () => {
+    const kv = memoryKv();
+    await kv.commit(batch(1n, 1, [10]));
+    kv.failNext();
+    const failed = await capture(kv.commit(batch(2n, 2, [20])));
+    const later = await capture(kv.commit(batch(3n, 3, [30])));
+    expect(failed).toMatchObject({ kind: "io" });
+    expect(later).toMatchObject({ kind: "io" });
+    // The poisoned batch and everything after it never became durable.
+    expect(kv.rows()).toStrictEqual([[Uint8Array.of(1), Uint8Array.of(10)]]);
+    expect(kv.batches()).toHaveLength(1);
+    await kv.close();
+  });
+
+  test("commits queued behind a failure reject on release", async () => {
+    const kv = memoryKv();
+    kv.hold();
+    kv.failNext();
+    const first = kv.commit(batch(1n, 1, [10]));
+    const second = kv.commit(batch(2n, 2, [20]));
+    kv.release();
+    const outcomes = await Promise.all([capture(first), capture(second)]);
+    for (const outcome of outcomes) {
+      expect(outcome).toMatchObject({ kind: "io" });
+    }
+    expect(kv.rows()).toStrictEqual([]);
+    await kv.close();
+  });
 });

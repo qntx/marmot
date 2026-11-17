@@ -19,7 +19,7 @@ export type MemoryKv = {
   hold: () => void;
   /** Release held commits, letting them resolve. */
   release: () => void;
-  /** Make the next `commit` reject with `io`. */
+  /** Make the next `commit` reject with `io`; every later commit fails too. */
   failNext: () => void;
 } & KvDriver;
 
@@ -36,6 +36,7 @@ export function memoryKv(initial?: Rows): MemoryKv {
   let released = true;
   const waiters: Array<() => void> = [];
   let failNext = false;
+  let poisoned = false;
   let closed = false;
   const chain: Array<Promise<unknown>> = [];
 
@@ -55,8 +56,14 @@ export function memoryKv(initial?: Rows): MemoryKv {
             waiters.push(resolve);
           });
         }
+        // The host contract is terminal: a batch lost to a failed commit may be a
+        // dependency of every later batch, so nothing applies after a failure.
+        if (poisoned) {
+          throw new StorageError("io");
+        }
         if (failNext) {
           failNext = false;
+          poisoned = true;
           throw new StorageError("io");
         }
         for (const op of decodeKvBatch(batch).ops) {

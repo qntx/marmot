@@ -132,6 +132,7 @@ class IndexedDbKv implements KvDriver {
   private readonly cipher: Cipher;
   private readonly release: () => void;
   private chain: Promise<void> = Promise.resolve();
+  private poisoned = false;
   private closed = false;
 
   constructor(db: IdbDatabaseLike, cipher: Cipher, release: () => void) {
@@ -183,8 +184,18 @@ class IndexedDbKv implements KvDriver {
     const prior = this.chain;
     const run = (async () => {
       await prior;
-      // Queued before close(): `close` waits on `chain`, so the batch still applies.
-      await this.apply(batch);
+      // Queued before close(): `close` waits on `chain`, so the batch still applies —
+      // unless an earlier commit failed. The host contract is terminal: a lost batch
+      // may be a dependency of every later one, so nothing applies after a failure.
+      if (this.poisoned) {
+        throw new StorageError("io");
+      }
+      try {
+        await this.apply(batch);
+      } catch (error) {
+        this.poisoned = true;
+        throw error instanceof StorageError ? error : new StorageError("io");
+      }
     })();
     this.chain = (async () => {
       try {
