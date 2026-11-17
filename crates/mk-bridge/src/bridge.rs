@@ -1,0 +1,1023 @@
+//! The bridge: owns one [`Session`], surfaces every host interaction as
+//! bytes, and suspends engine work across `call`s when the account signer
+//! defers an operation.
+
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll, Waker};
+
+use mk_core as core;
+use mk_core::{CommitSeq, KvBatch, Opened, PendingProof, Session, SessionError};
+use serde_json::Value;
+
+use crate::clock::CellClock;
+use crate::error::{BridgeError, open_error, proof_error, session_error};
+use crate::host::{Host, QueueHost, lock};
+use crate::protocol::{
+    AcknowledgeMessagesRequest, AttachmentData, AwaitingDurabilityResult, CallEnvelope, Config,
+    ConfigProbe, CreateGroupRequest, DiscardAttachmentRequest, DrainResponse, GroupCreatedResult,
+    GroupResult, GroupsResult, InboxRelaysResult, IngestRequest, IngestedResult, InviteRequest,
+    KeyPackageResult, LeaveRequest, MAX_REQUEST_BYTES, MediaAttachmentRef, OpResult,
+    OpenAttachmentRequest, OpenResponse, OutboundResult, PROTOCOL_VERSION,
+    PublishInboxRelaysRequest, PublishKeyPackageRequest, PublishResolutionResult, REQUEST_TYPES,
+    ReadyResult, RemoveMembersRequest, ReportPublishRequest, Request, Response,
+    SealAttachmentRequest, SealedAttachmentResult, SelfUpdateRequest, SendMediaRequest,
+    SendMessageRequest, SendOutcomeResult, SignerReply, SignerRequest, SignerResult, TickedResult,
+    UpdateAppComponentsRequest, UpdateGroupProfileRequest, decode, encode, invalid, reason_label,
+};
+use crate::rows::decode_rows;
+use crate::signer::{QueueSigner, SignerState};
+
+/// Attachment-handle table capacity; `seal_attachment` past it fails with
+/// `attachment_limit`.
+const ATTACHMENT_LIMIT: usize = 64;
+
+/// An owned-session operation future: takes the `Box<Session>` in, returns
+/// it with the outcome. Polled by the bridge only, with a noop waker —
+/// progress comes exclusively from stored signer replies.
+type OpFuture = Pin<Box<dyn Future<Output = (Box<Session>, Result<OpResult, SessionError>)>>>;
+
+/// A suspended engine operation plus the attachment handles its success
+/// must consume.
+struct SuspendedOp {
+    /// The owned-session operation.
+    future: OpFuture,
+    /// Attachment handles `send_media` consumes on success.
+    handles: Vec<u32>,
+}
+
+impl std::fmt::Debug for SuspendedOp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SuspendedOp").finish_non_exhaustive()
+    }
+}
+
+/// Bridge lifecycle. Transitions: `Fresh` --open--> `AwaitingProof` |
+/// `Ready`; `Ready` <=> `Suspended`; any -> `Poisoned`; `close` -> `Closed`.
+#[derive(Debug)]
+enum State {
+    /// `open` not yet called.
+    Fresh,
+    /// `open` returned `needs_account_proof`.
+    AwaitingProof(Box<PendingProof>),
+    /// The session is usable.
+    Ready(Box<Session>),
+    /// An operation awaits host signer replies.
+    Suspended(SuspendedOp),
+    /// `close` was called.
+    Closed,
+    /// Host failure or internal invariant break; terminal.
+    Poisoned,
+}
+
+/// A byte-protocol bridge over one [`Session`]. See the crate docs for the
+/// host contract.
+#[derive(Debug)]
+pub struct Bridge<H: Host> {
+    host: H,
+    /// Batches the session's `QueueHost` committed, awaiting flush.
+    queue: Arc<Mutex<VecDeque<KvBatch>>>,
+    /// The clock cell `CellClock` reads.
+    time: Arc<Mutex<core::Time>>,
+    /// Signer request bookkeeping for the suspended operation.
+    signer_state: Arc<Mutex<SignerState>>,
+    /// Highest batch sequence flushed to the host.
+    last_committed: u64,
+    /// Flushed-but-unacknowledged sequences, raw -> typed.
+    unacked: BTreeMap<u64, CommitSeq>,
+    /// `ack_durable` received while suspended, applied on completion.
+    pending_ack: u64,
+    /// Sealed attachments waiting for `send_media`, by handle.
+    attachments: HashMap<u32, core::SealedAttachment>,
+    /// Next attachment handle.
+    next_handle: u32,
+    state: State,
+}
+
+impl<H: Host> Bridge<H> {
+    /// A fresh bridge over `host`.
+    #[must_use]
+    pub fn new(host: H) -> Self {
+        Self {
+            host,
+            queue: Arc::new(Mutex::new(VecDeque::new())),
+            time: Arc::new(Mutex::new(core::Time {
+                unix_ms: 0,
+                monotonic_ms: 0,
+            })),
+            signer_state: Arc::new(Mutex::new(SignerState::default())),
+            last_committed: 0,
+            unacked: BTreeMap::new(),
+            pending_ack: 0,
+            attachments: HashMap::new(),
+            next_handle: 0,
+            state: State::Fresh,
+        }
+    }
+
+    /// Open the session from durable host rows.
+    #[must_use]
+    pub fn open(&mut self, config: &[u8]) -> Vec<u8> {
+        encode(&self.open_inner(config))
+    }
+
+    /// Dispatch one `call` envelope.
+    #[must_use]
+    pub fn call(&mut self, request: &[u8]) -> Vec<u8> {
+        encode(&self.call_inner(request))
+    }
+
+    /// Drain queued session events.
+    #[must_use]
+    pub fn drain(&mut self) -> Vec<u8> {
+        encode(&self.drain_inner())
+    }
+
+    /// Release the session. Flush is best-effort; a flush failure leaves
+    /// the bridge poisoned rather than silently closed.
+    pub fn close(&mut self) {
+        if matches!(self.state, State::Poisoned | State::Closed) {
+            return;
+        }
+        if self.flush().is_ok() && !matches!(self.state, State::Poisoned) {
+            self.state = State::Closed;
+        }
+    }
+
+    fn open_inner(&mut self, config: &[u8]) -> OpenResponse {
+        if config.len() > MAX_REQUEST_BYTES {
+            return Self::open_error(BridgeError::TooLarge {
+                limit: MAX_REQUEST_BYTES as u64,
+            });
+        }
+        let probe = match decode::<ConfigProbe>(config) {
+            Ok(probe) => probe,
+            Err(error) => return Self::open_error(error),
+        };
+        if probe.protocol_version != PROTOCOL_VERSION {
+            return Self::open_error(BridgeError::ProtocolVersionMismatch {
+                expected: PROTOCOL_VERSION,
+                got: probe.protocol_version,
+            });
+        }
+        if !matches!(self.state, State::Fresh) {
+            return Self::open_error(BridgeError::AlreadyOpen);
+        }
+        let config = match decode::<Config>(config) {
+            Ok(config) => config,
+            Err(error) => return Self::open_error(error),
+        };
+        if !self.set_now(config.now.into()) {
+            return Self::open_error(BridgeError::ClockRegressed);
+        }
+        let Ok(rows) = self.host.load() else {
+            self.state = State::Poisoned;
+            return Self::open_error(BridgeError::HostFailed);
+        };
+        let Ok(rows) = decode_rows(&rows) else {
+            return Self::open_error(BridgeError::HostRowsInvalid);
+        };
+        let session_config = core::SessionConfig {
+            signer: Arc::new(QueueSigner::new(
+                core::AccountId(config.account),
+                Arc::clone(&self.signer_state),
+            )),
+            host: Arc::new(QueueHost::new(Arc::clone(&self.queue))),
+            rows,
+            clock: Arc::new(CellClock::new(Arc::clone(&self.time))),
+            destination_policy: core::DestinationPolicy {
+                allow_loopback: config.allow_loopback,
+            },
+            client_name: config.client_name,
+        };
+        match Session::open(session_config) {
+            Err(error) => Self::open_error(open_error(&error)),
+            Ok(Opened::Ready(session)) => {
+                self.state = State::Ready(session);
+                if self.flush().is_err() {
+                    return Self::open_error(BridgeError::HostFailed);
+                }
+                self.ready_response()
+            }
+            Ok(Opened::NeedsAccountProof(proof)) => {
+                let unsigned = proof.request().clone().into();
+                self.state = State::AwaitingProof(proof);
+                if self.flush().is_err() {
+                    return Self::open_error(BridgeError::HostFailed);
+                }
+                OpenResponse::NeedsAccountProof { unsigned }
+            }
+        }
+    }
+
+    fn call_inner(&mut self, request: &[u8]) -> Response {
+        if request.len() > MAX_REQUEST_BYTES {
+            return Self::error_response(BridgeError::TooLarge {
+                limit: MAX_REQUEST_BYTES as u64,
+            });
+        }
+        let envelope = match decode::<CallEnvelope>(request) {
+            Ok(envelope) => envelope,
+            Err(error) => return Self::error_response(error),
+        };
+        if !self.set_now(envelope.now.into()) {
+            return Self::error_response(BridgeError::ClockRegressed);
+        }
+        let tag = envelope
+            .request
+            .get("type")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        match tag.as_deref() {
+            Some(tag) if REQUEST_TYPES.contains(&tag) => {}
+            _ => return Self::error_response(BridgeError::Unsupported),
+        }
+        if let Some(error) = self.state_gate(tag.as_deref()) {
+            return Self::error_response(error);
+        }
+        match serde_json::from_value::<Request>(envelope.request) {
+            Ok(parsed) => self.dispatch(parsed),
+            Err(error) => Self::error_response(invalid(reason_label(&error))),
+        }
+    }
+
+    /// Gate a tagged request on the current lifecycle state. Returns the
+    /// error to answer, or `None` to proceed.
+    fn state_gate(&self, tag: Option<&str>) -> Option<BridgeError> {
+        match &self.state {
+            State::Fresh => Some(BridgeError::NotOpen),
+            State::Closed => Some(BridgeError::Closed),
+            State::Poisoned => Some(BridgeError::Poisoned),
+            State::AwaitingProof(_) => match tag {
+                Some("submit_proof") => None,
+                _ => Some(BridgeError::AwaitingProof),
+            },
+            State::Suspended(_) => match tag {
+                Some("signer_reply" | "ack_durable") => None,
+                _ => Some(BridgeError::Busy),
+            },
+            State::Ready(_) => None,
+        }
+    }
+
+    fn dispatch(&mut self, request: Request) -> Response {
+        if matches!(self.state, State::Suspended(_)) {
+            return match request {
+                Request::SignerReply(args) => self.resume(args.replies),
+                Request::AckDurable(args) => self.deferred_ack(args.seq),
+                // `state_gate` admits only these two while suspended.
+                _ => Self::internal("state_gate"),
+            };
+        }
+        if matches!(self.state, State::AwaitingProof(_)) {
+            return match request {
+                Request::SubmitProof(args) => self.submit_proof(&args.event.into()),
+                _ => Self::internal("state_gate"),
+            };
+        }
+        match request {
+            Request::SubmitProof(_) => Self::error_response(invalid("value")),
+            Request::AckDurable(args) => self.ack_durable(args.seq),
+            Request::AwaitingDurability => self.sync_op(|session| {
+                Ok(OpResult::AwaitingDurability(AwaitingDurabilityResult {
+                    seq: session.awaiting_durability().map(CommitSeq::get),
+                }))
+            }),
+            Request::TakeOutbound => self.sync_op(|session| {
+                Ok(OpResult::Outbound(OutboundResult {
+                    items: session
+                        .take_outbound()?
+                        .into_iter()
+                        .map(Into::into)
+                        .collect(),
+                }))
+            }),
+            Request::AcknowledgeMessages(args) => self.acknowledge_messages(&args),
+            Request::Groups => self.sync_op(|session| {
+                Ok(OpResult::Groups(GroupsResult {
+                    groups: session.groups()?.into_iter().map(Into::into).collect(),
+                }))
+            }),
+            Request::Group(args) => {
+                let group = core::GroupId(args.group);
+                self.sync_op(move |session| {
+                    Ok(OpResult::Group(GroupResult {
+                        group: session
+                            .group(&group)?
+                            .map(|snapshot| Box::new(snapshot.into())),
+                    }))
+                })
+            }
+            Request::SealAttachment(args) => self.seal_attachment(args),
+            Request::SendMedia(args) => self.send_media(args),
+            Request::DiscardAttachment(args) => self.discard_attachment(args),
+            Request::OpenAttachment(args) => self.open_attachment(args),
+            Request::SignerReply(_) => Self::error_response(BridgeError::NoPendingSigner),
+            Request::ReportPublish(args) => self.run(op_report_publish(args), Vec::new()),
+            Request::PublishKeyPackage(args) => self.run(op_publish_key_package(args), Vec::new()),
+            Request::PublishInboxRelays(args) => {
+                self.run(op_publish_inbox_relays(args), Vec::new())
+            }
+            Request::CreateGroup(args) => self.run_built(op_create_group_args(args)),
+            Request::Invite(args) => self.run(op_invite(args), Vec::new()),
+            Request::RemoveMembers(args) => self.run_built(op_remove_members(args)),
+            Request::Leave(args) => self.run(op_leave(args), Vec::new()),
+            Request::SelfUpdate(args) => self.run(op_self_update(args), Vec::new()),
+            Request::UpdateGroupProfile(args) => {
+                self.run(op_update_group_profile(args), Vec::new())
+            }
+            Request::UpdateAppComponents(args) => {
+                self.run(op_update_app_components(args), Vec::new())
+            }
+            Request::SendMessage(args) => self.run(op_send_message(args), Vec::new()),
+            Request::Ingest(args) => self.run(op_ingest(args), Vec::new()),
+            Request::Tick => self.run(op_tick(), Vec::new()),
+        }
+    }
+
+    /// `submit_proof` in `AwaitingProof`: the proof either completes the
+    /// open or hands the pending proof back with a typed rejection.
+    fn submit_proof(&mut self, event: &core::Event) -> Response {
+        let State::AwaitingProof(pending) = std::mem::replace(&mut self.state, State::Poisoned)
+        else {
+            return Self::internal("state");
+        };
+        match pending.provide_account_proof(event) {
+            Ok(session) => {
+                self.state = State::Ready(Box::new(session));
+                if self.flush().is_err() {
+                    return Self::error_response(BridgeError::HostFailed);
+                }
+                self.ready_result()
+            }
+            Err(rejected) => {
+                self.state = State::AwaitingProof(rejected.pending);
+                Self::error_response(proof_error(&rejected.error))
+            }
+        }
+    }
+
+    /// `ack_durable` in `Ready`: validate against `last_committed`, apply
+    /// the covered `CommitSeq` (cumulative — a lower or repeated seq is a
+    /// no-op `done`).
+    fn ack_durable(&mut self, seq: u64) -> Response {
+        if seq > self.last_committed {
+            return Self::error_response(BridgeError::UnknownSeq);
+        }
+        if let Some(commit) = self.resolve_seq(seq)
+            && let State::Ready(session) = &mut self.state
+        {
+            session.acknowledge_durable(commit);
+        }
+        if self.flush().is_err() {
+            return Self::error_response(BridgeError::HostFailed);
+        }
+        Response::Ok {
+            result: Box::new(OpResult::Done),
+        }
+    }
+
+    /// `ack_durable` while suspended: validate now, apply when the
+    /// operation completes.
+    fn deferred_ack(&mut self, seq: u64) -> Response {
+        if seq > self.last_committed {
+            return Self::error_response(BridgeError::UnknownSeq);
+        }
+        self.pending_ack = self.pending_ack.max(seq);
+        Response::Ok {
+            result: Box::new(OpResult::Done),
+        }
+    }
+
+    /// `signer_reply` while suspended: validate every reply against the
+    /// pending set, store them, re-poll the operation. Validation is
+    /// all-or-nothing: any bad reply leaves the operation untouched.
+    fn resume(&mut self, replies: Vec<SignerReply>) -> Response {
+        let State::Suspended(op) = std::mem::replace(&mut self.state, State::Poisoned) else {
+            return Self::internal("state");
+        };
+        let validation = {
+            let state = lock(&self.signer_state);
+            let mut seen = HashSet::with_capacity(replies.len());
+            replies
+                .iter()
+                .find_map(|reply| reply_error(&state, reply, &mut seen))
+        };
+        if let Some(error) = validation {
+            self.state = State::Suspended(op);
+            return Self::error_response(error);
+        }
+        {
+            let mut state = lock(&self.signer_state);
+            for reply in replies {
+                state.answer(reply.id, reply.result);
+            }
+        }
+        self.poll_op(op)
+    }
+
+    /// `seal_attachment`: keep the sealed pending handle for `send_media`.
+    fn seal_attachment(&mut self, args: SealAttachmentRequest) -> Response {
+        if self.attachments.len() >= ATTACHMENT_LIMIT || self.next_handle == u32::MAX {
+            return Self::error_response(BridgeError::AttachmentLimit);
+        }
+        let handle = self.next_handle;
+        let group = core::GroupId(args.group);
+        let outcome = match &mut self.state {
+            State::Ready(session) => session.seal_attachment(&group, args.attachment.into()),
+            _ => return Self::internal("state"),
+        };
+        match outcome {
+            Err(error) => {
+                if self.flush().is_err() {
+                    return Self::error_response(BridgeError::HostFailed);
+                }
+                Self::error_response(session_error(&error))
+            }
+            Ok(sealed) => {
+                let result = SealedAttachmentResult {
+                    ciphertext: sealed.ciphertext.clone(),
+                    ciphertext_sha256: sealed.ciphertext_sha256,
+                    handle,
+                };
+                self.attachments.insert(handle, sealed);
+                self.next_handle = handle.saturating_add(1);
+                if self.flush().is_err() {
+                    return Self::error_response(BridgeError::HostFailed);
+                }
+                Response::Ok {
+                    result: Box::new(OpResult::SealedAttachment(result)),
+                }
+            }
+        }
+    }
+
+    /// `send_media`: resolve handles into sealed pending attachments, run
+    /// the send, consume handles only on success.
+    fn send_media(&mut self, args: SendMediaRequest) -> Response {
+        let mut attachments = Vec::with_capacity(args.attachments.len());
+        let mut handles = Vec::with_capacity(args.attachments.len());
+        for attachment in &args.attachments {
+            let MediaAttachmentRef { handle, locators } = attachment;
+            let Some(entry) = self.attachments.get(handle) else {
+                return Self::error_response(BridgeError::UnknownAttachment);
+            };
+            attachments.push((
+                entry.pending.clone(),
+                locators
+                    .iter()
+                    .cloned()
+                    .map(core::media::Locator::from)
+                    .collect::<Vec<_>>(),
+            ));
+            handles.push(*handle);
+        }
+        let message = core::MediaMessage {
+            caption: args.caption,
+            attachments,
+            tags: args.tags,
+        };
+        let group = core::GroupId(args.group);
+        self.run(
+            op_send(move |session| {
+                Box::pin(async move { session.send_media(&group, message).await })
+            }),
+            handles,
+        )
+    }
+
+    /// `discard_attachment`: drop one sealed handle.
+    fn discard_attachment(&mut self, args: DiscardAttachmentRequest) -> Response {
+        if self.attachments.remove(&args.handle).is_none() {
+            return Self::error_response(BridgeError::UnknownAttachment);
+        }
+        Response::Ok {
+            result: Box::new(OpResult::Done),
+        }
+    }
+
+    /// `open_attachment`: decrypt a media reference's blob.
+    fn open_attachment(&mut self, args: OpenAttachmentRequest) -> Response {
+        let group = core::GroupId(args.group);
+        let message = core::EventId(args.message);
+        let reference: core::media::MediaReference = args.reference.into();
+        self.sync_op(|session| {
+            Ok(OpResult::Attachment(AttachmentData {
+                plaintext: session.open_attachment(
+                    &group,
+                    &message,
+                    &reference,
+                    &args.ciphertext,
+                )?,
+            }))
+        })
+    }
+
+    /// `acknowledge_messages`: release durable pending-message rows.
+    fn acknowledge_messages(&mut self, args: &AcknowledgeMessagesRequest) -> Response {
+        let Some(ids) = decode_event_ids(&args.ids) else {
+            return Self::error_response(invalid("hex"));
+        };
+        self.sync_op(|session| {
+            session.acknowledge_messages(&ids)?;
+            Ok(OpResult::Done)
+        })
+    }
+
+    /// Run a synchronous session operation, flush, respond.
+    fn sync_op(
+        &mut self,
+        op: impl FnOnce(&mut Session) -> Result<OpResult, SessionError>,
+    ) -> Response {
+        let outcome = match &mut self.state {
+            State::Ready(session) => op(session),
+            _ => return Self::internal("state"),
+        };
+        if self.flush().is_err() {
+            return Self::error_response(BridgeError::HostFailed);
+        }
+        match outcome {
+            Ok(result) => Response::Ok {
+                result: Box::new(result),
+            },
+            Err(error) => Self::error_response(session_error(&error)),
+        }
+    }
+
+    /// Run a fallibly-built operation future (`run` or its decode error).
+    fn run_built(
+        &mut self,
+        built: Result<impl FnOnce(Box<Session>) -> OpFuture, BridgeError>,
+    ) -> Response {
+        match built {
+            Ok(future) => self.run(future, Vec::new()),
+            Err(error) => Self::error_response(error),
+        }
+    }
+
+    /// Run an async session operation: take the session out, poll once,
+    /// and either restore it with the result or suspend for signer
+    /// replies.
+    fn run(&mut self, build: impl FnOnce(Box<Session>) -> OpFuture, handles: Vec<u32>) -> Response {
+        let State::Ready(session) = std::mem::replace(&mut self.state, State::Poisoned) else {
+            return Self::internal("state");
+        };
+        let suspended = SuspendedOp {
+            future: build(session),
+            handles,
+        };
+        self.poll_op(suspended)
+    }
+
+    /// Poll an operation once. Ready completes the operation; Pending with
+    /// unanswered signer requests stays suspended; Pending with none is an
+    /// invariant break.
+    fn poll_op(&mut self, mut op: SuspendedOp) -> Response {
+        let waker = Waker::noop();
+        let mut context = Context::from_waker(waker);
+        match op.future.as_mut().poll(&mut context) {
+            Poll::Ready((session, outcome)) => self.finish_op(session, outcome, op.handles),
+            Poll::Pending => {
+                let unanswered: Vec<SignerRequest> = lock(&self.signer_state).unanswered();
+                if unanswered.is_empty() {
+                    self.state = State::Poisoned;
+                    return Self::internal("stalled");
+                }
+                self.state = State::Suspended(op);
+                if self.flush().is_err() {
+                    return Self::error_response(BridgeError::HostFailed);
+                }
+                Response::SignerPending {
+                    requests: unanswered,
+                }
+            }
+        }
+    }
+
+    /// Complete an operation: clear its signer bookkeeping, apply a
+    /// deferred `ack_durable`, consume attachment handles on success,
+    /// restore the session, flush, respond.
+    fn finish_op(
+        &mut self,
+        mut session: Box<Session>,
+        outcome: Result<OpResult, SessionError>,
+        handles: Vec<u32>,
+    ) -> Response {
+        lock(&self.signer_state).clear();
+        if self.pending_ack > 0 {
+            if let Some(commit) = self.resolve_seq(self.pending_ack) {
+                session.acknowledge_durable(commit);
+            }
+            self.pending_ack = 0;
+        }
+        if outcome.is_ok() {
+            for handle in handles {
+                self.attachments.remove(&handle);
+            }
+        }
+        self.state = State::Ready(session);
+        if self.flush().is_err() {
+            return Self::error_response(BridgeError::HostFailed);
+        }
+        match outcome {
+            Ok(result) => Response::Ok {
+                result: Box::new(result),
+            },
+            Err(error) => Self::error_response(session_error(&error)),
+        }
+    }
+
+    /// Flush queued batches to the host in order. A commit failure poisons
+    /// the bridge.
+    fn flush(&mut self) -> Result<(), ()> {
+        loop {
+            let batch = {
+                let mut queue = lock(&self.queue);
+                queue.pop_front()
+            };
+            let Some(batch) = batch else {
+                return Ok(());
+            };
+            if self.host.commit(&batch.encode()).is_ok() {
+                self.last_committed = batch.seq.get();
+                self.unacked.insert(batch.seq.get(), batch.seq);
+            } else {
+                self.state = State::Poisoned;
+                return Err(());
+            }
+        }
+    }
+
+    /// Record `now`; refuse a monotonic regression.
+    fn set_now(&self, now: core::Time) -> bool {
+        let mut current = lock(&self.time);
+        if now.monotonic_ms < current.monotonic_ms {
+            return false;
+        }
+        *current = now;
+        true
+    }
+
+    /// The `CommitSeq` to acknowledge for raw `seq`: the highest tracked
+    /// sequence `<= seq` (cumulative ack). Entries it covers are dropped.
+    fn resolve_seq(&mut self, seq: u64) -> Option<CommitSeq> {
+        let commit = self
+            .unacked
+            .range(..=seq)
+            .next_back()
+            .map(|(_, commit)| *commit)?;
+        let covered: Vec<u64> = self.unacked.range(..=seq).map(|(raw, _)| *raw).collect();
+        for raw in covered {
+            self.unacked.remove(&raw);
+        }
+        Some(commit)
+    }
+
+    fn ready_response(&self) -> OpenResponse {
+        let State::Ready(session) = &self.state else {
+            return Self::open_error(BridgeError::Internal {
+                site: "state".to_owned(),
+            });
+        };
+        OpenResponse::Ready {
+            account: session.account().0,
+        }
+    }
+
+    fn ready_result(&self) -> Response {
+        let State::Ready(session) = &self.state else {
+            return Self::internal("state");
+        };
+        Response::Ok {
+            result: Box::new(OpResult::Ready(ReadyResult {
+                account: session.account().0,
+            })),
+        }
+    }
+
+    fn drain_inner(&mut self) -> DrainResponse {
+        let outcome = match &mut self.state {
+            State::Fresh => return Self::drain_error(BridgeError::NotOpen),
+            State::AwaitingProof(_) => return Self::drain_error(BridgeError::AwaitingProof),
+            State::Suspended(_) => return Self::drain_error(BridgeError::Busy),
+            State::Closed => return Self::drain_error(BridgeError::Closed),
+            State::Poisoned => return Self::drain_error(BridgeError::Poisoned),
+            State::Ready(session) => session.drain_events(),
+        };
+        if self.flush().is_err() {
+            return Self::drain_error(BridgeError::HostFailed);
+        }
+        match outcome {
+            Ok(events) => DrainResponse::Events {
+                events: events.into_iter().map(Into::into).collect(),
+            },
+            Err(error) => Self::drain_error(session_error(&error)),
+        }
+    }
+
+    fn internal(site: &'static str) -> Response {
+        Self::error_response(BridgeError::Internal {
+            site: site.to_owned(),
+        })
+    }
+
+    fn open_error(error: BridgeError) -> OpenResponse {
+        OpenResponse::Error {
+            error: Box::new(error),
+        }
+    }
+
+    fn error_response(error: BridgeError) -> Response {
+        Response::Error {
+            error: Box::new(error),
+        }
+    }
+
+    fn drain_error(error: BridgeError) -> DrainResponse {
+        DrainResponse::Error {
+            error: Box::new(error),
+        }
+    }
+}
+
+/// `report_publish` as an operation future.
+fn op_report_publish(args: ReportPublishRequest) -> impl FnOnce(Box<Session>) -> OpFuture {
+    let id = core::OutboundId(args.id);
+    let results: Vec<core::RelayResult> = args
+        .results
+        .into_iter()
+        .map(|result| core::RelayResult {
+            relay: result.relay,
+            status: result.status.into(),
+        })
+        .collect();
+    move |mut session| {
+        Box::pin(async move {
+            let resolution = session.report_publish(&id, &results).await;
+            (
+                session,
+                resolution.map(|resolution| {
+                    OpResult::PublishResolution(PublishResolutionResult {
+                        resolution: resolution.into(),
+                    })
+                }),
+            )
+        })
+    }
+}
+
+/// `publish_key_package` as an operation future.
+fn op_publish_key_package(args: PublishKeyPackageRequest) -> impl FnOnce(Box<Session>) -> OpFuture {
+    move |mut session| {
+        Box::pin(async move {
+            let info = session.publish_key_package(&args.relays).await;
+            (
+                session,
+                info.map(|info| {
+                    OpResult::KeyPackage(KeyPackageResult {
+                        key_package: info.key_package,
+                        key_package_ref: info.key_package_ref,
+                        event_id: info.event_id.0,
+                        account: info.account.0,
+                    })
+                }),
+            )
+        })
+    }
+}
+
+/// `publish_inbox_relays` as an operation future.
+fn op_publish_inbox_relays(
+    args: PublishInboxRelaysRequest,
+) -> impl FnOnce(Box<Session>) -> OpFuture {
+    move |mut session| {
+        Box::pin(async move {
+            let id = session.publish_inbox_relays(&args.relays).await;
+            (
+                session,
+                id.map(|id| OpResult::InboxRelays(InboxRelaysResult { outbound_id: id.0 })),
+            )
+        })
+    }
+}
+
+/// `create_group` as an operation future (args already converted).
+fn op_create_group(session: Box<Session>, req: core::CreateGroup) -> OpFuture {
+    let mut session = session;
+    Box::pin(async move {
+        let created = session.create_group(req).await;
+        let snapshot = created.and_then(|group| {
+            session
+                .group(&group)?
+                .ok_or(SessionError::Internal("group snapshot"))
+        });
+        (
+            session,
+            snapshot.map(|snapshot| {
+                OpResult::GroupCreated(GroupCreatedResult {
+                    group: Box::new(snapshot.into()),
+                })
+            }),
+        )
+    })
+}
+
+/// `invite` as an operation future.
+fn op_invite(args: InviteRequest) -> impl FnOnce(Box<Session>) -> OpFuture {
+    let group = core::GroupId(args.group);
+    let invitees: Vec<core::Invitee> = args.invitees.into_iter().map(core::Invitee::from).collect();
+    op_send(move |session| Box::pin(async move { session.invite(&group, invitees).await }))
+}
+
+/// `ingest` as an operation future.
+fn op_ingest(args: IngestRequest) -> impl FnOnce(Box<Session>) -> OpFuture {
+    let events: Vec<core::Event> = args.events.into_iter().map(Into::into).collect();
+    move |mut session| {
+        Box::pin(async move {
+            let reports = session.ingest_batch(events).await;
+            (
+                session,
+                reports.map(|reports| {
+                    OpResult::Ingested(IngestedResult {
+                        reports: reports.into_iter().map(Into::into).collect(),
+                    })
+                }),
+            )
+        })
+    }
+}
+
+/// `tick` as an operation future.
+fn op_tick() -> impl FnOnce(Box<Session>) -> OpFuture {
+    |mut session| {
+        Box::pin(async move {
+            let report = session.tick().await;
+            (
+                session,
+                report.map(|report| {
+                    OpResult::Ticked(TickedResult {
+                        next_wake_ms: report.next_wake_ms,
+                    })
+                }),
+            )
+        })
+    }
+}
+
+/// Wrap a `SendOutcome`-returning session method as an operation future.
+///
+/// The method's returned future borrows the session mutably, so callers box
+/// it over an `async move` that also moves owned arguments in (the borrow
+/// would otherwise escape the closure environment). The wrapper drives it
+/// inside an `async move` that owns and returns the `Box<Session>`.
+fn op_send(
+    call: impl for<'a> FnOnce(
+        &'a mut Session,
+    ) -> Pin<
+        Box<dyn Future<Output = Result<core::SendOutcome, SessionError>> + 'a>,
+    > + 'static,
+) -> impl FnOnce(Box<Session>) -> OpFuture {
+    move |mut session| {
+        Box::pin(async move {
+            let outcome = call(&mut session).await;
+            (
+                session,
+                outcome.map(|outcome| {
+                    OpResult::SendOutcome(SendOutcomeResult {
+                        outcome: outcome.into(),
+                    })
+                }),
+            )
+        })
+    }
+}
+
+/// Whether a reply's result kind fits the pending operation's kind.
+const fn reply_fits(op: &crate::protocol::SignerOp, result: &SignerResult) -> bool {
+    match result {
+        SignerResult::Signed { .. } => {
+            matches!(op, crate::protocol::SignerOp::SignEvent { .. })
+        }
+        SignerResult::Text { .. } => matches!(
+            op,
+            crate::protocol::SignerOp::Nip44Encrypt { .. }
+                | crate::protocol::SignerOp::Nip44Decrypt { .. }
+        ),
+        SignerResult::Refused | SignerResult::Failed => true,
+    }
+}
+
+/// Decode a list of 32-byte hex account ids.
+fn decode_accounts(ids: &[String]) -> Option<Vec<core::AccountId>> {
+    ids.iter()
+        .map(|text| core::AccountId::from_hex(text).ok())
+        .collect()
+}
+
+/// Decode a list of 32-byte hex event ids.
+fn decode_event_ids(ids: &[String]) -> Option<Vec<core::EventId>> {
+    ids.iter()
+        .map(|text| core::EventId::from_hex(text).ok())
+        .collect()
+}
+
+/// `remove_members` argument conversion (fallible: hex member ids).
+fn op_remove_members(
+    args: RemoveMembersRequest,
+) -> Result<impl FnOnce(Box<Session>) -> OpFuture, BridgeError> {
+    let Some(members) = decode_accounts(&args.members) else {
+        return Err(invalid("hex"));
+    };
+    let group = core::GroupId(args.group);
+    Ok(op_send(move |session| {
+        Box::pin(async move { session.remove_members(&group, &members).await })
+    }))
+}
+
+/// `leave` as an operation future.
+fn op_leave(args: LeaveRequest) -> impl FnOnce(Box<Session>) -> OpFuture {
+    let group = core::GroupId(args.group);
+    op_send(move |session| Box::pin(async move { session.leave(&group).await }))
+}
+
+/// `self_update` as an operation future.
+fn op_self_update(args: SelfUpdateRequest) -> impl FnOnce(Box<Session>) -> OpFuture {
+    let group = core::GroupId(args.group);
+    op_send(move |session| Box::pin(async move { session.self_update(&group).await }))
+}
+
+/// `update_group_profile` as an operation future.
+fn op_update_group_profile(
+    args: UpdateGroupProfileRequest,
+) -> impl FnOnce(Box<Session>) -> OpFuture {
+    let group = core::GroupId(args.group);
+    op_send(move |session| {
+        Box::pin(async move {
+            session
+                .update_group_profile(&group, args.name, args.description)
+                .await
+        })
+    })
+}
+
+/// `update_app_components` as an operation future.
+fn op_update_app_components(
+    args: UpdateAppComponentsRequest,
+) -> impl FnOnce(Box<Session>) -> OpFuture {
+    let group = core::GroupId(args.group);
+    let updates: Vec<core::ComponentUpdate> = args
+        .updates
+        .into_iter()
+        .map(core::ComponentUpdate::from)
+        .collect();
+    op_send(move |session| {
+        Box::pin(async move { session.update_app_components(&group, updates).await })
+    })
+}
+
+/// `send_message` as an operation future.
+fn op_send_message(args: SendMessageRequest) -> impl FnOnce(Box<Session>) -> OpFuture {
+    let group = core::GroupId(args.group);
+    let message: core::AppMessage = args.message.into();
+    op_send(move |session| Box::pin(async move { session.send_message(&group, message).await }))
+}
+
+/// Validate one signer reply against the pending set.
+fn reply_error(
+    state: &SignerState,
+    reply: &SignerReply,
+    seen: &mut HashSet<u32>,
+) -> Option<BridgeError> {
+    if !state.awaitable(reply.id) || !seen.insert(reply.id) {
+        return Some(BridgeError::UnknownSignerRequest);
+    }
+    let fits = state
+        .pending
+        .get(&reply.id)
+        .is_none_or(|op| reply_fits(op, &reply.result));
+    if fits { None } else { Some(invalid("value")) }
+}
+
+/// `create_group` argument conversion (fallible: hex account ids).
+fn op_create_group_args(
+    args: CreateGroupRequest,
+) -> Result<impl FnOnce(Box<Session>) -> OpFuture, BridgeError> {
+    let Some(admins) = decode_accounts(&args.admins) else {
+        return Err(invalid("hex"));
+    };
+    let req = core::CreateGroup {
+        name: args.name,
+        description: args.description,
+        relays: args.relays,
+        invitees: args.invitees.into_iter().map(core::Invitee::from).collect(),
+        admins,
+        components: args
+            .components
+            .into_iter()
+            .map(core::ComponentUpdate::from)
+            .collect(),
+    };
+    Ok(move |session| op_create_group(session, req))
+}

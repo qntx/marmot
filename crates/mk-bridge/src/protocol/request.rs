@@ -1,0 +1,293 @@
+//! The `call` request vocabulary: one variant per `Session` surface, plus
+//! `submit_proof` (two-phase open) and `signer_reply` (suspension resume).
+//!
+//! Data-carrying variants are newtype wrappers over strict
+//! `deny_unknown_fields` argument structs — internally-tagged enums cannot
+//! reject unknown fields themselves.
+
+use serde::{Deserialize, Serialize};
+
+use super::ser::{hex_bytes, hex_str, u64_str};
+use super::types::{
+    AppMessage, AttachmentInput, ComponentUpdate, Event, Invitee, MediaAttachmentRef,
+    MediaReference, RelayResult, SignerReply,
+};
+
+/// Complete an `open` that answered `needs_account_proof`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SubmitProofRequest {
+    /// The signed proof event.
+    pub event: Event,
+}
+
+/// Acknowledge durable storage of committed batches.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AckDurableRequest {
+    /// Highest batch sequence now durable (decimal string).
+    #[serde(with = "u64_str")]
+    pub seq: u64,
+}
+
+/// Report publish outcomes for one outbound item.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReportPublishRequest {
+    /// The outbound id being reported, hex.
+    #[serde(with = "hex_str")]
+    pub id: [u8; 32],
+    /// Per-relay verdicts.
+    pub results: Vec<RelayResult>,
+}
+
+/// Build, sign and stage the account's kind-30443 `KeyPackage`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PublishKeyPackageRequest {
+    /// The relays to publish to.
+    pub relays: Vec<String>,
+}
+
+/// Build, sign and stage the account's kind-10050 inbox relay list.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PublishInboxRelaysRequest {
+    /// The relays to advertise.
+    pub relays: Vec<String>,
+}
+
+/// Create a group.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CreateGroupRequest {
+    /// Group name.
+    pub name: String,
+    /// Group description.
+    pub description: String,
+    /// The group's Nostr relays.
+    pub relays: Vec<String>,
+    /// Founding invitees (the creator is always a member).
+    pub invitees: Vec<Invitee>,
+    /// Additional founding admins besides the creator.
+    pub admins: Vec<String>,
+    /// Additional initial app components.
+    pub components: Vec<ComponentUpdate>,
+}
+
+/// Invite accounts to a group.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InviteRequest {
+    /// The group, hex.
+    #[serde(with = "hex_bytes")]
+    pub group: Vec<u8>,
+    /// The invitees.
+    pub invitees: Vec<Invitee>,
+}
+
+/// Remove member accounts from a group.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RemoveMembersRequest {
+    /// The group, hex.
+    #[serde(with = "hex_bytes")]
+    pub group: Vec<u8>,
+    /// The member accounts to remove, 32-byte hex each.
+    pub members: Vec<String>,
+}
+
+/// Request to leave a group.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LeaveRequest {
+    /// The group, hex.
+    #[serde(with = "hex_bytes")]
+    pub group: Vec<u8>,
+}
+
+/// Refresh this device's own membership (self-update commit).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SelfUpdateRequest {
+    /// The group, hex.
+    #[serde(with = "hex_bytes")]
+    pub group: Vec<u8>,
+}
+
+/// Update the group profile.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateGroupProfileRequest {
+    /// The group, hex.
+    #[serde(with = "hex_bytes")]
+    pub group: Vec<u8>,
+    /// New name, or leave unchanged with `null`.
+    pub name: Option<String>,
+    /// New description, or leave unchanged with `null`.
+    pub description: Option<String>,
+}
+
+/// Apply app-component updates.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateAppComponentsRequest {
+    /// The group, hex.
+    #[serde(with = "hex_bytes")]
+    pub group: Vec<u8>,
+    /// The component updates.
+    pub updates: Vec<ComponentUpdate>,
+}
+
+/// Send an application message (kind 9 chat, kind 7 reactions).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SendMessageRequest {
+    /// The group, hex.
+    #[serde(with = "hex_bytes")]
+    pub group: Vec<u8>,
+    /// The inner app event.
+    pub message: AppMessage,
+}
+
+/// Encrypt an attachment and pin it to the current media epoch.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SealAttachmentRequest {
+    /// The group, hex.
+    #[serde(with = "hex_bytes")]
+    pub group: Vec<u8>,
+    /// What to seal.
+    pub attachment: AttachmentInput,
+}
+
+/// Send a kind-9 media message carrying sealed attachments.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SendMediaRequest {
+    /// The group, hex.
+    #[serde(with = "hex_bytes")]
+    pub group: Vec<u8>,
+    /// The message body.
+    pub caption: String,
+    /// One `(handle, locators)` pair per sealed attachment.
+    pub attachments: Vec<MediaAttachmentRef>,
+    /// Extra tags for the inner event.
+    pub tags: Vec<Vec<String>>,
+}
+
+/// Drop one sealed attachment handle.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DiscardAttachmentRequest {
+    /// The handle to drop.
+    pub handle: u32,
+}
+
+/// Decrypt a media attachment reference.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OpenAttachmentRequest {
+    /// The group, hex.
+    #[serde(with = "hex_bytes")]
+    pub group: Vec<u8>,
+    /// The transport event id that carried the reference, hex.
+    #[serde(with = "hex_str")]
+    pub message: [u8; 32],
+    /// The validated `imeta` reference.
+    pub reference: MediaReference,
+    /// The downloaded ciphertext blob, hex.
+    #[serde(with = "hex_bytes")]
+    pub ciphertext: Vec<u8>,
+}
+
+/// Admit inbound transport events.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IngestRequest {
+    /// The events; sorted and deduplicated by the session.
+    pub events: Vec<Event>,
+}
+
+/// Acknowledge delivered application messages (at-least-once).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AcknowledgeMessagesRequest {
+    /// Transport event ids, 32-byte hex each.
+    pub ids: Vec<String>,
+}
+
+/// Snapshot one group.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GroupRequest {
+    /// The group, hex.
+    #[serde(with = "hex_bytes")]
+    pub group: Vec<u8>,
+}
+
+/// Answer deferred signer operations and resume the suspended call.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SignerReplyRequest {
+    /// The replies.
+    pub replies: Vec<SignerReply>,
+}
+
+/// A `call` request. The `"type"` tag must appear in
+/// [`crate::protocol::REQUEST_TYPES`] before decode; anything else answers
+/// `unsupported`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum Request {
+    /// Complete the account-identity proof.
+    SubmitProof(SubmitProofRequest),
+    /// Acknowledge durable batches.
+    AckDurable(AckDurableRequest),
+    /// Report the durability gate's outstanding watermark.
+    AwaitingDurability,
+    /// Release gated outbound items for publishing.
+    TakeOutbound,
+    /// Report publish verdicts for one outbound item.
+    ReportPublish(ReportPublishRequest),
+    /// Stage the account `KeyPackage`.
+    PublishKeyPackage(PublishKeyPackageRequest),
+    /// Stage the account inbox relay list.
+    PublishInboxRelays(PublishInboxRelaysRequest),
+    /// Create a group.
+    CreateGroup(CreateGroupRequest),
+    /// Invite accounts to a group.
+    Invite(InviteRequest),
+    /// Remove members from a group.
+    RemoveMembers(RemoveMembersRequest),
+    /// Request to leave a group.
+    Leave(LeaveRequest),
+    /// Refresh own membership.
+    SelfUpdate(SelfUpdateRequest),
+    /// Update the group profile.
+    UpdateGroupProfile(UpdateGroupProfileRequest),
+    /// Apply app-component updates.
+    UpdateAppComponents(UpdateAppComponentsRequest),
+    /// Send an application message.
+    SendMessage(SendMessageRequest),
+    /// Encrypt an attachment.
+    SealAttachment(SealAttachmentRequest),
+    /// Send a media message.
+    SendMedia(SendMediaRequest),
+    /// Drop a sealed attachment handle.
+    DiscardAttachment(DiscardAttachmentRequest),
+    /// Decrypt a media attachment.
+    OpenAttachment(OpenAttachmentRequest),
+    /// Admit inbound events.
+    Ingest(IngestRequest),
+    /// Run one maintenance/convergence pass.
+    Tick,
+    /// Acknowledge delivered messages.
+    AcknowledgeMessages(AcknowledgeMessagesRequest),
+    /// Snapshot every live group.
+    Groups,
+    /// Snapshot one group.
+    Group(GroupRequest),
+    /// Answer signer operations and resume.
+    SignerReply(SignerReplyRequest),
+}

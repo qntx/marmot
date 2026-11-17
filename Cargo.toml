@@ -1,5 +1,5 @@
 [workspace]
-members  = ["crates/mk-core"]
+members  = ["crates/mk-core", "crates/mk-bridge"]
 exclude  = ["spike", "crates/interop", "crates/conformance", "fuzz"]
 resolver = "3"
 

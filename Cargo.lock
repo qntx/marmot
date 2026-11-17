@@ -1851,6 +1851,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "68354c5c6bd36d73ff3feceb05efa59b6acb7626617f4962be322a825e61f79a"
 
 [[package]]
+name = "mk-bridge"
+version = "0.0.0"
+dependencies = [
+ "hex",
+ "mk-core",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
 name = "mk-core"
 version = "0.0.0"
 dependencies = [
