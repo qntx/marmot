@@ -34,10 +34,25 @@
       "import": "./dist/index.mjs",
       "default": "./dist/index.mjs"
     },
+    "./backend": {
+      "types": "./dist/backend.d.mts",
+      "import": "./dist/backend.mjs",
+      "default": "./dist/backend.mjs"
+    },
     "./core": {
       "types": "./dist/core.d.mts",
       "import": "./dist/core.mjs",
       "default": "./dist/core.mjs"
+    },
+    "./storage": {
+      "types": "./dist/storage.d.mts",
+      "import": "./dist/storage.mjs",
+      "default": "./dist/storage.mjs"
+    },
+    "./testing": {
+      "types": "./dist/testing.d.mts",
+      "import": "./dist/testing.mjs",
+      "default": "./dist/testing.mjs"
     },
     "./package.json": "./package.json"
   },
@@ -56,6 +71,7 @@
     "@arethetypeswrong/cli": "0.18.5",
     "@qntx/tsconfig": "1.0.1",
     "@types/node": "26.6.5",
+    "fake-indexeddb": "6.2.8",
     "publint": "0.3.25",
     "typescript": "7.0.2",
     "vite-plus": "1.4.0"
