@@ -47,7 +47,7 @@
     "dev": "vp pack --watch",
     "build:wasm": "bun ../../scripts/build-wasm.ts && vp pack && cp src/generated/marmot_wasm_bg.wasm dist/marmot_wasm_bg.wasm",
     "test": "vp test tests/unit",
-    "test:wasm": "bunx node@22 ../../node_modules/.bin/vp test tests/wasm && bun test tests/bun",
+    "test:wasm": "vp test tests/wasm && bun test tests/bun",
     "check:size": "bun ../../scripts/check-wasm-size.ts",
     "check:generated": "bun ../../scripts/build-wasm.ts --glue-only && git diff --exit-code -- src/generated",
     "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.src.json",
