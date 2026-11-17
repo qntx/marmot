@@ -84,7 +84,7 @@ describe("kv codecs", () => {
     };
     const bytes = encodeKvBatch(batch);
     expect(bytes[0]).toBe(1);
-    expect(bytes.slice(1, 9)).toStrictEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+    expect(bytes.slice(1, 9)).toStrictEqual(Uint8Array.of(1, 2, 3, 4, 5, 6, 7, 8));
     expect(decodeKvBatch(bytes).seq).toBe(0x0102030405060708n);
   });
 
