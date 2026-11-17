@@ -94,7 +94,14 @@ const config: UserConfig = defineConfig({
   },
   lint: merge(lintConfig, {
     // merge() concatenates arrays onto the preset's own ignorePatterns.
-    ignorePatterns: ["3rdparty/**", "target/**", "spike/**"],
+    ignorePatterns: [
+      "3rdparty/**",
+      "target/**",
+      "spike/**",
+      // Committed wasm-bindgen --target web glue (regenerated, diffed by check:generated).
+      "packages/marmot-wasm/src/generated/**",
+      "packages/marmot-wasm/tests/generated/**",
+    ],
     jsPlugins: [{ name: "vite-plus", specifier: "vite-plus/oxlint-plugin" }],
     rules: {
       "vite-plus/prefer-vite-plus-imports": "error",
@@ -154,6 +161,9 @@ const config: UserConfig = defineConfig({
       "**/*.toml",
       "vectors/**",
       "spike/**",
+      // Committed wasm-bindgen glue is generated output, not hand-written.
+      "packages/marmot-wasm/src/generated/**",
+      "packages/marmot-wasm/tests/generated/**",
     ],
   },
   run: { cache: process.env["CI"] === undefined || process.env["CI"] === "" },

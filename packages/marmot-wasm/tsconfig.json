@@ -1,0 +1,10 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "paths": {
+      "@qntx/marmot": ["../marmot/src/index.ts"],
+      "@qntx/marmot/*": ["../marmot/src/*/index.ts"]
+    }
+  },
+  "include": ["src", "tests", "vite.config.ts"]
+}

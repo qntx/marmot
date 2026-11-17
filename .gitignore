@@ -23,4 +23,8 @@ docs/*
 # Rust build output
 target/
 
+# Declarations `vp pack` emits beside configs
+packages/*/vite.config.d.ts
+
+
 .vitest/

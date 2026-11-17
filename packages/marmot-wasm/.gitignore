@@ -1,0 +1,4 @@
+# Build artifacts: the wasm binary is never committed (CI regenerates it).
+src/generated/*.wasm
+tests/generated/
+dist
