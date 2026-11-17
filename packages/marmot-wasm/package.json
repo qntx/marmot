@@ -51,13 +51,15 @@
     "check:size": "bun ../../scripts/check-wasm-size.ts",
     "check:generated": "bun ../../scripts/build-wasm.ts --glue-only && git diff --exit-code -- src/generated",
     "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.src.json",
-    "check:pkg": "vp pack && publint && attw --pack . --profile esm-only"
+    "check:pkg": "vp pack && publint && attw --pack . --profile esm-only",
+    "test:browser": "bun e2e/build.ts && playwright test"
   },
   "dependencies": {
     "@qntx/marmot": "^0.0.0"
   },
   "devDependencies": {
     "@arethetypeswrong/cli": "0.18.5",
+    "@playwright/test": "1.65.0",
     "@qntx/tsconfig": "1.0.1",
     "@types/node": "26.6.5",
     "binaryen": "132.0.0",

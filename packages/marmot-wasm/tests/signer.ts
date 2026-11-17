@@ -7,9 +7,8 @@ import { finalizeEvent, generateSecretKey, getPublicKey, nip44 } from "nostr-too
 
 import type { Signer, NostrEvent, UnsignedEvent } from "@qntx/marmot/backend";
 
-/** A `Signer` holding a fresh random secret key. */
-export function testSigner(): Signer {
-  const secret = generateSecretKey();
+/** A `Signer` holding `secret` (a fresh random secret key when omitted). */
+export function testSigner(secret: Uint8Array = generateSecretKey()): Signer {
   const conversationKey = (peer: string): Uint8Array =>
     nip44.v2.utils.getConversationKey(secret, peer);
   return {

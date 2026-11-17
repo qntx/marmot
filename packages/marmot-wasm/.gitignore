@@ -2,3 +2,7 @@
 src/generated/*.wasm
 tests/generated/
 dist
+e2e/dist/
+test-results/
+playwright-report/
+blob-report/
