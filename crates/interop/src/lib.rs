@@ -8,6 +8,6 @@
 
 #[cfg(test)]
 use {
-    axum as _, hex as _, mk_core as _, nostr as _, nostr_sdk as _, serde_json as _, sha2 as _,
-    tokio as _,
+    axum as _, hex as _, mk_bridge as _, mk_core as _, nostr as _, nostr_sdk as _, serde_json as _,
+    sha2 as _, tokio as _,
 };

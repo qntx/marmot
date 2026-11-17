@@ -1487,6 +1487,7 @@ version = "0.0.0"
 dependencies = [
  "axum",
  "hex",
+ "mk-bridge",
  "mk-core",
  "nostr",
  "nostr-sdk",
@@ -1867,6 +1868,17 @@ dependencies = [
  "libc",
  "wasi",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "mk-bridge"
+version = "0.0.0"
+dependencies = [
+ "hex",
+ "mk-core",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
