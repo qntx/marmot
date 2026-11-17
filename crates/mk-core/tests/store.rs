@@ -66,9 +66,12 @@ use std::sync::{Arc, Mutex};
 use cgka_traits::capabilities::GroupCapabilities;
 use cgka_traits::group::{Group, ProtocolProfile};
 use cgka_traits::message::{MessageRecord, MessageState};
-use cgka_traits::storage::StorageError;
-use cgka_traits::storage::{GroupStorage, MessageStorage, StorageProvider};
-use cgka_traits::types::{EpochId, GroupId, MessageId};
+use cgka_traits::storage::{
+    CommittedMembers, CommittedRosterStorage, CommittedRosterWrite, GroupStorage, MessageStorage,
+    RosterRevision, StorageError, StorageProvider,
+};
+use cgka_traits::transport::Timestamp;
+use cgka_traits::types::{EpochId, GroupId, MemberId, MessageId};
 use mk_core::{BatchCodecError, KvBatch, KvHost, KvOp, KvStorageProvider, OpenError};
 
 #[derive(Debug, Default)]
@@ -175,7 +178,7 @@ fn record(n: u8, group: u8, state: MessageState) -> MessageRecord {
 #[test]
 fn batch_codec_round_trip() {
     let (provider, host) = open_provider();
-    provider.put_group(&group(1)).expect("group");
+    provider.put_group_keeping_roster(&group(1)).expect("group");
     let batch = host
         .batches()
         .into_iter()
@@ -324,8 +327,12 @@ fn open_rejects_malformed_version_row() {
 #[test]
 fn batch_seq_increments_per_committed_unit() {
     let (provider, host) = open_provider();
-    provider.put_group(&group(1)).expect("put group");
-    provider.put_group(&group(2)).expect("put group");
+    provider
+        .put_group_keeping_roster(&group(1))
+        .expect("put group");
+    provider
+        .put_group_keeping_roster(&group(2))
+        .expect("put group");
     let seqs = host.seqs();
     // First batch carries the schema meta rows; each put is one more.
     assert_eq!(seqs.len(), 3);
@@ -348,8 +355,8 @@ fn nested_transaction_emits_one_batch() {
     let before = host.seqs().len();
     provider
         .with_transaction(|p| {
-            p.put_group(&group(1))?;
-            p.with_transaction(|inner| inner.put_group(&group(2)))
+            p.put_group_keeping_roster(&group(1))?;
+            p.with_transaction(|inner| inner.put_group_keeping_roster(&group(2)))
         })
         .expect("nested tx");
     assert_eq!(host.seqs().len(), before + 1);
@@ -360,7 +367,7 @@ fn rolled_back_transaction_emits_no_batch() {
     let (provider, host) = open_provider();
     let before = host.seqs().len();
     let result = provider.with_transaction(|p| -> Result<(), StorageError> {
-        p.put_group(&group(1))?;
+        p.put_group_keeping_roster(&group(1))?;
         Err(StorageError::Backend("boom".into()))
     });
     assert!(result.is_err());
@@ -373,7 +380,9 @@ fn rolled_back_transaction_emits_no_batch() {
 #[test]
 fn group_savepoint_rolls_back_its_scope_only() {
     let (provider, _host) = open_provider();
-    provider.put_group(&group(1)).expect("put group");
+    provider
+        .put_group_keeping_roster(&group(1))
+        .expect("put group");
     provider
         .with_group_savepoint(&gid(1), "sp", |p| -> Result<(), StorageError> {
             p.put_message(&record(9, 1, MessageState::Created))?;
@@ -388,12 +397,252 @@ fn group_savepoint_rolls_back_its_scope_only() {
     ));
 }
 
+// --- committed rosters (mdk#3273) ---
+//
+// The KV mirrors of storage-sqlite's committed_rosters tests: one row per
+// group (revision + normalized members), one account-wide counter row.
+
+fn members(ids: &[u8]) -> CommittedMembers {
+    CommittedMembers::from_ids(ids.iter().map(|id| MemberId::new(vec![*id; 32])))
+}
+
+fn revision(write: CommittedRosterWrite) -> u64 {
+    match write {
+        CommittedRosterWrite::Unchanged(revision)
+        | CommittedRosterWrite::Recorded(revision)
+        | CommittedRosterWrite::Replaced(revision) => revision.0,
+    }
+}
+
+/// A roster write moves the revision exactly when it changes the members,
+/// and a known empty roster differs from no roster.
+#[test]
+fn roster_revision_moves_only_when_members_change() {
+    let (provider, _host) = open_provider();
+    provider
+        .put_group_with_roster(&group(1), &members(&[0, 1, 2]))
+        .expect("group + roster");
+    let recorded = provider.committed_roster(&gid(1)).expect("roster").unwrap();
+    assert_eq!(recorded.members, members(&[0, 1, 2]));
+
+    let again = provider
+        .put_committed_roster(&gid(1), &members(&[2, 0, 1, 0]))
+        .expect("unchanged");
+    assert_eq!(again, CommittedRosterWrite::Unchanged(recorded.revision));
+
+    let replaced = provider
+        .put_committed_roster(&gid(1), &members(&[0, 3]))
+        .expect("replaced");
+    assert!(
+        matches!(replaced, CommittedRosterWrite::Replaced(rev) if rev > recorded.revision),
+        "{replaced:?}"
+    );
+    let stored = provider.committed_roster(&gid(1)).expect("roster").unwrap();
+    assert_eq!(stored.members, members(&[0, 3]));
+    assert_eq!(revision(replaced), stored.revision.0);
+
+    let emptied = provider
+        .put_committed_roster(&gid(1), &members(&[]))
+        .expect("emptied");
+    let stored = provider.committed_roster(&gid(1)).expect("roster").unwrap();
+    assert_eq!(stored.members.ids(), []);
+    assert_eq!(revision(emptied), stored.revision.0);
+    assert!(stored.revision.0 > revision(replaced));
+
+    // `put_group_keeping_roster` writes no roster.
+    provider.put_group_keeping_roster(&group(2)).expect("group");
+    assert_eq!(provider.committed_roster(&gid(2)).expect("roster"), None);
+    assert_eq!(
+        provider
+            .committed_roster_revision(&gid(2))
+            .expect("revision"),
+        None
+    );
+}
+
+/// A group forgotten or deleted and then joined again gets a revision no
+/// earlier copy held.
+#[test]
+fn forgotten_or_deleted_group_rejoined_never_reuses_revision() {
+    let (provider, _host) = open_provider();
+    provider
+        .put_group_with_roster(&group(1), &members(&[0]))
+        .expect("group + roster");
+    let mut highest = revision(
+        provider
+            .put_committed_roster(&gid(1), &members(&[0, 1]))
+            .expect("roster"),
+    );
+
+    assert!(
+        provider
+            .forget_group_local(&gid(1), Timestamp(10))
+            .expect("forget")
+    );
+    assert_eq!(provider.committed_roster(&gid(1)).expect("roster"), None);
+    provider.complete_group_local_reset(&gid(1)).expect("reset");
+    provider
+        .put_group_with_roster(&group(1), &members(&[0]))
+        .expect("rejoin");
+    let rejoined = provider.committed_roster(&gid(1)).expect("roster").unwrap();
+    assert!(
+        rejoined.revision.0 > highest,
+        "{rejoined:?} after {highest}"
+    );
+    highest = rejoined.revision.0;
+
+    provider.delete_group(&gid(1)).expect("delete");
+    assert_eq!(provider.committed_roster(&gid(1)).expect("roster"), None);
+    provider
+        .put_group_with_roster(&group(1), &members(&[0]))
+        .expect("rejoin");
+    let rejoined = provider.committed_roster(&gid(1)).expect("roster").unwrap();
+    assert!(
+        rejoined.revision.0 > highest,
+        "{rejoined:?} after {highest}"
+    );
+}
+
+/// Rolling a group back onto a snapshot restores its record, never its
+/// committed roster.
+#[test]
+fn group_rollback_leaves_committed_roster() {
+    let (provider, _host) = open_provider();
+    let anchor = group(1);
+    provider
+        .put_group_with_roster(&anchor, &members(&[0]))
+        .expect("anchor");
+    provider
+        .create_group_snapshot(&gid(1), "anchor")
+        .expect("snapshot");
+
+    let mut live = group(1);
+    live.epoch = EpochId(2);
+    live.name = "live".to_owned();
+    provider
+        .put_group_with_roster(&live, &members(&[0, 1]))
+        .expect("live");
+    let roster = provider.committed_roster(&gid(1)).expect("roster").unwrap();
+    provider
+        .rollback_group_to_snapshot(&gid(1), "anchor")
+        .expect("rollback");
+
+    assert_eq!(provider.get_group(&gid(1)).expect("group"), anchor);
+    assert_eq!(
+        provider.committed_roster(&gid(1)).expect("roster"),
+        Some(roster)
+    );
+}
+
+/// A roster write refused mid-unit takes the group record with it: a
+/// `put_group_with_roster` whose roster half cannot complete leaves no
+/// group row behind.
+#[test]
+fn failed_roster_write_leaves_no_record() {
+    let (provider, host) = open_provider();
+    // Corrupt the would-be roster row for gid(1) directly in the durable
+    // rows (Table::CommittedRoster discriminant 37 + one gid segment), then
+    // reopen so the provider's mirror holds the bad value.
+    let mut key = vec![37u8];
+    key.extend_from_slice(&16u32.to_be_bytes());
+    key.extend_from_slice(gid(1).as_slice());
+    host.rows
+        .lock()
+        .expect("host rows")
+        .insert(key, b"not-a-roster".to_vec());
+    drop(provider);
+    let provider = KvStorageProvider::open(host.durable_rows(), host).expect("reopen");
+
+    let result = provider.put_group_with_roster(&group(1), &members(&[0, 1]));
+    assert!(
+        matches!(&result, Err(StorageError::Serialization(_))),
+        "{result:?}"
+    );
+    assert!(matches!(
+        provider.get_group(&gid(1)),
+        Err(StorageError::NotFound)
+    ));
+}
+
+/// The roster write joins the caller's transaction: a later step that
+/// fails takes the record and its roster back together.
+#[test]
+fn roster_write_rolls_back_with_callers_transaction() {
+    let (provider, _host) = open_provider();
+    let result = provider.with_transaction(|p| -> Result<(), StorageError> {
+        p.put_group_with_roster(&group(1), &members(&[0, 1]))?;
+        Err(StorageError::Backend("later step refused".into()))
+    });
+    assert!(
+        matches!(&result, Err(StorageError::Backend(reason)) if reason == "later step refused"),
+        "{result:?}"
+    );
+    assert!(matches!(
+        provider.get_group(&gid(1)),
+        Err(StorageError::NotFound)
+    ));
+    assert_eq!(provider.committed_roster(&gid(1)).expect("roster"), None);
+}
+
+/// A refused `put_committed_roster` is its own unit inside a caller's
+/// transaction: it leaves no roster, consumes no revision, and the caller
+/// still commits — matching sqlite's savepoint.
+#[test]
+fn refused_roster_write_inside_committed_transaction_leaves_nothing() {
+    let (provider, _host) = open_provider();
+    provider.put_group_keeping_roster(&group(1)).expect("group");
+    provider
+        .with_transaction(|p| {
+            let refused = p.put_committed_roster(&gid(2), &members(&[0, 1]));
+            assert!(
+                matches!(&refused, Err(StorageError::Backend(_))),
+                "{refused:?}"
+            );
+            Ok::<_, StorageError>(())
+        })
+        .expect("caller commits");
+    assert_eq!(provider.committed_roster(&gid(2)).expect("roster"), None);
+    assert_eq!(
+        provider
+            .committed_roster_revision(&gid(2))
+            .expect("revision"),
+        None
+    );
+    assert_eq!(provider.get_group(&gid(1)).expect("group"), group(1));
+    // The refused write consumed no revision: the first roster still
+    // takes revision 1.
+    assert_eq!(
+        provider
+            .put_committed_roster(&gid(1), &members(&[0]))
+            .expect("roster"),
+        CommittedRosterWrite::Recorded(RosterRevision(1))
+    );
+}
+
+/// `mls_storage_failure` and `has_atomic_group_savepoints` mirror sqlite:
+/// a stored value that did not decode is not a storage failure; the
+/// overlay savepoint is atomic.
+#[test]
+fn storage_failure_classification_and_atomicity() {
+    let (provider, _host) = open_provider();
+    assert!(provider.has_atomic_group_savepoints());
+    assert!(
+        provider
+            .mls_storage_failure(&StorageError::Serialization("bad row".into()))
+            .is_none()
+    );
+    assert!(matches!(
+        provider.mls_storage_failure(&StorageError::Backend("io".into())),
+        Some(StorageError::Backend(reason)) if reason == "io"
+    ));
+}
+
 // --- reopen ---
 
 #[test]
 fn reopen_observes_identical_state() {
     let (provider, host) = open_provider();
-    provider.put_group(&group(1)).expect("group");
+    provider.put_group_keeping_roster(&group(1)).expect("group");
     provider
         .put_message(&record(5, 1, MessageState::Processed))
         .expect("message");

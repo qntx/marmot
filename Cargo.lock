@@ -341,8 +341,8 @@ checksum = "f079e83a288787bcd14a6aea84cee5c87a67c5a3e660c30f557a3d24761b3527"
 
 [[package]]
 name = "cgka-engine"
-version = "0.16.0"
-source = "git+https://github.com/marmot-protocol/mdk?rev=a2e0558a634bbd20607cdd5afb93abc6220ee58d#a2e0558a634bbd20607cdd5afb93abc6220ee58d"
+version = "0.17.0"
+source = "git+https://github.com/marmot-protocol/mdk?rev=4df811aea99269b437a6023be9446a5141e93cbe#4df811aea99269b437a6023be9446a5141e93cbe"
 dependencies = [
  "async-trait",
  "cgka-traits",
@@ -370,8 +370,8 @@ dependencies = [
 
 [[package]]
 name = "cgka-traits"
-version = "0.16.0"
-source = "git+https://github.com/marmot-protocol/mdk?rev=a2e0558a634bbd20607cdd5afb93abc6220ee58d#a2e0558a634bbd20607cdd5afb93abc6220ee58d"
+version = "0.17.0"
+source = "git+https://github.com/marmot-protocol/mdk?rev=4df811aea99269b437a6023be9446a5141e93cbe#4df811aea99269b437a6023be9446a5141e93cbe"
 dependencies = [
  "async-trait",
  "hex",
@@ -898,8 +898,8 @@ dependencies = [
 
 [[package]]
 name = "fs-private"
-version = "0.16.0"
-source = "git+https://github.com/marmot-protocol/mdk?rev=a2e0558a634bbd20607cdd5afb93abc6220ee58d#a2e0558a634bbd20607cdd5afb93abc6220ee58d"
+version = "0.17.0"
+source = "git+https://github.com/marmot-protocol/mdk?rev=4df811aea99269b437a6023be9446a5141e93cbe#4df811aea99269b437a6023be9446a5141e93cbe"
 dependencies = [
  "libc",
 ]
@@ -1798,8 +1798,8 @@ checksum = "5d15f86d12da44cd8d4ec3c73984537eb7f4cadcb9776a575a0a8a05ca11005c"
 
 [[package]]
 name = "marmot-forensics"
-version = "0.16.0"
-source = "git+https://github.com/marmot-protocol/mdk?rev=a2e0558a634bbd20607cdd5afb93abc6220ee58d#a2e0558a634bbd20607cdd5afb93abc6220ee58d"
+version = "0.17.0"
+source = "git+https://github.com/marmot-protocol/mdk?rev=4df811aea99269b437a6023be9446a5141e93cbe#4df811aea99269b437a6023be9446a5141e93cbe"
 dependencies = [
  "fs-private",
  "hex",
@@ -1823,8 +1823,8 @@ dependencies = [
 
 [[package]]
 name = "media-store"
-version = "0.16.0"
-source = "git+https://github.com/marmot-protocol/mdk?rev=a2e0558a634bbd20607cdd5afb93abc6220ee58d#a2e0558a634bbd20607cdd5afb93abc6220ee58d"
+version = "0.17.0"
+source = "git+https://github.com/marmot-protocol/mdk?rev=4df811aea99269b437a6023be9446a5141e93cbe#4df811aea99269b437a6023be9446a5141e93cbe"
 dependencies = [
  "fs-private",
  "fs4",
@@ -2755,8 +2755,8 @@ checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
 
 [[package]]
 name = "storage-sqlite"
-version = "0.16.0"
-source = "git+https://github.com/marmot-protocol/mdk?rev=a2e0558a634bbd20607cdd5afb93abc6220ee58d#a2e0558a634bbd20607cdd5afb93abc6220ee58d"
+version = "0.17.0"
+source = "git+https://github.com/marmot-protocol/mdk?rev=4df811aea99269b437a6023be9446a5141e93cbe#4df811aea99269b437a6023be9446a5141e93cbe"
 dependencies = [
  "cgka-traits",
  "fs-private",
@@ -2969,8 +2969,8 @@ dependencies = [
 
 [[package]]
 name = "transport-nostr-peeler"
-version = "0.16.0"
-source = "git+https://github.com/marmot-protocol/mdk?rev=a2e0558a634bbd20607cdd5afb93abc6220ee58d#a2e0558a634bbd20607cdd5afb93abc6220ee58d"
+version = "0.17.0"
+source = "git+https://github.com/marmot-protocol/mdk?rev=4df811aea99269b437a6023be9446a5141e93cbe#4df811aea99269b437a6023be9446a5141e93cbe"
 dependencies = [
  "async-trait",
  "base64",

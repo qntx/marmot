@@ -99,11 +99,11 @@ Build `wn`/`wnd` from the pinned MDK rev (`upstream.json` → `mdk.tag`/`rev`;
 ```sh
 ODIN=<path-to-odin> cargo install --locked \
   --git https://github.com/marmot-protocol/mdk \
-  --rev a2e0558a634bbd20607cdd5afb93abc6220ee58d \
+  --rev 4df811aea99269b437a6023be9446a5141e93cbe \
   --root spike/target/wn wn-cli
 ```
 
-`cargo install` takes ~12 min cold; `wn --version` must report `wn 0.16.0`
+`cargo install` takes ~12 min cold; `wn --version` must report `wn 0.17.0`
 (the test asserts it against `upstream.json` `mdk.tag`).
 
 ```sh
