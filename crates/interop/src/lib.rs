@@ -7,4 +7,7 @@
 //! binaries and run the scenarios.
 
 #[cfg(test)]
-use {hex as _, mk_core as _, nostr as _, nostr_sdk as _, serde_json as _, tokio as _};
+use {
+    axum as _, hex as _, mk_core as _, nostr as _, nostr_sdk as _, serde_json as _, sha2 as _,
+    tokio as _,
+};

@@ -19,9 +19,11 @@ workspace = true
 mk-core    = { path = "../mk-core", version = "=0.0.0", features = ["testing"] }
 nostr      = { git = "https://github.com/erskingardner/rust-nostr", rev = "e93cc06b5624f06c21ecd8111a124176eb0c7589", version = "=0.45.5" }
 nostr-sdk  = { git = "https://github.com/erskingardner/rust-nostr", rev = "e93cc06b5624f06c21ecd8111a124176eb0c7589", version = "=0.45.4", features = ["local-relay"] }
+axum       = "0.7"
 hex        = "0.4"
 serde_json = "1"
-tokio      = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
+tokio      = { version = "1", features = ["macros", "rt-multi-thread", "time", "net"] }
+sha2       = "0.11"
 
 
 [workspace.lints.rust]

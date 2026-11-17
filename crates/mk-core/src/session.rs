@@ -36,14 +36,22 @@ use cgka_engine::account_identity_proof::{
 };
 use cgka_engine::{Engine, EngineBuilder, FeatureRegistry};
 
+use cgka_traits::agent_text_stream::{
+    AGENT_TEXT_STREAM_QUIC_COMPONENT_ID, AGENT_TEXT_STREAM_QUIC_RECEIVE_CAPABILITY,
+    AGENT_TEXT_STREAM_QUIC_RECEIVE_FEATURE,
+};
 use cgka_traits::app_components::{
     ACCOUNT_DEVICES_COMPONENT_ID, AppComponentData, GROUP_ADMIN_POLICY_COMPONENT_ID,
+    GROUP_ENCRYPTED_MEDIA_EXPORTER_CACHE_KEY, GROUP_ENCRYPTED_MEDIA_V2_COMPONENT_ID,
     NOSTR_ROUTING_COMPONENT_ID, NostrRoutingV1, decode_nostr_routing_v1, decode_quic_varint,
     default_group_components, is_loopback_host, is_public_ip, validate_nostr_relay_url,
 };
+use cgka_traits::app_event::{
+    MARMOT_APP_EVENT_KIND_AGENT_STREAM_START, MARMOT_APP_EVENT_KIND_CHAT, STREAM_START_TAG,
+};
 use cgka_traits::capabilities::{Capability, CapabilityRequirement, Feature, RequirementLevel};
 use cgka_traits::engine::{
-    CreateGroupRequest, KeyPackage, KeyPackageSource, SendIntent, SendResult,
+    CreateGroupRequest, EpochPin, KeyPackage, KeyPackageSource, SendIntent, SendResult,
 };
 use cgka_traits::engine_state::EpochState;
 use cgka_traits::error::EngineError;
@@ -59,13 +67,19 @@ use cgka_traits::transport_adapter::{
 use cgka_traits::{
     CgkaEngine, GroupId as EngineGroupId, MemberId, MessageId, TransportEnvelope, TransportMessage,
 };
+use sha2::Digest as _;
 use thiserror::Error;
 use transport_nostr_peeler::NostrMlsPeeler;
+use zeroize::Zeroizing;
 
+use crate::agent_stream::{AgentStreamPolicy, StreamRoles};
 use crate::clock::{Clock, EngineConvergenceClock, EngineMaintenanceRandom, EngineWallClock, Time};
 use crate::events::{InputOutcome, InputReport, SessionEvent, input_outcome, session_event};
 use crate::key_package::{self, KeyPackageInfo, is_valid_client_name};
 use crate::kv::{CommitSeq, KvHost};
+use crate::media::{
+    self, EncryptedMediaPolicy, Locator, MediaError, MediaReference, validate_locator,
+};
 use crate::outbox::{
     Outbound, OutboundPurpose, PubTargetStatus, PublishResolution, RelayResult, RelayStatus,
     SessionPubPurpose, SessionPublication,
@@ -75,7 +89,7 @@ use crate::signer::{
     AccountSigner, DeferringProofSigner, FixedProofSigner, RefusingProofSigner, SignerAdapter,
     SignerError,
 };
-use crate::types::{AccountId, Event, GroupId, OutboundId, UnsignedEvent};
+use crate::types::{AccountId, Event, EventId, GroupId, OutboundId, UnsignedEvent};
 use cgka_traits::storage::StorageError;
 
 /// Everything the session needs from the host.
@@ -88,8 +102,8 @@ pub struct SessionConfig {
     pub rows: Vec<(Vec<u8>, Vec<u8>)>,
     /// The host's clock.
     pub clock: Arc<dyn Clock>,
-    /// Relay safety policy.
-    pub relay_policy: RelayPolicy,
+    /// Destination safety policy.
+    pub destination_policy: DestinationPolicy,
     /// Optional NIP-89 `client` tag on `KeyPackage` publications
     /// (1..=64 bytes).
     pub client_name: Option<String>,
@@ -104,7 +118,7 @@ pub struct SessionConfig {
 /// (public A/AAAA records) are the host transport's job: a hostname that
 /// resolves to a private address is not something this layer can see.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct RelayPolicy {
+pub struct DestinationPolicy {
     /// Permit loopback/private/link-local literal hosts and `localhost`
     /// (tests and local relays only).
     pub allow_loopback: bool,
@@ -208,7 +222,7 @@ pub struct PendingProof {
     unsigned: UnsignedEvent,
     signer: Arc<dyn AccountSigner>,
     clock: Arc<dyn Clock>,
-    relay_policy: RelayPolicy,
+    destination_policy: DestinationPolicy,
     client_name: Option<String>,
 }
 
@@ -307,7 +321,7 @@ impl PendingProof {
             engine,
             signer: Arc::clone(&self.signer),
             clock: Arc::clone(&self.clock),
-            relay_policy: self.relay_policy,
+            destination_policy: self.destination_policy,
             client_name: self.client_name.clone(),
             acked: CommitSeq::from_raw(0),
             gate: BTreeMap::new(),
@@ -346,20 +360,26 @@ fn build_engine(
 }
 
 /// The app-component set this session advertises: the engine's mandatory set
-/// plus Nostr routing (`0x8004`) and account-devices (`0x800d`). Deliberately
-/// absent: `0x8006` agent-text-stream QUIC roles and `0x800b` encrypted
-/// media v2 — neither is implemented by this crate (media is a later
-/// milestone).
+/// plus Nostr routing (`0x8004`), account-devices (`0x800d`), the agent text
+/// stream QUIC policy (`0x8006`, receive role only — see
+/// [`feature_registry`]) and encrypted media v2 (`0x800b`). Deliberately
+/// absent: encrypted media v1 (`0x8008`) — superseded by v2 and never
+/// advertised or emitted.
 fn supported_components() -> Vec<u16> {
     let mut components = default_group_components();
     components.insert(NOSTR_ROUTING_COMPONENT_ID);
     components.insert(ACCOUNT_DEVICES_COMPONENT_ID);
+    components.insert(AGENT_TEXT_STREAM_QUIC_COMPONENT_ID);
+    components.insert(GROUP_ENCRYPTED_MEDIA_V2_COMPONENT_ID);
     components.into_iter().collect()
 }
 
 /// The feature registry this session advertises: proposal 10 (MIP-03
-/// `SelfRemove`) as Required — our `leave` path uses it. No other features are
-/// registered.
+/// `SelfRemove`) as Required — our `leave` path uses it — and the agent
+/// text stream QUIC *receive* role as Optional (`0xf2d1` in the leaf's
+/// extension set; Optional so it never becomes a group requirement, matching
+/// wn's own registration level). Send (`0xf2d2`) and fanout (`0xf2d4`) are
+/// never registered: this crate implements receive only.
 fn feature_registry() -> FeatureRegistry {
     let mut registry = FeatureRegistry::new();
     registry.register(
@@ -368,6 +388,14 @@ fn feature_registry() -> FeatureRegistry {
             requires: Capability::Proposal(10),
             level: RequirementLevel::Required,
             description: "MIP-03 SelfRemove group departure",
+        },
+    );
+    registry.register(
+        AGENT_TEXT_STREAM_QUIC_RECEIVE_FEATURE,
+        CapabilityRequirement {
+            requires: AGENT_TEXT_STREAM_QUIC_RECEIVE_CAPABILITY,
+            level: RequirementLevel::Optional,
+            description: "receive QUIC-backed agent text stream previews",
         },
     );
     registry
@@ -468,6 +496,31 @@ pub enum SessionError {
     /// A relay URL failed the profile or safety checks.
     #[error("invalid relay url")]
     InvalidRelayUrl,
+    /// The app message touches an event surface this crate reserves: kind
+    /// 1200 (agent stream start — mk-core holds no `send` role), an `imeta`
+    /// tag (media must go through [`Session::send_media`] so the epoch is
+    /// pinned), or a `stream-start` tag.
+    #[error("reserved app event surface")]
+    ReservedAppEvent,
+    /// The group's `GroupContext` carries no `0x800b` encrypted-media-v2
+    /// component — sealing or policy reads are refused.
+    #[error("encrypted media not enabled for this group")]
+    MediaNotEnabled,
+    /// The pinned media epoch no longer matches the group's epoch: re-seal
+    /// the attachment and resend.
+    #[error("media epoch stale")]
+    MediaEpochStale,
+    /// The group's epoch is unsettled; retry the media send after
+    /// [`Session::tick`].
+    #[error("media epoch unsettled")]
+    MediaEpochUnsettled,
+    /// No media-secret row is stored for the message: the attachment cannot
+    /// be opened.
+    #[error("media secret unavailable")]
+    MediaSecretUnavailable,
+    /// The pure media layer refused (typed, no payload echo).
+    #[error("media: {0}")]
+    Media(#[from] MediaError),
 }
 
 fn session_engine_error(error: EngineError) -> SessionError {
@@ -534,6 +587,10 @@ pub struct CreateGroup {
     pub invitees: Vec<Invitee>,
     /// Additional founding admins besides the creator.
     pub admins: Vec<AccountId>,
+    /// Additional initial app components (e.g. an encrypted-media policy and
+    /// an agent-stream policy for a White-Noise-profile group), validated by
+    /// the engine and staged with the create commit.
+    pub components: Vec<ComponentUpdate>,
 }
 
 /// An app-component update for [`Session::update_app_components`].
@@ -571,6 +628,76 @@ pub enum SendOutcome {
     /// The leave request is durable; the engine stages step-down and
     /// `SelfRemove` as convergence permits.
     LeaveRequested,
+}
+
+/// One attachment to seal: plaintext plus the metadata the `imeta`
+/// reference commits to.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AttachmentInput {
+    /// The file bytes to encrypt.
+    pub plaintext: Vec<u8>,
+    /// The media type; canonicalized before sealing (`image/jpg` →
+    /// `image/jpeg`, parameters stripped).
+    pub media_type: String,
+    /// The filename (1..=255 UTF-8 bytes, no NUL).
+    pub filename: String,
+    /// Optional `WxH` dimensions, verbatim.
+    pub dim: Option<String>,
+    /// Optional thumbhash, verbatim.
+    pub thumbhash: Option<String>,
+}
+
+/// The result of [`Session::seal_attachment`]: the blob the host uploads
+/// and the opaque handle [`Session::send_media`] needs to emit the
+/// reference under the epoch it was sealed at.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct SealedAttachment {
+    /// The encrypted blob (`plaintext.len() + 16` bytes).
+    pub ciphertext: Vec<u8>,
+    /// SHA-256 of `ciphertext` — the Blossom blob id the host uploads
+    /// under and the locator's hash segment.
+    pub ciphertext_sha256: [u8; 32],
+    /// Opaque send-time handle: the reference fields minus locators plus
+    /// the epoch pin the ciphertext's key material binds to. No secret.
+    pub pending: PendingAttachment,
+}
+
+/// The send-time half of a sealed attachment: every `imeta` field except
+/// locators, plus the [`EpochPin`] the media key was derived under. Opaque
+/// to the host — construct it only via [`Session::seal_attachment`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PendingAttachment {
+    /// SHA-256 of the ciphertext blob.
+    pub(crate) ciphertext_sha256: [u8; 32],
+    /// SHA-256 of the plaintext.
+    pub(crate) plaintext_sha256: [u8; 32],
+    /// The AEAD nonce sampled at seal time.
+    pub(crate) nonce: [u8; 12],
+    /// The canonical media type recorded at seal time.
+    pub(crate) media_type: String,
+    /// The filename recorded at seal time.
+    pub(crate) filename: String,
+    /// Optional dimensions recorded at seal time.
+    pub(crate) dim: Option<String>,
+    /// Optional thumbhash recorded at seal time.
+    pub(crate) thumbhash: Option<String>,
+    /// The epoch the media secret was exported at.
+    pub(crate) pin: EpochPin,
+}
+
+/// A kind-9 chat message carrying sealed attachments.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MediaMessage {
+    /// The message body (may be empty).
+    pub caption: String,
+    /// One `(pending, locators)` pair per sealed attachment, in emission
+    /// order. At least one; every locator's kind must be in the group's
+    /// `allowed_locator_kinds`.
+    pub attachments: Vec<(PendingAttachment, Vec<Locator>)>,
+    /// Extra tags for the inner event (e.g. NIP-30 emoji). `imeta` and
+    /// `stream-start` are reserved and refused.
+    pub tags: Vec<Vec<String>>,
 }
 
 /// What [`Session::tick`] reports.
@@ -631,6 +758,12 @@ pub struct GroupSnapshot {
     pub nostr_group_id: [u8; 32],
     /// Whether this account is an admin.
     pub own_account_admin: bool,
+    /// The group's `0x800b` encrypted-media policy, when the component is
+    /// present and decodes.
+    pub encrypted_media: Option<EncryptedMediaPolicy>,
+    /// The group's `0x8006` agent text stream policy, when the component is
+    /// present and decodes.
+    pub agent_text_stream: Option<AgentStreamPolicy>,
 }
 
 /// The account-device session.
@@ -643,7 +776,7 @@ pub struct Session {
     engine: Engine<KvStorageProvider>,
     signer: Arc<dyn AccountSigner>,
     clock: Arc<dyn Clock>,
-    relay_policy: RelayPolicy,
+    destination_policy: DestinationPolicy,
     client_name: Option<String>,
     /// Cumulative durable watermark reported by the host.
     acked: CommitSeq,
@@ -664,7 +797,7 @@ impl std::fmt::Debug for Session {
 impl std::fmt::Debug for SessionConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SessionConfig")
-            .field("relay_policy", &self.relay_policy)
+            .field("destination_policy", &self.destination_policy)
             .field("client_name", &self.client_name)
             .finish_non_exhaustive()
     }
@@ -711,7 +844,7 @@ impl Session {
                     unsigned,
                     signer: config.signer,
                     clock: config.clock,
-                    relay_policy: config.relay_policy,
+                    destination_policy: config.destination_policy,
                     client_name: config.client_name,
                 })))
             }
@@ -720,7 +853,7 @@ impl Session {
                 engine,
                 signer: config.signer,
                 clock: config.clock,
-                relay_policy: config.relay_policy,
+                destination_policy: config.destination_policy,
                 client_name: config.client_name,
                 acked: CommitSeq::from_raw(0),
                 gate: BTreeMap::new(),
@@ -1232,15 +1365,20 @@ impl Session {
     /// [`SessionError`] for invalid inputs or engine failures.
     pub async fn create_group(&mut self, req: CreateGroup) -> Result<GroupId, SessionError> {
         self.check_relays(&req.relays)?;
+        check_agent_stream_roles(&req.components)?;
         let mut nostr_group_id = [0u8; 32];
         getrandom::fill(&mut nostr_group_id).map_err(|_| SessionError::Internal("rng"))?;
         let routing = NostrRoutingV1::new(nostr_group_id, req.relays.clone())
             .map_err(|_| SessionError::InvalidRelayUrl)?;
-        let routing_component = AppComponentData {
+        let mut app_components = vec![AppComponentData {
             component_id: NOSTR_ROUTING_COMPONENT_ID,
             data: cgka_traits::app_components::encode_nostr_routing_v1(&routing)
                 .map_err(|_| SessionError::Internal("routing encode"))?,
-        };
+        }];
+        app_components.extend(req.components.iter().map(|update| AppComponentData {
+            component_id: update.component_id,
+            data: update.data.clone(),
+        }));
         let mut members = Vec::with_capacity(req.invitees.len());
         for invitee in &req.invitees {
             members.push(self.invitee_key_package(invitee)?);
@@ -1252,7 +1390,7 @@ impl Session {
                 description: req.description,
                 members,
                 required_features: Vec::new(),
-                app_components: vec![routing_component],
+                app_components,
                 initial_admins: req
                     .admins
                     .iter()
@@ -1397,6 +1535,7 @@ impl Session {
         group: &GroupId,
         updates: Vec<ComponentUpdate>,
     ) -> Result<SendOutcome, SessionError> {
+        check_agent_stream_roles(&updates)?;
         let result = self
             .engine
             .send(SendIntent::UpdateAppComponents {
@@ -1423,6 +1562,16 @@ impl Session {
         group: &GroupId,
         message: AppMessage,
     ) -> Result<SendOutcome, SessionError> {
+        if u64::from(message.kind) == MARMOT_APP_EVENT_KIND_AGENT_STREAM_START
+            || message.tags.iter().any(|tag| {
+                matches!(
+                    tag.first().map(String::as_str),
+                    Some(media::IMETA_TAG | STREAM_START_TAG)
+                )
+            })
+        {
+            return Err(SessionError::ReservedAppEvent);
+        }
         let app_event = cgka_traits::app_event::MarmotAppEvent::new(
             self.account().to_hex(),
             self.clock.now().unix_ms / 1_000,
@@ -1460,6 +1609,247 @@ impl Session {
             return Ok(SendOutcome::NoChange);
         }
         Ok(SendOutcome::Staged(staged))
+    }
+
+    /// The group's decoded `0x800b` policy, or `None` when the component is
+    /// absent. A present-but-corrupt component is an engine invariant
+    /// violation, not a policy absence.
+    fn media_policy(
+        &self,
+        group_id: &EngineGroupId,
+    ) -> Result<Option<EncryptedMediaPolicy>, SessionError> {
+        let Some(bytes) = self
+            .engine
+            .app_component(group_id, GROUP_ENCRYPTED_MEDIA_V2_COMPONENT_ID)
+            .map_err(session_engine_error)?
+        else {
+            return Ok(None);
+        };
+        EncryptedMediaPolicy::from_component(&bytes)
+            .map(Some)
+            .map_err(|_| SessionError::Internal("media component"))
+    }
+
+    /// The group's decoded `0x8006` policy, or `None` when absent/corrupt.
+    fn agent_stream_policy(
+        &self,
+        group_id: &EngineGroupId,
+    ) -> Result<Option<AgentStreamPolicy>, SessionError> {
+        self.engine
+            .app_component(group_id, AGENT_TEXT_STREAM_QUIC_COMPONENT_ID)
+            .map_err(session_engine_error)
+            .map(|bytes| bytes.and_then(|bytes| AgentStreamPolicy::from_component(&bytes)))
+    }
+
+    /// The current epoch's 32-byte media secret:
+    /// `MLS-Exporter("marmot","encrypted-media",32)`.
+    fn media_secret(&self, group_id: &EngineGroupId) -> Result<Zeroizing<[u8; 32]>, SessionError> {
+        let context = self
+            .engine
+            .group_context(group_id)
+            .map_err(session_engine_error)?;
+        let secret = context
+            .exporter_secret(GROUP_ENCRYPTED_MEDIA_EXPORTER_CACHE_KEY, 32)
+            .ok_or(SessionError::Internal("media exporter"))?;
+        secret
+            .as_slice()
+            .try_into()
+            .map(Zeroizing::new)
+            .map_err(|_| SessionError::Internal("media exporter"))
+    }
+
+    /// Encrypt one attachment under the group's current-epoch media secret.
+    /// The host uploads [`SealedAttachment::ciphertext`] itself — this crate
+    /// holds no network dependency — then hands [`SealedAttachment::pending`]
+    /// plus the upload's locators to [`Self::send_media`].
+    ///
+    /// # Errors
+    /// [`SessionError::MediaNotEnabled`] when the group carries no `0x800b`
+    /// component; [`SessionError::Media`] for an invalid media type,
+    /// filename, an oversized plaintext, or a key-derivation failure.
+    pub fn seal_attachment(
+        &self,
+        group: &GroupId,
+        input: AttachmentInput,
+    ) -> Result<SealedAttachment, SessionError> {
+        let group_id = engine_gid(group);
+        if self.media_policy(&group_id)?.is_none() {
+            return Err(SessionError::MediaNotEnabled);
+        }
+        let media_type = media::canonical_media_type(&input.media_type)?;
+        media::validate_filename(&input.filename)?;
+        let plaintext_sha256 = sha256(&input.plaintext);
+        let pin = self
+            .engine
+            .epoch_pin(&group_id)
+            .map_err(session_engine_error)?;
+        let secret = self.media_secret(&group_id)?;
+        let key = media::derive_file_key(&secret, &plaintext_sha256, &media_type, &input.filename)?;
+        let mut nonce = [0u8; 12];
+        getrandom::fill(&mut nonce).map_err(|_| SessionError::Internal("rng"))?;
+        let aad = media::media_aad(&plaintext_sha256, &media_type, &input.filename);
+        let ciphertext = media::encrypt_file(&key, &nonce, &aad, &input.plaintext)?;
+        let ciphertext_sha256 = sha256(&ciphertext);
+        Ok(SealedAttachment {
+            ciphertext,
+            ciphertext_sha256,
+            pending: PendingAttachment {
+                ciphertext_sha256,
+                plaintext_sha256,
+                nonce,
+                media_type,
+                filename: input.filename,
+                dim: input.dim,
+                thumbhash: input.thumbhash,
+                pin,
+            },
+        })
+    }
+
+    /// Emit one kind-9 message carrying every sealed attachment as an
+    /// `imeta` tag, pinned to the epoch they were sealed under so receivers
+    /// derive keys from the same epoch's media secret.
+    ///
+    /// On success the current epoch's media secret is also recorded under
+    /// the sent message's own transport id, so this device can
+    /// [`Self::open_attachment`] its own attachments — the engine only
+    /// captures secrets on inbound messages. That row is written in its own
+    /// storage unit after the send's staging: a crash between them costs
+    /// only this device's ability to re-open its own attachment — the sender
+    /// still holds the plaintext and the row can be re-derived while the
+    /// epoch lives.
+    ///
+    /// # Errors
+    /// [`SessionError::MediaNotEnabled`] without a `0x800b` component;
+    /// [`SessionError::MediaEpochStale`] when the seal-time pin no longer
+    /// matches (re-seal); [`SessionError::MediaEpochUnsettled`] while the
+    /// group settles (retry after [`Self::tick`]);
+    /// [`SessionError::InvalidInput`] for an empty attachment list, an
+    /// attachment with no locators, or mixed pins; [`SessionError::Media`]
+    /// for a structurally invalid locator or a locator kind the group
+    /// policy does not allow; [`SessionError::ReservedAppEvent`] for
+    /// `imeta`/`stream-start` in `message.tags`.
+    pub async fn send_media(
+        &mut self,
+        group: &GroupId,
+        message: MediaMessage,
+    ) -> Result<SendOutcome, SessionError> {
+        let group_id = engine_gid(group);
+        let policy = self
+            .media_policy(&group_id)?
+            .ok_or(SessionError::MediaNotEnabled)?;
+        let Some((first, _)) = message.attachments.first() else {
+            return Err(SessionError::InvalidInput("empty attachment list"));
+        };
+        let pin = first.pin;
+        let mut tags = Vec::with_capacity(message.tags.len() + message.attachments.len());
+        for tag in &message.tags {
+            if matches!(
+                tag.first().map(String::as_str),
+                Some(media::IMETA_TAG | STREAM_START_TAG)
+            ) {
+                return Err(SessionError::ReservedAppEvent);
+            }
+            tags.push(tag.clone());
+        }
+        for (pending, locators) in &message.attachments {
+            if pending.pin != pin {
+                return Err(SessionError::InvalidInput("mixed attachment epochs"));
+            }
+            if locators.is_empty() {
+                return Err(SessionError::InvalidInput("attachment without locators"));
+            }
+            for locator in locators {
+                check_locator(&policy, locator)?;
+            }
+            tags.push(
+                MediaReference {
+                    locators: locators.clone(),
+                    ciphertext_sha256: pending.ciphertext_sha256,
+                    plaintext_sha256: pending.plaintext_sha256,
+                    nonce: pending.nonce,
+                    media_type: pending.media_type.clone(),
+                    filename: pending.filename.clone(),
+                    dim: pending.dim.clone(),
+                    thumbhash: pending.thumbhash.clone(),
+                }
+                .to_imeta(),
+            );
+        }
+        let app_event = cgka_traits::app_event::MarmotAppEvent::new(
+            self.account().to_hex(),
+            self.clock.now().unix_ms / 1_000,
+            MARMOT_APP_EVENT_KIND_CHAT,
+            tags,
+            message.caption,
+        );
+        let payload = app_event
+            .encode()
+            .map_err(|_| SessionError::Internal("app event encode"))?;
+        let result = match self
+            .engine
+            .send(SendIntent::AppMessage {
+                group_id: group_id.clone(),
+                payload,
+                expected_epoch: Some(pin),
+            })
+            .await
+        {
+            Ok(result) => result,
+            Err(EngineError::AppMessageEpochMismatch { .. }) => {
+                return Err(SessionError::MediaEpochStale);
+            }
+            Err(EngineError::AppMessageEpochUnsettled { .. }) => {
+                return Err(SessionError::MediaEpochUnsettled);
+            }
+            Err(error) => return Err(session_engine_error(error)),
+        };
+        let sent_message_id = if let SendResult::ApplicationMessage { msg, .. } = &result {
+            Some(msg.id.clone())
+        } else {
+            None
+        };
+        let outcome = self.finish_send(result)?;
+        if let Some(message_id) = sent_message_id {
+            let secret = self.media_secret(&group_id)?;
+            self.provider
+                .store()
+                .transact(|| -> Result<(), StorageError> {
+                    self.provider
+                        .put_media_secret(&group_id, &message_id, &secret[..])
+                })
+                .map_err(SessionError::Storage)?;
+        }
+        Ok(outcome)
+    }
+
+    /// Decrypt one attachment of a delivered message: loads the
+    /// `(group, transport)` media-secret row written when the message was
+    /// drained, then verifies both hashes and the AEAD tag.
+    ///
+    /// # Errors
+    /// [`SessionError::MediaSecretUnavailable`] when no secret row is
+    /// stored (non-media message, already-invalidated, or a message whose
+    /// attachments all failed parsing); [`SessionError::Media`] for hash
+    /// mismatches or AEAD failure.
+    pub fn open_attachment(
+        &self,
+        group: &GroupId,
+        message: &EventId,
+        reference: &MediaReference,
+        ciphertext: &[u8],
+    ) -> Result<Vec<u8>, SessionError> {
+        let secret = self
+            .provider
+            .media_secret(&engine_gid(group), &MessageId::new(message.0.to_vec()))
+            .map_err(SessionError::Storage)?
+            .ok_or(SessionError::MediaSecretUnavailable)?;
+        let secret: Zeroizing<[u8; 32]> = secret
+            .as_slice()
+            .try_into()
+            .map(Zeroizing::new)
+            .map_err(|_| SessionError::Internal("media secret row"))?;
+        Ok(media::decrypt_file(&secret, reference, ciphertext)?)
     }
 
     /// Artifacts the engine produced outside the direct send result:
@@ -1942,15 +2332,53 @@ impl Session {
 
     /// Drain the session-visible events produced since the last call,
     /// including publish resolutions.
-    pub fn drain_events(&mut self) -> Vec<SessionEvent> {
-        let mut out: Vec<SessionEvent> = self
+    ///
+    /// Media-secret custody: every `MessageReceived` carrying a captured
+    /// epoch media secret and at least one valid attachment writes its
+    /// `(group, transport)` row, and every `MessageInvalidated` deletes its
+    /// row — all of one drain's writes in ONE storage unit (one `KvBatch`),
+    /// committed before this call returns. Batch ordering then guarantees
+    /// the secret row is durable before any later [`Self::acknowledge_messages`]
+    /// batch can release the pending-application-event rows, so a crash
+    /// between drain and ack replays both rather than leaving a message the
+    /// host can never decrypt.
+    ///
+    /// # Errors
+    /// [`SessionError`] for storage failures — the events stay drained but
+    /// their secret rows were not persisted (the unit commits atomically or
+    /// not at all).
+    pub fn drain_events(&mut self) -> Result<Vec<SessionEvent>, SessionError> {
+        let mapped: Vec<crate::events::MappedEvent> = self
             .engine
             .drain_events()
             .into_iter()
             .filter_map(session_event)
             .collect();
+        self.provider
+            .store()
+            .transact(|| -> Result<(), StorageError> { self.persist_media_secret_effects(&mapped) })
+            .map_err(SessionError::Storage)?;
+        let mut out: Vec<SessionEvent> = mapped.into_iter().map(|item| item.event).collect();
         out.append(&mut self.resolutions);
-        out
+        Ok(out)
+    }
+
+    /// Apply one drain's media-secret writes and deletes as the single
+    /// storage unit [`Self::drain_events`] documents.
+    fn persist_media_secret_effects(
+        &self,
+        mapped: &[crate::events::MappedEvent],
+    ) -> Result<(), StorageError> {
+        for item in mapped {
+            if let Some((group_id, transport_id, secret)) = &item.secret_write {
+                self.provider
+                    .put_media_secret(group_id, transport_id, secret)?;
+            }
+            if let Some((group_id, transport_id)) = &item.secret_delete {
+                self.provider.delete_media_secret(group_id, transport_id)?;
+            }
+        }
+        Ok(())
     }
 
     /// Acknowledge delivered application messages (at-least-once): their
@@ -1959,7 +2387,7 @@ impl Session {
     ///
     /// # Errors
     /// [`SessionError`] for storage failures.
-    pub fn acknowledge_messages(&self, ids: &[crate::types::EventId]) -> Result<(), SessionError> {
+    pub fn acknowledge_messages(&self, ids: &[EventId]) -> Result<(), SessionError> {
         let message_ids: Vec<MessageId> =
             ids.iter().map(|id| MessageId::new(id.0.to_vec())).collect();
         self.provider
@@ -2039,6 +2467,8 @@ impl Session {
                 .collect(),
             relays,
             own_account_admin: admins.contains(&account.0),
+            encrypted_media: self.media_policy(&gid)?,
+            agent_text_stream: self.agent_stream_policy(&gid)?,
         }))
     }
 
@@ -2080,7 +2510,7 @@ impl Session {
         if validate_nostr_relay_url(relay).is_err() {
             return false;
         }
-        if self.relay_policy.allow_loopback {
+        if self.destination_policy.allow_loopback {
             return true;
         }
         let Ok(url) = url::Url::parse(relay) else {
@@ -2104,6 +2534,42 @@ impl Session {
 
 fn engine_gid(group: &GroupId) -> EngineGroupId {
     EngineGroupId::new(group.0.clone())
+}
+
+/// Refuse an `0x8006` component whose `required_member_roles` names a role
+/// this device does not advertise. The own leaf is always a member of the
+/// resulting epoch and carries only the receive role (`0xf2d1`), so a state
+/// requiring send or fanout violates the spec's resulting-epoch invariant;
+/// the pinned engine checks the mask only on invite and join, not on
+/// `AppDataUpdate` commits. Undecodable bytes are left to the engine's own
+/// validation.
+fn check_agent_stream_roles(updates: &[ComponentUpdate]) -> Result<(), SessionError> {
+    for update in updates {
+        if update.component_id == AGENT_TEXT_STREAM_QUIC_COMPONENT_ID
+            && let Some(policy) = AgentStreamPolicy::from_component(&update.data)
+            && (policy.required_roles.contains(StreamRoles::SEND)
+                || policy.required_roles.contains(StreamRoles::FANOUT))
+        {
+            return Err(SessionError::MissingRequiredCapabilities);
+        }
+    }
+    Ok(())
+}
+
+/// One locator passes shape validation and the group's allowed-kinds list.
+fn check_locator(policy: &EncryptedMediaPolicy, locator: &Locator) -> Result<(), SessionError> {
+    validate_locator(locator)?;
+    if !policy.allows_locator_kind(&locator.kind) {
+        return Err(SessionError::Media(MediaError::LocatorNotAllowedByPolicy));
+    }
+    Ok(())
+}
+
+fn sha256(bytes: &[u8]) -> [u8; 32] {
+    let digest = sha2::Sha256::digest(bytes);
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&digest);
+    out
 }
 
 fn outbound_id_of(message_id: &MessageId) -> Result<OutboundId, SessionError> {
@@ -2213,7 +2679,7 @@ mod proof_tests {
             host,
             rows: Vec::new(),
             clock: Arc::new(ManualClock::new()),
-            relay_policy: RelayPolicy {
+            destination_policy: DestinationPolicy {
                 allow_loopback: true,
             },
             client_name: None,

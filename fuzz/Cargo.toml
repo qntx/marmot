@@ -58,6 +58,18 @@ test = false
 doc  = false
 
 [[bin]]
+name = "imeta_tag"
+path = "fuzz_targets/imeta_tag.rs"
+test = false
+doc  = false
+
+[[bin]]
+name = "stream_anchor"
+path = "fuzz_targets/stream_anchor.rs"
+test = false
+doc  = false
+
+[[bin]]
 name              = "gen_corpus"
 path              = "src/bin/gen_corpus.rs"
 test              = false

@@ -24,8 +24,10 @@ use tokio as _;
 use base64 as _;
 use cgka_engine as _;
 use cgka_traits as _;
+use chacha20poly1305 as _;
 use getrandom as _;
 use hex as _;
+use hkdf as _;
 use nostr as _;
 use openmls as _;
 use openmls_rust_crypto as _;
@@ -87,6 +89,7 @@ mod flow_tests {
                 relays: vec![RELAY.to_owned()],
                 invitees: invites,
                 admins: admins.to_vec(),
+                components: Vec::new(),
             })
             .await
             .expect("create_group");
@@ -224,7 +227,7 @@ mod flow_tests {
         let route = b.route_hex(&gid);
         let first = ingest_backlog(&mut b, &group_events(&relay, RELAY, &route)).await;
         b.session.tick().await.expect("tick");
-        let extra = b.session.drain_events();
+        let extra = b.session.drain_events().unwrap();
         let extra_ids = received_ids(&extra);
         if !extra_ids.is_empty() {
             b.session.acknowledge_messages(&extra_ids).expect("ack");
@@ -266,7 +269,7 @@ mod flow_tests {
         seen.extend(received(&second));
         delivered_ids.extend(received_ids(&second));
         b.session.tick().await.expect("tick");
-        let tail_drained = b.session.drain_events();
+        let tail_drained = b.session.drain_events().unwrap();
         let tail_ids = received_ids(&tail_drained);
         if !tail_ids.is_empty() {
             b.session.acknowledge_messages(&tail_ids).expect("ack");
@@ -571,8 +574,8 @@ mod flow_tests {
             a.clock.advance(2_000);
             b.clock.advance(2_000);
         }
-        a_events.extend(a.session.drain_events());
-        b_events.extend(b.session.drain_events());
+        a_events.extend(a.session.drain_events().unwrap());
+        b_events.extend(b.session.drain_events().unwrap());
         let fork_resolved = a_events.iter().chain(b_events.iter()).any(|event| {
             matches!(
                 event,
@@ -698,7 +701,7 @@ mod flow_tests {
             "intra-batch duplicates are Rejected{{Duplicate}}: {reports:?}"
         );
         assert!(
-            !received(&b.session.drain_events()).contains(&"hello-b".to_owned()),
+            !received(&b.session.drain_events().unwrap()).contains(&"hello-b".to_owned()),
             "no duplicate delivery"
         );
 
@@ -712,7 +715,7 @@ mod flow_tests {
             !cross_reports.is_empty() && cross_reports.iter().all(|report| report.outcome == dup),
             "cross-call re-ingest is uniformly Rejected{{Duplicate}}: {cross_reports:?}"
         );
-        let leftover = received(&b.session.drain_events());
+        let leftover = received(&b.session.drain_events().unwrap());
         assert_eq!(leftover, Vec::<String>::new());
     }
 
@@ -741,6 +744,7 @@ mod flow_tests {
                 relays: vec![RELAY.to_owned()],
                 invitees: Vec::new(),
                 admins: Vec::new(),
+                components: Vec::new(),
             })
             .await
             .expect("create");
@@ -797,6 +801,7 @@ mod flow_tests {
                 relays: vec![RELAY.to_owned()],
                 invitees: Vec::new(),
                 admins: Vec::new(),
+                components: Vec::new(),
             })
             .await
             .expect("create");

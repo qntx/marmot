@@ -40,12 +40,18 @@
 //! "Welcome delivery"); `NotAddressedToThisDevice` maps to
 //! `WrongRecipient`.
 
+use cgka_traits::app_event::{
+    MARMOT_APP_EVENT_KIND_AGENT_STREAM_START, MARMOT_APP_EVENT_KIND_CHAT, MarmotAppEvent,
+};
 use cgka_traits::engine::GroupEvent;
 use cgka_traits::ingest::{
     IngestOutcome, InputRejectionCategory, LocalIngestState, ProposalRejectionCategory, StaleReason,
 };
-use cgka_traits::{GroupId as EngineGroupId, MemberId, MessageId};
+use cgka_traits::{EncryptedMediaSecret, EpochId, GroupId as EngineGroupId, MemberId, MessageId};
+use zeroize::Zeroizing;
 
+use crate::agent_stream::{self, StreamFinal};
+use crate::media::{self, AttachmentRejection, MediaReference};
 use crate::outbox::PublishResolution;
 use crate::types::{AccountId, EventId, GroupId, OutboundId};
 
@@ -371,6 +377,41 @@ pub struct ReceivedMessage {
     pub epoch: u64,
     /// The transport event that carried it.
     pub transport_id: EventId,
+    /// One entry per `imeta` tag, in tag order, for kind-9 messages (media
+    /// messages are regular kind-9 chat app events); empty for every other
+    /// kind. A rejected attachment never drops its siblings or the message.
+    pub attachments: Vec<Result<MediaReference, AttachmentRejection>>,
+    /// The agent-stream final anchor, when this kind-9 message carries all
+    /// four `stream*` tags well-formed.
+    pub stream_final: Option<StreamFinal>,
+}
+
+/// The anchors of a delivered agent text stream start (kind 1200).
+///
+/// The host acks it with
+/// [`Session::acknowledge_messages`](crate::Session::acknowledge_messages)
+/// on `transport_id` like any message, may ignore it entirely (the receive
+/// role never fetches QUIC candidates — `route`/`broker` tags are dropped
+/// at the boundary), and withdraws any preview on [`SessionEvent::MessageInvalidated`]
+/// for that transport id.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct AgentStreamAnchor {
+    /// Canonical inner id of the kind-1200 event — the id later stream
+    /// finals reference as `stream-start`.
+    pub id: String,
+    /// Sender account (MLS-authenticated).
+    pub sender: AccountId,
+    /// Inner `created_at`.
+    pub created_at: u64,
+    /// MLS epoch the start was sent under.
+    pub epoch: u64,
+    /// The transport event that carried it.
+    pub transport_id: EventId,
+    /// The 32-byte stream id.
+    pub stream_id: [u8; 32],
+    /// The prompt message this stream answers, when tagged.
+    pub parent: Option<EventId>,
 }
 
 /// The state delta a `GroupStateChanged` event carries.
@@ -436,6 +477,17 @@ pub enum SessionEvent {
         group: GroupId,
         /// The decoded message.
         message: ReceivedMessage,
+    },
+    /// An agent text stream start event (kind 1200) whose anchors passed the
+    /// profile's parse. Emitted instead of [`Self::MessageReceived`]; a
+    /// kind-1200 payload whose anchors fail is delivered as an ordinary
+    /// message. Parsing is pure — no outbound, no I/O, and this crate holds
+    /// no network dependency for the host's QUIC fetches either.
+    AgentStreamStarted {
+        /// The group.
+        group: GroupId,
+        /// The decoded anchors.
+        start: AgentStreamAnchor,
     },
     /// A previously delivered application message decrypted only on a losing
     /// branch; the host must withdraw it.
@@ -556,9 +608,35 @@ pub enum SessionEvent {
     },
 }
 
-/// Map one engine event to a session event. Returns `None` for variants that
-/// belong to device-internal bookkeeping or to features this crate does not
-/// implement — matched explicitly, never by wildcard:
+/// The mapped session event plus the media-secret row effects
+/// [`Session::drain_events`] applies alongside it.
+pub(crate) struct MappedEvent {
+    /// The session event to surface.
+    pub event: SessionEvent,
+    /// `(group, transport)` media-secret row [`Session::drain_events`]
+    /// writes with the event — the captured source-epoch exporter secret of
+    /// a media-carrying message.
+    pub secret_write: Option<(EngineGroupId, MessageId, Zeroizing<Vec<u8>>)>,
+    /// `(group, transport)` media-secret row to delete (the message's media
+    /// secret is no longer needed once it is invalidated).
+    pub secret_delete: Option<(EngineGroupId, MessageId)>,
+}
+
+impl MappedEvent {
+    /// An event with no media-secret side effects.
+    const fn plain(event: SessionEvent) -> Self {
+        Self {
+            event,
+            secret_write: None,
+            secret_delete: None,
+        }
+    }
+}
+
+/// Map one engine event to a session event plus its media-secret row
+/// effects. Returns `None` for variants that belong to device-internal
+/// bookkeeping or to features this crate does not implement — matched
+/// explicitly, never by wildcard:
 ///
 /// - `GroupMemberLeavesRemoved`: device-destination bookkeeping for MDK's own
 ///   push-token cleanup; account-level departure already arrives via
@@ -571,8 +649,9 @@ pub enum SessionEvent {
 ///   `PendingCommitRecovered`/`GroupUnrecoverable`: surfaced.
 /// - `AppMessageInvalidated` with an undecodable `decrypted_payload_ref`:
 ///   still surfaced as `MessageInvalidated` (the payload ref is diagnostic
-///   only and carries no additional meaning for the host).
-pub(crate) fn session_event(event: GroupEvent) -> Option<SessionEvent> {
+///   only and carries no additional meaning for the host); its media-secret
+///   row (if any) is retired with the event.
+pub(crate) fn session_event(event: GroupEvent) -> Option<MappedEvent> {
     match event {
         GroupEvent::MessageReceived {
             group_id,
@@ -580,44 +659,47 @@ pub(crate) fn session_event(event: GroupEvent) -> Option<SessionEvent> {
             sender,
             epoch,
             payload,
+            encrypted_media_secret,
             ..
-        } => {
-            let inner = cgka_traits::app_event::MarmotAppEvent::decode(&payload).ok()?;
-            Some(SessionEvent::MessageReceived {
-                group: group_of(&group_id),
-                message: ReceivedMessage {
-                    id: inner.id,
-                    sender: account_of(&sender)?,
-                    created_at: inner.created_at,
-                    kind: inner.kind,
-                    tags: inner.tags,
-                    content: inner.content,
-                    epoch: epoch.0,
-                    transport_id: event_id_of(&message_id)?,
-                },
-            })
-        }
+        } => message_received(
+            group_id,
+            message_id,
+            &sender,
+            epoch,
+            &payload,
+            encrypted_media_secret,
+        ),
         GroupEvent::AppMessageInvalidated {
             group_id,
             message_id,
             epoch,
             ..
-        } => Some(SessionEvent::MessageInvalidated {
-            group: group_of(&group_id),
-            message: event_id_of(&message_id)?,
-            epoch: epoch.0,
+        } => Some(MappedEvent {
+            event: SessionEvent::MessageInvalidated {
+                group: group_of(&group_id),
+                message: event_id_of(&message_id)?,
+                epoch: epoch.0,
+            },
+            secret_write: None,
+            secret_delete: Some((group_id, message_id)),
         }),
-        GroupEvent::GroupCreated { group_id } => Some(SessionEvent::GroupCreated {
-            group: group_of(&group_id),
-        }),
-        GroupEvent::GroupJoined { group_id, .. } => Some(SessionEvent::GroupJoined {
-            group: group_of(&group_id),
-        }),
-        GroupEvent::EpochChanged { group_id, from, to } => Some(SessionEvent::EpochChanged {
-            group: group_of(&group_id),
-            from: from.0,
-            to: to.0,
-        }),
+        GroupEvent::GroupCreated { group_id } => {
+            Some(MappedEvent::plain(SessionEvent::GroupCreated {
+                group: group_of(&group_id),
+            }))
+        }
+        GroupEvent::GroupJoined { group_id, .. } => {
+            Some(MappedEvent::plain(SessionEvent::GroupJoined {
+                group: group_of(&group_id),
+            }))
+        }
+        GroupEvent::EpochChanged { group_id, from, to } => {
+            Some(MappedEvent::plain(SessionEvent::EpochChanged {
+                group: group_of(&group_id),
+                from: from.0,
+                to: to.0,
+            }))
+        }
         GroupEvent::GroupStateChanged {
             group_id,
             epoch,
@@ -626,16 +708,91 @@ pub(crate) fn session_event(event: GroupEvent) -> Option<SessionEvent> {
             origin_commit_id,
         } => {
             let change = group_change(change)?;
-            Some(SessionEvent::GroupStateChanged {
+            Some(MappedEvent::plain(SessionEvent::GroupStateChanged {
                 group: group_of(&group_id),
                 epoch: epoch.0,
                 actor: actor.as_ref().and_then(account_of),
                 change,
                 origin_commit: origin_commit_id.as_ref().and_then(event_id_of),
-            })
+            }))
         }
-        other => session_event_rest(other),
+        other => session_event_rest(other).map(MappedEvent::plain),
     }
+}
+
+/// Map a decrypted application message to its session event plus the
+/// media-secret write it carries.
+fn message_received(
+    group_id: EngineGroupId,
+    message_id: MessageId,
+    sender: &MemberId,
+    epoch: EpochId,
+    payload: &[u8],
+    encrypted_media_secret: Option<EncryptedMediaSecret>,
+) -> Option<MappedEvent> {
+    let inner = MarmotAppEvent::decode(payload).ok()?;
+    let group = group_of(&group_id);
+    let transport_id = event_id_of(&message_id)?;
+    let sender_account = account_of(sender)?;
+    if inner.kind == MARMOT_APP_EVENT_KIND_AGENT_STREAM_START
+        && let Ok(start) = agent_stream::parse_stream_start(&inner.tags)
+    {
+        return Some(MappedEvent::plain(SessionEvent::AgentStreamStarted {
+            group,
+            start: AgentStreamAnchor {
+                id: inner.id,
+                sender: sender_account,
+                created_at: inner.created_at,
+                epoch: epoch.0,
+                transport_id,
+                stream_id: start.stream_id,
+                parent: start.parent.map(EventId),
+            },
+        }));
+    }
+    let (attachments, stream_final) = if inner.kind == MARMOT_APP_EVENT_KIND_CHAT {
+        (
+            inner
+                .tags
+                .iter()
+                .filter(|tag| tag.first().map(String::as_str) == Some(media::IMETA_TAG))
+                .map(|tag| media::parse_imeta(tag))
+                .collect(),
+            agent_stream::parse_stream_final(&inner.tags),
+        )
+    } else {
+        (Vec::new(), None)
+    };
+    // The captured exporter secret is worth persisting only when the
+    // message actually commits to at least one readable attachment.
+    let secret_write = encrypted_media_secret
+        .filter(|_| attachments.iter().any(Result::is_ok))
+        .map(|secret| {
+            (
+                group_id,
+                message_id,
+                Zeroizing::new(secret.as_bytes().to_vec()),
+            )
+        });
+    Some(MappedEvent {
+        event: SessionEvent::MessageReceived {
+            group,
+            message: ReceivedMessage {
+                id: inner.id,
+                sender: sender_account,
+                created_at: inner.created_at,
+                kind: inner.kind,
+                tags: inner.tags,
+                content: inner.content,
+                epoch: epoch.0,
+                transport_id,
+                attachments,
+                stream_final,
+            },
+        },
+        secret_write,
+        secret_delete: None,
+    })
 }
 
 fn group_change(change: cgka_traits::engine::GroupStateChange) -> Option<GroupChange> {
@@ -751,7 +908,12 @@ fn session_event_rest(event: GroupEvent) -> Option<SessionEvent> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used, reason = "test code")]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    reason = "test code"
+)]
 mod tests {
     //! Exhaustive outcome-mapping coverage: every `IngestOutcome` arm and
     //! every category/reason enum arm, so a silently reclassified input is
@@ -1003,5 +1165,311 @@ mod tests {
             });
             assert_eq!(outcome, *expected, "{reason:?}");
         }
+    }
+
+    /// A kind-9/1200 `GroupEvent::MessageReceived` with the given inner tags.
+    fn message_event(kind: u64, tags: Vec<Vec<String>>) -> GroupEvent {
+        GroupEvent::MessageReceived {
+            group_id: gid(),
+            message_id: MessageId::new(vec![9; 32]),
+            sender: MemberId::new(vec![1; 32]),
+            sender_leaf_index: Some(0),
+            epoch: EpochId(3),
+            payload: MarmotAppEvent::new(
+                "01".repeat(32),
+                1_700_000_000,
+                kind,
+                tags,
+                "body".to_owned(),
+            )
+            .encode()
+            .expect("app event encode"),
+            retention: None,
+            authority: None,
+            encrypted_media_secret: None,
+        }
+    }
+
+    fn hex32(byte: u8) -> String {
+        format!("{byte:02x}").repeat(32)
+    }
+
+    fn stream_tags() -> Vec<Vec<String>> {
+        vec![
+            vec!["stream".to_owned(), hex32(7)],
+            vec!["stream-type".to_owned(), "text".to_owned()],
+            vec!["final-kind".to_owned(), "9".to_owned()],
+            vec!["parent".to_owned(), hex32(8)],
+            vec!["route".to_owned(), "quic".to_owned()],
+            vec!["broker".to_owned(), "quic://a".to_owned()],
+            vec!["broker".to_owned(), "quic://b".to_owned()],
+        ]
+    }
+
+    /// A valid kind-1200 stream start projects to `AgentStreamStarted` with
+    /// the anchor fields and no stream candidate on the event.
+    #[test]
+    fn stream_start_maps_to_anchor_event() {
+        let mapped = session_event(message_event(1200, stream_tags())).expect("mapped");
+        let SessionEvent::AgentStreamStarted { group, start } = mapped.event else {
+            panic!("expected AgentStreamStarted");
+        };
+        assert_eq!(group.0, vec![7; 16]);
+        assert_eq!(start.stream_id, [7; 32]);
+        assert_eq!(start.parent, Some(EventId([8; 32])));
+        assert_eq!(start.sender, AccountId([1; 32]));
+        assert_eq!(start.created_at, 1_700_000_000);
+        assert_eq!(start.epoch, 3);
+        assert_eq!(start.transport_id, EventId([9; 32]));
+        assert!(mapped.secret_write.is_none());
+        assert!(mapped.secret_delete.is_none());
+    }
+
+    /// `parent` is case-insensitive (the spec does not constrain it);
+    /// `stream` stays lowercase-only.
+    #[test]
+    fn stream_start_parent_hex_is_case_insensitive() {
+        let mut parent_upper = stream_tags();
+        *parent_upper
+            .get_mut(3)
+            .and_then(|tag| tag.get_mut(1))
+            .expect("parent tag") = hex32(0xab).to_uppercase();
+        let mapped = session_event(message_event(1200, parent_upper)).expect("mapped");
+        let SessionEvent::AgentStreamStarted { start, .. } = mapped.event else {
+            panic!("expected AgentStreamStarted");
+        };
+        assert_eq!(start.parent, Some(EventId([0xab; 32])));
+
+        let mut stream_upper = stream_tags();
+        *stream_upper
+            .first_mut()
+            .and_then(|tag| tag.get_mut(1))
+            .expect("stream tag") = hex32(0xcd).to_uppercase();
+        let mapped_upper = session_event(message_event(1200, stream_upper)).expect("mapped");
+        assert!(
+            matches!(mapped_upper.event, SessionEvent::MessageReceived { .. }),
+            "uppercase stream id must stay a message"
+        );
+    }
+
+    /// Malformed kind-1200 payloads stay ordinary `MessageReceived`.
+    #[test]
+    fn malformed_stream_start_stays_a_message() {
+        for tags in [
+            // bad stream hex (uppercase)
+            vec![
+                vec!["stream".to_owned(), "A".repeat(64)],
+                vec!["stream-type".to_owned(), "text".to_owned()],
+                vec!["final-kind".to_owned(), "9".to_owned()],
+            ],
+            // wrong stream-type
+            vec![
+                vec!["stream".to_owned(), hex32(7)],
+                vec!["stream-type".to_owned(), "audio".to_owned()],
+                vec!["final-kind".to_owned(), "9".to_owned()],
+            ],
+            // wrong final-kind
+            vec![
+                vec!["stream".to_owned(), hex32(7)],
+                vec!["stream-type".to_owned(), "text".to_owned()],
+                vec!["final-kind".to_owned(), "1".to_owned()],
+            ],
+            // duplicate stream tag
+            vec![
+                vec!["stream".to_owned(), hex32(7)],
+                vec!["stream".to_owned(), hex32(7)],
+                vec!["stream-type".to_owned(), "text".to_owned()],
+                vec!["final-kind".to_owned(), "9".to_owned()],
+            ],
+        ] {
+            let mapped = session_event(message_event(1200, tags)).expect("mapped");
+            assert!(
+                matches!(mapped.event, SessionEvent::MessageReceived { .. }),
+                "malformed start must stay a message"
+            );
+        }
+    }
+
+    /// Kind-9 stream-final tags project to `stream_final`; one malformed tag
+    /// degrades to `None` without dropping the message.
+    #[test]
+    fn stream_final_projection() {
+        let good = message_event(
+            9,
+            vec![
+                vec!["stream".to_owned(), hex32(7)],
+                vec!["stream-start".to_owned(), hex32(8)],
+                vec!["stream-hash".to_owned(), hex32(9)],
+                vec!["stream-chunks".to_owned(), "42".to_owned()],
+            ],
+        );
+        let SessionEvent::MessageReceived { message, .. } =
+            session_event(good).expect("mapped").event
+        else {
+            panic!("expected MessageReceived");
+        };
+        let final_ = message.stream_final.expect("stream_final");
+        assert_eq!(final_.stream_id, [7; 32]);
+        assert_eq!(final_.start_event_id, [8; 32]);
+        assert_eq!(final_.transcript_hash, [9; 32]);
+        assert_eq!(final_.chunk_count, 42);
+
+        let bad = message_event(
+            9,
+            vec![
+                vec!["stream".to_owned(), hex32(7)],
+                vec!["stream-start".to_owned(), "not hex".to_owned()],
+                vec!["stream-hash".to_owned(), hex32(9)],
+                vec!["stream-chunks".to_owned(), "42".to_owned()],
+            ],
+        );
+        let SessionEvent::MessageReceived {
+            message: bad_message,
+            ..
+        } = session_event(bad).expect("mapped").event
+        else {
+            panic!("expected MessageReceived");
+        };
+        assert_eq!(bad_message.content, "body");
+        assert!(bad_message.stream_final.is_none());
+    }
+
+    /// A captured media secret is persisted only when the message commits to
+    /// at least one parseable attachment.
+    #[test]
+    fn media_secret_write_gated_on_valid_attachment() {
+        use cgka_traits::EncryptedMediaSecret;
+        let with_secret = |tags: Vec<Vec<String>>| {
+            let GroupEvent::MessageReceived {
+                group_id,
+                message_id,
+                sender,
+                sender_leaf_index,
+                epoch,
+                payload,
+                retention,
+                authority,
+                ..
+            } = message_event(9, tags)
+            else {
+                unreachable!()
+            };
+            GroupEvent::MessageReceived {
+                group_id,
+                message_id,
+                sender,
+                sender_leaf_index,
+                epoch,
+                payload,
+                retention,
+                authority,
+                encrypted_media_secret: Some(EncryptedMediaSecret::new(Zeroizing::new(vec![
+                    3;
+                    32
+                ]))),
+            }
+        };
+        let valid = vec![vec![
+            "imeta".to_owned(),
+            "v encrypted-media-v2".to_owned(),
+            format!("locator blossom-v1 https://blossom.example/{}", hex32(1)),
+            format!("ciphertext_sha256 {}", hex32(1)),
+            format!("plaintext_sha256 {}", hex32(2)),
+            "m image/png".to_owned(),
+            "filename pic.png".to_owned(),
+            format!("nonce {}", "a".repeat(24)),
+        ]];
+        let mapped = session_event(with_secret(valid)).expect("mapped");
+        assert!(mapped.secret_write.is_some());
+        let malformed = vec![vec!["imeta".to_owned(), "v encrypted-media-v9".to_owned()]];
+        let malformed_mapped = session_event(with_secret(malformed)).expect("mapped");
+        assert!(malformed_mapped.secret_write.is_none());
+    }
+
+    /// One kind-9 carrying a valid and an invalid `imeta` still projects to
+    /// `MessageReceived` with the body intact: attachments keep tag order —
+    /// `Ok` for the parseable reference, `Err` with the exact rejection for
+    /// the rest — and the captured secret is persisted for the valid one.
+    #[test]
+    fn mixed_imeta_tags_keep_message_and_order() {
+        let tags = vec![
+            vec![
+                "imeta".to_owned(),
+                "v encrypted-media-v2".to_owned(),
+                format!("locator blossom-v1 https://blossom.example/{}", hex32(1)),
+                format!("ciphertext_sha256 {}", hex32(1)),
+                format!("plaintext_sha256 {}", hex32(2)),
+                "m image/png".to_owned(),
+                "filename pic.png".to_owned(),
+                format!("nonce {}", "a".repeat(24)),
+            ],
+            vec!["imeta".to_owned(), "v encrypted-media-v9".to_owned()],
+        ];
+        let GroupEvent::MessageReceived {
+            group_id,
+            message_id,
+            sender,
+            sender_leaf_index,
+            epoch,
+            payload,
+            retention,
+            authority,
+            ..
+        } = message_event(9, tags)
+        else {
+            unreachable!()
+        };
+        let event = GroupEvent::MessageReceived {
+            group_id,
+            message_id,
+            sender,
+            sender_leaf_index,
+            epoch,
+            payload,
+            retention,
+            authority,
+            encrypted_media_secret: Some(EncryptedMediaSecret::new(Zeroizing::new(vec![3; 32]))),
+        };
+        let mapped = session_event(event).expect("mapped");
+        let SessionEvent::MessageReceived { message, .. } = mapped.event else {
+            panic!("expected MessageReceived");
+        };
+        assert_eq!(message.content, "body");
+        assert_eq!(message.attachments.len(), 2);
+        let reference = message
+            .attachments
+            .first()
+            .expect("two attachments")
+            .as_ref()
+            .expect("first parses");
+        assert_eq!(reference.ciphertext_sha256, [1; 32]);
+        assert_eq!(
+            message.attachments.get(1),
+            Some(&Err(AttachmentRejection::UnsupportedFormat))
+        );
+        assert!(mapped.secret_write.is_some());
+    }
+
+    /// An invalidated app message withdraws the delivered row and asks the
+    /// session to drop the media secret recorded under its transport id.
+    #[test]
+    fn invalidated_message_deletes_media_secret() {
+        use cgka_traits::engine::AppMessageInvalidationReason;
+        let group_id = gid();
+        let message_id = MessageId::new(vec![9; 32]);
+        let event = GroupEvent::AppMessageInvalidated {
+            group_id: group_id.clone(),
+            message_id: message_id.clone(),
+            epoch: EpochId(3),
+            reason: AppMessageInvalidationReason::LosingBranch,
+            decrypted_payload_ref: None,
+        };
+        let mapped = session_event(event).expect("mapped");
+        assert!(matches!(
+            mapped.event,
+            SessionEvent::MessageInvalidated { .. }
+        ));
+        assert_eq!(mapped.secret_write, None);
+        assert_eq!(mapped.secret_delete, Some((group_id, message_id)));
     }
 }

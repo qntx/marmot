@@ -280,6 +280,52 @@ impl KvStorageProvider {
         self.store()
             .put(keys::key(Table::Meta, &[name]), value.to_vec())
     }
+
+    /// Persist one message's captured epoch media secret (32 raw bytes),
+    /// inside the caller's storage unit when one is open. Keyed
+    /// `group/transport_id` so group deletion and message invalidation
+    /// retire the row together with the message it unlocks.
+    pub(crate) fn put_media_secret(
+        &self,
+        group_id: &cgka_traits::GroupId,
+        transport_id: &cgka_traits::MessageId,
+        secret: &[u8],
+    ) -> Result<(), StorageError> {
+        self.store().put(
+            keys::key(
+                Table::MediaSecret,
+                &[group_id.as_slice(), transport_id.as_slice()],
+            ),
+            secret.to_vec(),
+        )
+    }
+
+    /// One message's media secret, if recorded.
+    pub(crate) fn media_secret(
+        &self,
+        group_id: &cgka_traits::GroupId,
+        transport_id: &cgka_traits::MessageId,
+    ) -> Result<Option<zeroize::Zeroizing<Vec<u8>>>, StorageError> {
+        Ok(self
+            .store()
+            .get(&keys::key(
+                Table::MediaSecret,
+                &[group_id.as_slice(), transport_id.as_slice()],
+            ))?
+            .map(zeroize::Zeroizing::new))
+    }
+
+    /// Delete one message's media-secret row (message invalidated).
+    pub(crate) fn delete_media_secret(
+        &self,
+        group_id: &cgka_traits::GroupId,
+        transport_id: &cgka_traits::MessageId,
+    ) -> Result<(), StorageError> {
+        self.store().delete(&keys::key(
+            Table::MediaSecret,
+            &[group_id.as_slice(), transport_id.as_slice()],
+        ))
+    }
 }
 
 /// Session meta row holding the stable random `d` slot id for kind-30443

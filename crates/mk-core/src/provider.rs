@@ -1073,6 +1073,7 @@ impl KvStorageProvider {
         }
         self.del_prefix(Table::Snapshot, &[gid])?;
         self.del_prefix(Table::Checkpoint, &[gid])?;
+        self.del_prefix(Table::MediaSecret, &[gid])?;
         self.delete_group_openmls_rows(id)
     }
 }

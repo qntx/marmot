@@ -51,8 +51,10 @@
 // shared across all of them, so each file binds the crates it does not use.
 use base64 as _;
 use cgka_engine as _;
+use chacha20poly1305 as _;
 use getrandom as _;
 use hex as _;
+use hkdf as _;
 use nostr as _;
 use openmls_rust_crypto as _;
 use tokio as _;

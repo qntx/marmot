@@ -49,3 +49,5 @@ local `3rdparty/mdk` checkout when present.
 | `incidents/convergence-incident.v1.json` | `crates/cgka-conformance-simulator/vectors/incidents/convergence-incident.v1.json` | `d37012ef176172a943cb1779a3f4d8560eb04b368769588105d090c25337e3f0` |
 | `incidents/fork-recovery-incident.v1.json` | `crates/cgka-conformance-simulator/vectors/incidents/fork-recovery-incident.v1.json` | `95d02d1b4e13efb65267e2db4c37832f3e46c87620b653dc2b85af66f750e70b` |
 | `incidents/membership-fork-recovery-incident.v1.json` | `crates/cgka-conformance-simulator/vectors/incidents/membership-fork-recovery-incident.v1.json` | `823ce91d09e78fba1d0a22210ed001a9699679b8a33656de8cebe034c5f5a64e` |
+| `encrypted-media/imeta-v1.json` | `fixtures/encrypted-media/imeta-v1.json` | `24adea4c86f4c9bae04f69a1f5a183c2dc88b78fb9fd9bbb2355d584a7be82ee` |
+| `encrypted-media/imeta-v2.json` | `fixtures/encrypted-media/imeta-v2.json` | `fbab0c8dbdd60efa6439ab97c0cd2c14ae9e6a9423dd67ad32d440eda152a578` |

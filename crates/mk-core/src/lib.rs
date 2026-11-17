@@ -45,12 +45,14 @@
 //! Secret-bearing `OpenMLS` rows are moved through
 //! [`zeroize::Zeroizing`] buffers at the codec boundary.
 
+pub mod agent_stream;
 mod clock;
 mod error;
 mod events;
 pub mod key_package;
 mod keys;
 pub mod kv;
+pub mod media;
 mod mls;
 mod outbox;
 mod provider;
@@ -75,9 +77,9 @@ pub use outbox::{Outbound, OutboundPurpose, PublishResolution, RelayResult, Rela
 pub use provider::{INGRESS_DEDUP_MARKER_CAPACITY, KvStorageProvider};
 pub use session::OpenError as SessionOpenError;
 pub use session::{
-    AppMessage, ComponentUpdate, CreateGroup, GroupSnapshot, GroupState, Invitee, MemberSnapshot,
-    Opened, PendingProof, ProofError, ProofRejected, RelayPolicy, SendOutcome, Session,
-    SessionConfig, SessionError, TickReport,
+    AppMessage, AttachmentInput, ComponentUpdate, CreateGroup, DestinationPolicy, GroupSnapshot,
+    GroupState, Invitee, MediaMessage, MemberSnapshot, Opened, PendingProof, ProofError,
+    ProofRejected, SealedAttachment, SendOutcome, Session, SessionConfig, SessionError, TickReport,
 };
 pub use signer::{AccountSigner, SignerError, SignerFuture};
 pub use types::{AccountId, Event, EventError, EventId, GroupId, OutboundId, UnsignedEvent};
