@@ -56,6 +56,7 @@ export type FlowTimings = {
 };
 
 type Member = {
+  name: string;
   engine: Engine;
   clock: ManualClock;
   signer: Signer;
@@ -103,18 +104,31 @@ async function routeHex(member: Member, group: string): Promise<string> {
   return snapshot.nostrGroupId;
 }
 
-/** Ingest the relay backlog, tick, advance, publish — eight rounds like `full_flow`. */
+/**
+ * Deliver what the relay holds for `member`, tick, advance 2 s, publish — repeated until quiescent:
+ * no fresh events, nothing published, and `tick` schedules no wake inside the window. A hard cap
+ * turns divergence into a failure instead of a hang.
+ */
 async function sync(member: Member, relay: FakeRelay, group: string): Promise<void> {
   const route = await routeHex(member, group);
-  for (let round = 0; round < 8; round += 1) {
+  const windowMs = 2000n;
+  for (let round = 0; round < 64; round += 1) {
+    const fresh = relay.groupEvents(route, member.name);
+    if (fresh.length > 0) {
+      // oxlint-disable-next-line no-await-in-loop -- the flow is sequential by design
+      await ingestAndDrain(member, fresh);
+    }
     // oxlint-disable-next-line no-await-in-loop -- the flow is sequential by design
-    await ingestAndDrain(member, relay.groupEvents(route));
+    const nextWakeMs = await member.engine.tick();
+    member.clock.advance(Number(windowMs));
     // oxlint-disable-next-line no-await-in-loop -- the flow is sequential by design
-    await member.engine.tick();
-    member.clock.advance(2000);
-    // oxlint-disable-next-line no-await-in-loop -- the flow is sequential by design
-    await publish(member, relay);
+    const resolutions = await publish(member, relay);
+    const woke = nextWakeMs !== undefined && nextWakeMs <= windowMs;
+    if (fresh.length === 0 && resolutions.length === 0 && !woke) {
+      return;
+    }
   }
+  throw new Error(`runFlow: sync for ${member.name} did not quiesce in 64 rounds`);
 }
 
 async function publishIdentity(member: Member, relay: FakeRelay): Promise<void> {
@@ -153,7 +167,7 @@ export async function runFlow(env: FlowEnv): Promise<FlowTimings> {
       signer,
       allowLoopback: true,
     });
-    return { engine, clock, signer };
+    return { name, engine, clock, signer };
   };
 
   let cursor = Date.now();
@@ -198,7 +212,7 @@ export async function runFlow(env: FlowEnv): Promise<FlowTimings> {
 
   // ---- ingest N: one ingest delivers the whole backlog, in order ----
   const route = await routeHex(b, group.id);
-  const drained = await ingestAndDrain(b, relay.groupEvents(route));
+  const drained = await ingestAndDrain(b, relay.groupEvents(route, b.name));
   const contents = messageContents(drained);
   const expected = Array.from({ length: env.messages }, (_, i) => `m${i}`);
   assert(
