@@ -1,0 +1,20 @@
+{
+  "leave_requested": {
+    "type": "leave_requested"
+  },
+  "no_change": {
+    "type": "no_change"
+  },
+  "queued": {
+    "type": "queued"
+  },
+  "staged": {
+    "ids": [
+      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    ],
+    "type": "staged"
+  },
+  "unmapped": {
+    "type": "unmapped"
+  }
+}

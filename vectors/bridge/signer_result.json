@@ -1,0 +1,29 @@
+{
+  "failed": {
+    "type": "failed"
+  },
+  "refused": {
+    "type": "refused"
+  },
+  "signed": {
+    "event": {
+      "content": "hello",
+      "created_at": "1700000000",
+      "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "kind": 9,
+      "pubkey": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "sig": "55555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555",
+      "tags": [
+        [
+          "e",
+          "00"
+        ]
+      ]
+    },
+    "type": "signed"
+  },
+  "text": {
+    "text": "t",
+    "type": "text"
+  }
+}

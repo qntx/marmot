@@ -1,0 +1,10 @@
+{
+  "protocol_version": 1,
+  "account": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "now": {
+    "unix_ms": "1700000000000",
+    "monotonic_ms": "42000"
+  },
+  "allow_loopback": true,
+  "client_name": "mk-bridge"
+}

@@ -1,0 +1,27 @@
+{
+  "error": {
+    "error": {
+      "kind": "already_open"
+    },
+    "type": "error"
+  },
+  "needs_account_proof": {
+    "type": "needs_account_proof",
+    "unsigned": {
+      "content": "",
+      "created_at": "1700000000",
+      "kind": 30443,
+      "pubkey": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "tags": [
+        [
+          "k",
+          "v"
+        ]
+      ]
+    }
+  },
+  "ready": {
+    "account": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "type": "ready"
+  }
+}

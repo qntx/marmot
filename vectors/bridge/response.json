@@ -1,0 +1,27 @@
+{
+  "error": {
+    "error": {
+      "kind": "not_open"
+    },
+    "type": "error"
+  },
+  "ok": {
+    "result": {
+      "type": "done"
+    },
+    "type": "ok"
+  },
+  "signer_pending": {
+    "requests": [
+      {
+        "id": 1,
+        "op": {
+          "peer": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "plaintext": "p",
+          "type": "nip44_encrypt"
+        }
+      }
+    ],
+    "type": "signer_pending"
+  }
+}

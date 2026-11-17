@@ -1,0 +1,41 @@
+{
+  "admin_added": {
+    "account": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "type": "admin_added"
+  },
+  "admin_removed": {
+    "account": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "type": "admin_removed"
+  },
+  "avatar_changed": {
+    "type": "avatar_changed"
+  },
+  "disbanded": {
+    "type": "disbanded"
+  },
+  "member_added": {
+    "account": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "type": "member_added"
+  },
+  "member_left": {
+    "account": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "type": "member_left"
+  },
+  "member_removed": {
+    "account": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "type": "member_removed"
+  },
+  "renamed": {
+    "new_name": "new",
+    "old_name": "old",
+    "type": "renamed"
+  },
+  "retention_changed": {
+    "new_seconds": "20",
+    "old_seconds": "10",
+    "type": "retention_changed"
+  },
+  "unmapped": {
+    "type": "unmapped"
+  }
+}

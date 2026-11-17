@@ -1,0 +1,126 @@
+{
+  "agent_stream_started": {
+    "group": "dead",
+    "start": {
+      "created_at": "1700000000",
+      "epoch": "2",
+      "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "parent": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "sender": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "stream_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "transport_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    },
+    "type": "agent_stream_started"
+  },
+  "epoch_changed": {
+    "from": "1",
+    "group": "dead",
+    "to": "2",
+    "type": "epoch_changed"
+  },
+  "group_created": {
+    "group": "dead",
+    "type": "group_created"
+  },
+  "group_joined": {
+    "group": "dead",
+    "type": "group_joined"
+  },
+  "group_state_changed": {
+    "actor": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "change": {
+      "account": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "type": "member_added"
+    },
+    "epoch": "2",
+    "group": "dead",
+    "origin_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "type": "group_state_changed"
+  },
+  "group_state_invalidated": {
+    "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "epoch": "2",
+    "group": "dead",
+    "type": "group_state_invalidated"
+  },
+  "group_state_revalidated": {
+    "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "epoch": "2",
+    "group": "dead",
+    "type": "group_state_revalidated"
+  },
+  "group_unrecoverable": {
+    "group": "dead",
+    "type": "group_unrecoverable"
+  },
+  "hydration_quarantined": {
+    "group": "dead",
+    "type": "hydration_quarantined"
+  },
+  "hydration_recovered": {
+    "epoch": "4",
+    "group": "dead",
+    "type": "hydration_recovered"
+  },
+  "local_copy_restored": {
+    "group": "dead",
+    "type": "local_copy_restored"
+  },
+  "local_copy_terminated": {
+    "group": "dead",
+    "type": "local_copy_terminated",
+    "voluntary": true
+  },
+  "message_invalidated": {
+    "epoch": "2",
+    "group": "dead",
+    "message": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "type": "message_invalidated"
+  },
+  "message_received": {
+    "group": "dead",
+    "message": {
+      "attachments": [
+        {
+          "reason": "missing_field",
+          "type": "rejected"
+        }
+      ],
+      "content": "hi",
+      "created_at": "1700000000",
+      "epoch": "1",
+      "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "kind": "9",
+      "sender": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "stream_final": {
+        "chunk_count": "2",
+        "start_event_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "stream_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "transcript_hash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      },
+      "tags": [],
+      "transport_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    },
+    "type": "message_received"
+  },
+  "pending_commit_recovered": {
+    "epoch": "3",
+    "group": "dead",
+    "type": "pending_commit_recovered"
+  },
+  "publish_resolved": {
+    "outbound": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "resolution": "confirmed",
+    "type": "publish_resolved"
+  },
+  "queued_intent_refused": {
+    "group": "dead",
+    "intent": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "intent_kind": "send_message",
+    "reason": "unknown_group",
+    "type": "queued_intent_refused"
+  },
+  "unmapped": {
+    "type": "unmapped"
+  }
+}

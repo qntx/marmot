@@ -1,0 +1,27 @@
+{
+  "nip44_decrypt": {
+    "ciphertext": "c",
+    "peer": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "type": "nip44_decrypt"
+  },
+  "nip44_encrypt": {
+    "peer": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "plaintext": "p",
+    "type": "nip44_encrypt"
+  },
+  "sign_event": {
+    "type": "sign_event",
+    "unsigned": {
+      "content": "",
+      "created_at": "1700000000",
+      "kind": 30443,
+      "pubkey": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "tags": [
+        [
+          "k",
+          "v"
+        ]
+      ]
+    }
+  }
+}

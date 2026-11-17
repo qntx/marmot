@@ -1,0 +1,170 @@
+{
+  "attachment": {
+    "plaintext": "01",
+    "type": "attachment"
+  },
+  "awaiting_durability": {
+    "seq": "7",
+    "type": "awaiting_durability"
+  },
+  "done": {
+    "type": "done"
+  },
+  "group": {
+    "group": null,
+    "type": "group"
+  },
+  "group_created": {
+    "group": {
+      "agent_text_stream": {
+        "allowed_roles": 3,
+        "max_plaintext_frame_len": 4096,
+        "replay_ttl_secs": 60,
+        "required_roles": 1
+      },
+      "description": "desc",
+      "encrypted_media": {
+        "allowed_locator_kinds": [
+          "https"
+        ],
+        "endpoints": [
+          {
+            "base_url": "https://blob.example",
+            "locator_kind": "https"
+          }
+        ]
+      },
+      "epoch": "3",
+      "id": "dead",
+      "members": [
+        {
+          "account": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "admin": true
+        }
+      ],
+      "name": "group",
+      "nostr_group_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "own_account_admin": true,
+      "relays": [
+        "wss://relay.example"
+      ],
+      "state": "stable"
+    },
+    "type": "group_created"
+  },
+  "groups": {
+    "groups": [
+      {
+        "agent_text_stream": {
+          "allowed_roles": 3,
+          "max_plaintext_frame_len": 4096,
+          "replay_ttl_secs": 60,
+          "required_roles": 1
+        },
+        "description": "desc",
+        "encrypted_media": {
+          "allowed_locator_kinds": [
+            "https"
+          ],
+          "endpoints": [
+            {
+              "base_url": "https://blob.example",
+              "locator_kind": "https"
+            }
+          ]
+        },
+        "epoch": "3",
+        "id": "dead",
+        "members": [
+          {
+            "account": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "admin": true
+          }
+        ],
+        "name": "group",
+        "nostr_group_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "own_account_admin": true,
+        "relays": [
+          "wss://relay.example"
+        ],
+        "state": "stable"
+      }
+    ],
+    "type": "groups"
+  },
+  "inbox_relays": {
+    "outbound_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "type": "inbox_relays"
+  },
+  "ingested": {
+    "reports": [
+      {
+        "event": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "outcome": {
+          "type": "accepted"
+        }
+      }
+    ],
+    "type": "ingested"
+  },
+  "key_package": {
+    "account": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "event_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "key_package": "01",
+    "key_package_ref": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "type": "key_package"
+  },
+  "outbound": {
+    "items": [
+      {
+        "event": {
+          "content": "hello",
+          "created_at": "1700000000",
+          "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "kind": 9,
+          "pubkey": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "sig": "55555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555",
+          "tags": [
+            [
+              "e",
+              "00"
+            ]
+          ]
+        },
+        "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "purpose": "application_message",
+        "relays": [
+          "wss://relay.example"
+        ]
+      }
+    ],
+    "type": "outbound"
+  },
+  "publish_resolution": {
+    "resolution": "complete",
+    "type": "publish_resolution"
+  },
+  "ready": {
+    "account": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "type": "ready"
+  },
+  "sealed_attachment": {
+    "ciphertext": "99",
+    "ciphertext_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "handle": 1,
+    "type": "sealed_attachment"
+  },
+  "send_outcome": {
+    "outcome": {
+      "ids": [
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      ],
+      "type": "staged"
+    },
+    "type": "send_outcome"
+  },
+  "ticked": {
+    "next_wake_ms": "9000",
+    "type": "ticked"
+  }
+}

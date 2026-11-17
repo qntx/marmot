@@ -1,0 +1,7 @@
+{
+  "complete": "complete",
+  "confirmed": "confirmed",
+  "pending": "pending",
+  "rolled_back": "rolled_back",
+  "unmapped": "unmapped"
+}
