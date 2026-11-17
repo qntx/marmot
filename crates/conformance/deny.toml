@@ -32,6 +32,7 @@ ignore = [
   { id = "RUSTSEC-2026-0370", reason = "`zbus_names` via marmot-account keyring deps; unmaintained, no upgrade" },
   { id = "RUSTSEC-2026-0371", reason = "`zvariant` via marmot-account keyring deps; unmaintained, no upgrade" },
   { id = "RUSTSEC-2026-0372", reason = "`zvariant_derive` via marmot-account keyring deps; unmaintained, no upgrade" },
+  { id = "RUSTSEC-2026-0543", reason = "`chrono` via marmot-observability in the pinned cgka-conformance-simulator stack; unmaintained, no upgrade" },
 ]
 yanked = "deny"
 
