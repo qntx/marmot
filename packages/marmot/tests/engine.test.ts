@@ -363,7 +363,7 @@ describe("Engine", () => {
     const { backend, closed } = fakeBackend({ onCall: commitOnTick(putBatch(3n), TICKED) });
     const engine = await Engine.open({ backend, kv, clock, signer: signer() });
     await engine.tick();
-    await engine.whenDurable();
+    expect(kindOf(await capture(engine.whenDurable()))).toBe("host_failed");
     const outcomes = await Promise.all([
       capture(engine.tick()),
       capture(engine.groups()),
@@ -378,6 +378,68 @@ describe("Engine", () => {
     ]);
     expect(closed()).toBe(true);
     await engine.close();
+  });
+
+  test("a commit failure while suspended rejects the op with host_failed", async () => {
+    const kv = memoryKv();
+    kv.failNext();
+    const suspend = gate();
+    const { backend } = fakeBackend({ onCall: commitAndSuspend(putBatch(5n)) });
+    const engine = await Engine.open({
+      backend,
+      kv,
+      clock,
+      signer: signer({
+        signEvent: async (u) => {
+          await suspend.promise;
+          return signedEvent(u);
+        },
+      }),
+    });
+    const ticking = capture(engine.tick());
+    // Let the op reach signer_pending and the failed commit mark the engine.
+    await new Promise((resolve) => {
+      setTimeout(resolve);
+    });
+    suspend.open();
+    expect(kindOf(await ticking)).toBe("host_failed");
+    await engine.close();
+  });
+
+  test("a failed submit_proof closes the handle", async () => {
+    const { backend, closed } = fakeBackend({
+      open: { type: "needs_account_proof", unsigned: unsigned() },
+      onCall: routes({
+        submit_proof: () => ({ type: "error", error: { kind: "invalid_request", reason: "x" } }),
+      }),
+    });
+    const outcome = await capture(
+      Engine.open({ backend, kv: memoryKv(), clock, signer: signer() }),
+    );
+    expect(kindOf(outcome)).toBe("invalid_request");
+    expect(closed()).toBe(true);
+  });
+
+  test("a throwing proof signer closes the handle", async () => {
+    const { backend, closed } = fakeBackend({
+      open: { type: "needs_account_proof", unsigned: unsigned() },
+    });
+    const outcome = await capture(
+      Engine.open({
+        backend,
+        kv: memoryKv(),
+        clock,
+        signer: signer({
+          signEvent: async () => {
+            await Promise.resolve();
+            throw new Error("no keys");
+          },
+        }),
+      }),
+    );
+    expect(outcome).toBeInstanceOf(Error);
+    expect(kindOf(outcome)).toBe("other");
+    expect(closed()).toBe(true);
   });
 
   test("serializes operations in call order", async () => {

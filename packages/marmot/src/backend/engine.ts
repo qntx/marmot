@@ -14,6 +14,7 @@ import {
 import { BridgeError, DecodeError } from "./errors.ts";
 import { encodeRows } from "./kv.ts";
 import type { DurableKv } from "./kv.ts";
+import { match } from "./match.ts";
 import type { Backend, BridgeHandle, BridgeHost } from "./port.ts";
 import type {
   AppMessage,
@@ -80,23 +81,6 @@ const UNEXPECTED_RESULT = () => new BridgeError({ kind: "internal", site: "unexp
 const CLOSED = new BridgeError({ kind: "closed" });
 const MISS = Symbol("no-result");
 
-/**
- * Statically exhaustive dispatch on a `type`-tagged union: `cases` must provide an arm for every
- * variant, and each arm receives the value narrowed to that variant.
- */
-function match<T extends { readonly type: string }, R>(
-  value: T,
-  cases: { [K in T["type"]]: (variant: Extract<T, { type: K }>) => R },
-): R {
-  // oxlint-disable-next-line no-unsafe-type-assertion -- the table maps each tag to an arm narrowed to that variant
-  const arms = cases as unknown as Record<string, (variant: T) => R>;
-  const arm = arms[value.type];
-  if (arm === undefined) {
-    throw new DecodeError("match", "unreachable");
-  }
-  return arm(value);
-}
-
 function readSeq(batch: Uint8Array): bigint {
   if (batch.length < 9 || batch[0] !== 1) {
     throw new DecodeError("batch", "header");
@@ -151,7 +135,7 @@ export class Engine {
           account: this.signer.pubkey,
           now: this.clock.now(),
           allowLoopback: this.options.allowLoopback ?? false,
-          clientName: this.options.clientName ?? undefined,
+          clientName: this.options.clientName,
         }),
       ),
     );
@@ -161,12 +145,18 @@ export class Engine {
     }
     this.handle = handle;
     if (response.type === "needs_account_proof") {
-      const signed = await this.signer.signEvent(response.unsigned);
-      const result = await this.runOp({ type: "submit_proof", event: signed });
-      if (result.type !== "ready") {
-        this.handle = undefined;
-        handle.close();
-        throw UNEXPECTED_RESULT();
+      try {
+        const signed = await this.signer.signEvent(response.unsigned);
+        const result = await this.runOp({ type: "submit_proof", event: signed });
+        if (result.type !== "ready") {
+          throw UNEXPECTED_RESULT();
+        }
+      } catch (error) {
+        if (this.handle === handle) {
+          this.handle = undefined;
+          handle.close();
+        }
+        throw error;
       }
     }
   }
@@ -198,6 +188,13 @@ export class Engine {
       }
     })();
     this.pendingCommits.add(tracked);
+    void this.prune(tracked);
+  }
+
+  /** Drop a settled commit from the tracking set so it cannot grow with traffic. */
+  private async prune(commit: Promise<void>): Promise<void> {
+    await commit;
+    this.pendingCommits.delete(commit);
   }
 
   /**
@@ -260,6 +257,10 @@ export class Engine {
       for (const pending of response.requests) {
         // oxlint-disable-next-line no-await-in-loop
         replies.push({ id: pending.id, result: await this.runSigner(pending.op) });
+        // A commit failure during the suspension already closed the handle.
+        if (this.failed !== undefined) {
+          throw this.failed;
+        }
       }
       response = decodeResponse(
         handle.call(encodeCall(this.clock.now(), { type: "signer_reply", replies })),
@@ -508,12 +509,11 @@ export class Engine {
     );
   }
 
-  /** Resolve once every commit issued so far has been acked (or failed). */
+  /** Resolve once every commit issued so far has been acked; rejects if the engine failed. */
   async whenDurable(): Promise<void> {
-    const pending = [...this.pendingCommits];
-    await Promise.all(pending);
-    for (const entry of pending) {
-      this.pendingCommits.delete(entry);
+    await Promise.all(this.pendingCommits);
+    if (this.failed !== undefined) {
+      throw this.failed;
     }
   }
 
