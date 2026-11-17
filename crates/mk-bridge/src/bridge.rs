@@ -89,8 +89,9 @@ pub struct Bridge<H: Host> {
     unacked: BTreeMap<u64, CommitSeq>,
     /// `ack_durable` received while suspended, applied on completion.
     pending_ack: u64,
-    /// Sealed attachments waiting for `send_media`, by handle.
-    attachments: HashMap<u32, core::SealedAttachment>,
+    /// Pending attachments waiting for `send_media`, by handle. Only the
+    /// epoch-pinned reference is retained — never the ciphertext blob.
+    attachments: HashMap<u32, core::PendingAttachment>,
     /// Next attachment handle.
     next_handle: u32,
     state: State,
@@ -278,14 +279,14 @@ impl<H: Host> Bridge<H> {
             };
         }
         match request {
-            Request::SubmitProof(_) => Self::error_response(invalid("value")),
+            Request::SubmitProof(_) => Self::error_response(BridgeError::AlreadyOpen),
             Request::AckDurable(args) => self.ack_durable(args.seq),
-            Request::AwaitingDurability => self.sync_op(|session| {
+            Request::AwaitingDurability(_) => self.sync_op(|session| {
                 Ok(OpResult::AwaitingDurability(AwaitingDurabilityResult {
                     seq: session.awaiting_durability().map(CommitSeq::get),
                 }))
             }),
-            Request::TakeOutbound => self.sync_op(|session| {
+            Request::TakeOutbound(_) => self.sync_op(|session| {
                 Ok(OpResult::Outbound(OutboundResult {
                     items: session
                         .take_outbound()?
@@ -295,7 +296,7 @@ impl<H: Host> Bridge<H> {
                 }))
             }),
             Request::AcknowledgeMessages(args) => self.acknowledge_messages(&args),
-            Request::Groups => self.sync_op(|session| {
+            Request::Groups(_) => self.sync_op(|session| {
                 Ok(OpResult::Groups(GroupsResult {
                     groups: session.groups()?.into_iter().map(Into::into).collect(),
                 }))
@@ -320,9 +321,9 @@ impl<H: Host> Bridge<H> {
             Request::PublishInboxRelays(args) => {
                 self.run(op_publish_inbox_relays(args), Vec::new())
             }
-            Request::CreateGroup(args) => self.run_built(op_create_group_args(args)),
+            Request::CreateGroup(args) => self.run(op_create_group_args(args), Vec::new()),
             Request::Invite(args) => self.run(op_invite(args), Vec::new()),
-            Request::RemoveMembers(args) => self.run_built(op_remove_members(args)),
+            Request::RemoveMembers(args) => self.run(op_remove_members(args), Vec::new()),
             Request::Leave(args) => self.run(op_leave(args), Vec::new()),
             Request::SelfUpdate(args) => self.run(op_self_update(args), Vec::new()),
             Request::UpdateGroupProfile(args) => {
@@ -333,7 +334,7 @@ impl<H: Host> Bridge<H> {
             }
             Request::SendMessage(args) => self.run(op_send_message(args), Vec::new()),
             Request::Ingest(args) => self.run(op_ingest(args), Vec::new()),
-            Request::Tick => self.run(op_tick(), Vec::new()),
+            Request::Tick(_) => self.run(op_tick(), Vec::new()),
         }
     }
 
@@ -438,11 +439,11 @@ impl<H: Host> Bridge<H> {
             }
             Ok(sealed) => {
                 let result = SealedAttachmentResult {
-                    ciphertext: sealed.ciphertext.clone(),
+                    ciphertext: sealed.ciphertext,
                     ciphertext_sha256: sealed.ciphertext_sha256,
                     handle,
                 };
-                self.attachments.insert(handle, sealed);
+                self.attachments.insert(handle, sealed.pending);
                 self.next_handle = handle.saturating_add(1);
                 if self.flush().is_err() {
                     return Self::error_response(BridgeError::HostFailed);
@@ -465,7 +466,7 @@ impl<H: Host> Bridge<H> {
                 return Self::error_response(BridgeError::UnknownAttachment);
             };
             attachments.push((
-                entry.pending.clone(),
+                entry.clone(),
                 locators
                     .iter()
                     .cloned()
@@ -517,9 +518,7 @@ impl<H: Host> Bridge<H> {
 
     /// `acknowledge_messages`: release durable pending-message rows.
     fn acknowledge_messages(&mut self, args: &AcknowledgeMessagesRequest) -> Response {
-        let Some(ids) = decode_event_ids(&args.ids) else {
-            return Self::error_response(invalid("hex"));
-        };
+        let ids: Vec<core::EventId> = args.ids.iter().map(|id| core::EventId(*id)).collect();
         self.sync_op(|session| {
             session.acknowledge_messages(&ids)?;
             Ok(OpResult::Done)
@@ -543,17 +542,6 @@ impl<H: Host> Bridge<H> {
                 result: Box::new(result),
             },
             Err(error) => Self::error_response(session_error(&error)),
-        }
-    }
-
-    /// Run a fallibly-built operation future (`run` or its decode error).
-    fn run_built(
-        &mut self,
-        built: Result<impl FnOnce(Box<Session>) -> OpFuture, BridgeError>,
-    ) -> Response {
-        match built {
-            Ok(future) => self.run(future, Vec::new()),
-            Err(error) => Self::error_response(error),
         }
     }
 
@@ -909,31 +897,12 @@ const fn reply_fits(op: &crate::protocol::SignerOp, result: &SignerResult) -> bo
     }
 }
 
-/// Decode a list of 32-byte hex account ids.
-fn decode_accounts(ids: &[String]) -> Option<Vec<core::AccountId>> {
-    ids.iter()
-        .map(|text| core::AccountId::from_hex(text).ok())
-        .collect()
-}
-
-/// Decode a list of 32-byte hex event ids.
-fn decode_event_ids(ids: &[String]) -> Option<Vec<core::EventId>> {
-    ids.iter()
-        .map(|text| core::EventId::from_hex(text).ok())
-        .collect()
-}
-
-/// `remove_members` argument conversion (fallible: hex member ids).
-fn op_remove_members(
-    args: RemoveMembersRequest,
-) -> Result<impl FnOnce(Box<Session>) -> OpFuture, BridgeError> {
-    let Some(members) = decode_accounts(&args.members) else {
-        return Err(invalid("hex"));
-    };
+/// `remove_members` as an operation future.
+fn op_remove_members(args: RemoveMembersRequest) -> impl FnOnce(Box<Session>) -> OpFuture {
+    let members: Vec<core::AccountId> =
+        args.members.iter().map(|id| core::AccountId(*id)).collect();
     let group = core::GroupId(args.group);
-    Ok(op_send(move |session| {
-        Box::pin(async move { session.remove_members(&group, &members).await })
-    }))
+    op_send(move |session| Box::pin(async move { session.remove_members(&group, &members).await }))
 }
 
 /// `leave` as an operation future.
@@ -1000,24 +969,19 @@ fn reply_error(
     if fits { None } else { Some(invalid("value")) }
 }
 
-/// `create_group` argument conversion (fallible: hex account ids).
-fn op_create_group_args(
-    args: CreateGroupRequest,
-) -> Result<impl FnOnce(Box<Session>) -> OpFuture, BridgeError> {
-    let Some(admins) = decode_accounts(&args.admins) else {
-        return Err(invalid("hex"));
-    };
+/// `create_group` argument conversion.
+fn op_create_group_args(args: CreateGroupRequest) -> impl FnOnce(Box<Session>) -> OpFuture {
     let req = core::CreateGroup {
         name: args.name,
         description: args.description,
         relays: args.relays,
         invitees: args.invitees.into_iter().map(core::Invitee::from).collect(),
-        admins,
+        admins: args.admins.iter().map(|id| core::AccountId(*id)).collect(),
         components: args
             .components
             .into_iter()
             .map(core::ComponentUpdate::from)
             .collect(),
     };
-    Ok(move |session| op_create_group(session, req))
+    move |session| op_create_group(session, req)
 }

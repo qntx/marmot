@@ -6,11 +6,9 @@ edition.workspace      = true
 rust-version.workspace = true
 license.workspace      = true
 repository.workspace   = true
-homepage.workspace     = true
 authors.workspace      = true
 keywords.workspace     = true
 categories             = ["cryptography", "network-programming"]
-readme                 = "README.md"
 publish                = false
 
 [features]

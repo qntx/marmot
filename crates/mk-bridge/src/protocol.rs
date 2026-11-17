@@ -15,7 +15,7 @@ mod types;
 
 pub use request::{
     AckDurableRequest, AcknowledgeMessagesRequest, CreateGroupRequest, DiscardAttachmentRequest,
-    GroupRequest, IngestRequest, InviteRequest, LeaveRequest, OpenAttachmentRequest,
+    GroupRequest, IngestRequest, InviteRequest, LeaveRequest, NoArgs, OpenAttachmentRequest,
     PublishInboxRelaysRequest, PublishKeyPackageRequest, RemoveMembersRequest,
     ReportPublishRequest, Request, SealAttachmentRequest, SelfUpdateRequest, SendMediaRequest,
     SendMessageRequest, SignerReplyRequest, SubmitProofRequest, UpdateAppComponentsRequest,

@@ -1,17 +1,22 @@
 //! The `call` request vocabulary: one variant per `Session` surface, plus
 //! `submit_proof` (two-phase open) and `signer_reply` (suspension resume).
 //!
-//! Data-carrying variants are newtype wrappers over strict
-//! `deny_unknown_fields` argument structs — internally-tagged enums cannot
-//! reject unknown fields themselves.
+//! Every variant is a newtype wrapper over a `deny_unknown_fields`
+//! argument struct — internally-tagged enums cannot reject unknown fields
+//! themselves. Argument-less requests wrap the empty [`NoArgs`] struct.
 
 use serde::{Deserialize, Serialize};
 
-use super::ser::{hex_bytes, hex_str, u64_str};
+use super::ser::{hex_bytes, hex_str, hex_str_seq, u64_str};
 use super::types::{
     AppMessage, AttachmentInput, ComponentUpdate, Event, Invitee, MediaAttachmentRef,
     MediaReference, RelayResult, SignerReply,
 };
+
+/// The empty argument struct every argument-less request wraps.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NoArgs {}
 
 /// Complete an `open` that answered `needs_account_proof`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -69,8 +74,9 @@ pub struct CreateGroupRequest {
     pub relays: Vec<String>,
     /// Founding invitees (the creator is always a member).
     pub invitees: Vec<Invitee>,
-    /// Additional founding admins besides the creator.
-    pub admins: Vec<String>,
+    /// Additional founding admins besides the creator, 32-byte hex each.
+    #[serde(with = "hex_str_seq")]
+    pub admins: Vec<[u8; 32]>,
     /// Additional initial app components.
     pub components: Vec<ComponentUpdate>,
 }
@@ -94,7 +100,8 @@ pub struct RemoveMembersRequest {
     #[serde(with = "hex_bytes")]
     pub group: Vec<u8>,
     /// The member accounts to remove, 32-byte hex each.
-    pub members: Vec<String>,
+    #[serde(with = "hex_str_seq")]
+    pub members: Vec<[u8; 32]>,
 }
 
 /// Request to leave a group.
@@ -214,7 +221,8 @@ pub struct IngestRequest {
 #[serde(deny_unknown_fields)]
 pub struct AcknowledgeMessagesRequest {
     /// Transport event ids, 32-byte hex each.
-    pub ids: Vec<String>,
+    #[serde(with = "hex_str_seq")]
+    pub ids: Vec<[u8; 32]>,
 }
 
 /// Snapshot one group.
@@ -245,9 +253,9 @@ pub enum Request {
     /// Acknowledge durable batches.
     AckDurable(AckDurableRequest),
     /// Report the durability gate's outstanding watermark.
-    AwaitingDurability,
+    AwaitingDurability(NoArgs),
     /// Release gated outbound items for publishing.
-    TakeOutbound,
+    TakeOutbound(NoArgs),
     /// Report publish verdicts for one outbound item.
     ReportPublish(ReportPublishRequest),
     /// Stage the account `KeyPackage`.
@@ -281,11 +289,11 @@ pub enum Request {
     /// Admit inbound events.
     Ingest(IngestRequest),
     /// Run one maintenance/convergence pass.
-    Tick,
+    Tick(NoArgs),
     /// Acknowledge delivered messages.
     AcknowledgeMessages(AcknowledgeMessagesRequest),
     /// Snapshot every live group.
-    Groups,
+    Groups(NoArgs),
     /// Snapshot one group.
     Group(GroupRequest),
     /// Answer signer operations and resume.

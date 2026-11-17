@@ -78,8 +78,9 @@ pub use provider::{INGRESS_DEDUP_MARKER_CAPACITY, KvStorageProvider};
 pub use session::OpenError as SessionOpenError;
 pub use session::{
     AppMessage, AttachmentInput, ComponentUpdate, CreateGroup, DestinationPolicy, GroupSnapshot,
-    GroupState, Invitee, MediaMessage, MemberSnapshot, Opened, PendingProof, ProofError,
-    ProofRejected, SealedAttachment, SendOutcome, Session, SessionConfig, SessionError, TickReport,
+    GroupState, Invitee, MediaMessage, MemberSnapshot, Opened, PendingAttachment, PendingProof,
+    ProofError, ProofRejected, SealedAttachment, SendOutcome, Session, SessionConfig, SessionError,
+    TickReport,
 };
 pub use signer::{AccountSigner, SignerError, SignerFuture};
 pub use types::{AccountId, Event, EventError, EventId, GroupId, OutboundId, UnsignedEvent};

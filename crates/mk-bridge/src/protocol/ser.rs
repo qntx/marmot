@@ -34,6 +34,35 @@ pub(crate) mod hex_str {
     }
 }
 
+/// `Vec<[u8; N]>` as a list of lowercase hex strings.
+pub(crate) mod hex_str_seq {
+    use super::{Deserialize, Deserializer, HEX, Serializer};
+
+    /// Serialize each byte array as lowercase hex.
+    pub(crate) fn serialize<S: Serializer, const N: usize>(
+        ids: &[[u8; N]],
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        serializer.collect_seq(ids.iter().map(hex::encode))
+    }
+
+    /// Decode a list of lowercase hex strings of exactly `N` bytes each.
+    pub(crate) fn deserialize<'de, D: Deserializer<'de>, const N: usize>(
+        deserializer: D,
+    ) -> Result<Vec<[u8; N]>, D::Error> {
+        let texts = Vec::<String>::deserialize(deserializer)?;
+        texts
+            .into_iter()
+            .map(|text| {
+                let decoded = hex::decode(&text).map_err(|_| serde::de::Error::custom(HEX))?;
+                decoded
+                    .try_into()
+                    .map_err(|_| serde::de::Error::custom(HEX))
+            })
+            .collect()
+    }
+}
+
 /// `Vec<u8>` as a lowercase hex string of any length.
 pub(crate) mod hex_bytes {
     use super::{Deserialize, Deserializer, HEX, Serializer};
