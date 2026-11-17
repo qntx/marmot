@@ -21,7 +21,7 @@ export type Harness = {
     groups: number,
     messages: number,
   ) => Promise<{ ingestMs: number[]; wallMs: number }>;
-  memory: () => Promise<{ uaMemoryBytes: number | undefined }>;
+  memory: () => Promise<{ uaMemoryBytes: number | undefined; breakdown: unknown }>;
 };
 
 declare global {
@@ -41,6 +41,9 @@ declare global {
   /** Chromium-only memory API — absent from the TS DOM lib at this version. */
   // oxlint-disable-next-line consistent-type-definitions -- global augmentation requires interface merging
   interface Performance {
-    measureUserAgentSpecificMemory?: () => Promise<{ bytes: number }>;
+    measureUserAgentSpecificMemory?: () => Promise<{
+      bytes: number;
+      breakdown: unknown[];
+    }>;
   }
 }

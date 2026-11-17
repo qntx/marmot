@@ -466,9 +466,9 @@ const api: Harness = {
   async memory() {
     try {
       const result = await performance.measureUserAgentSpecificMemory?.();
-      return { uaMemoryBytes: result?.bytes };
+      return { uaMemoryBytes: result?.bytes, breakdown: result?.breakdown };
     } catch {
-      return { uaMemoryBytes: undefined };
+      return { uaMemoryBytes: undefined, breakdown: undefined };
     }
   },
 };

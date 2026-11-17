@@ -3,6 +3,12 @@
 const PORT = Number(process.env["E2E_PORT"] ?? "8710");
 const root = new URL(".", import.meta.url).pathname;
 
+/** Cross-origin isolation unlocks `performance.measureUserAgentSpecificMemory`. */
+const ISOLATION = {
+  "cross-origin-opener-policy": "same-origin",
+  "cross-origin-embedder-policy": "require-corp",
+} as const;
+
 const PAGE = `<!doctype html>
 <html><head><meta charset="utf-8"><title>marmot e2e</title></head>
 <body><script type="module" src="/harness.js"></script></body></html>`;
@@ -21,12 +27,16 @@ Bun.serve({
   fetch(request) {
     const url = new URL(request.url);
     if (url.pathname === "/") {
-      return new Response(PAGE, { headers: { "content-type": "text/html" } });
+      return new Response(PAGE, {
+        headers: { "content-type": "text/html", ...ISOLATION },
+      });
     }
     const route = paths[url.pathname];
     if (route !== undefined) {
       const file = Bun.file(route.file);
-      return new Response(file, { headers: { "content-type": route.type } });
+      return new Response(file, {
+        headers: { "content-type": route.type, ...ISOLATION },
+      });
     }
     return new Response("not found", { status: 404 });
   },

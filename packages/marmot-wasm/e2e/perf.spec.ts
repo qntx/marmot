@@ -17,11 +17,10 @@ type PerfOut = {
   coldLoad?: Array<{ totalMs: number; fetchMs: number; instantiateMs: number }>;
   reopen10Groups?: { samples: number[]; medianMs: number };
   ingest500?: { samples: number[]; medianMs: number };
-  memory10k?: Record<string, unknown>;
 };
 
-test("chromium perf: cold load, reopen, ingest, memory", async ({ browser }) => {
-  test.setTimeout(1_200_000);
+test("chromium perf: cold load, reopen, ingest", async ({ browser }) => {
+  test.setTimeout(120_000);
   const out: PerfOut = {};
 
   // ---- cold load(): fresh context + navigation, split fetch / instantiate ----
@@ -86,28 +85,6 @@ test("chromium perf: cold load, reopen, ingest, memory", async ({ browser }) => 
   }
   out.ingest500 = { samples: ingestMs, medianMs: median(ingestMs) };
   expect(median(ingestMs)).toBeLessThan(1000);
-
-  // ---- memory after 10,000 received messages (20 groups x 500, batched 500) ----
-  const memoryStarted = Date.now();
-  const received = await page.evaluate(
-    async (a: { db: string; g: number; m: number }) =>
-      globalThis.__marmot.receiveScenario(a.db, a.g, a.m),
-    { db: "perf-mem", g: 20, m: 500 },
-  );
-  const stats = await page.evaluate(async (name) => globalThis.__marmot.dbStats(name), "perf-mem");
-  const uaMemory = await page.evaluate(async () => globalThis.__marmot.memory());
-  const cdp = await context.newCDPSession(page);
-  await cdp.send("Performance.enable");
-  const { metrics } = await cdp.send("Performance.getMetrics");
-  const heap = metrics.find((metric) => metric.name === "JSHeapUsedSize")?.value;
-  out.memory10k = {
-    wallMs: Date.now() - memoryStarted,
-    pageWallMs: received.wallMs,
-    idbRows: stats.rows,
-    idbBytes: stats.bytes,
-    jsHeapUsedBytes: heap,
-    uaMemoryBytes: uaMemory.uaMemoryBytes,
-  };
   await context.close();
 
   const dir = fileURLToPath(new URL("../../../target", import.meta.url));

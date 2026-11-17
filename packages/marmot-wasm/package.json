@@ -52,7 +52,8 @@
     "check:generated": "bun ../../scripts/build-wasm.ts --glue-only && git diff --exit-code -- src/generated",
     "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.src.json",
     "check:pkg": "vp pack && publint && attw --pack . --profile esm-only",
-    "test:browser": "bun e2e/build.ts && playwright test"
+    "test:browser": "bun e2e/build.ts && playwright test flow.spec.ts locks.spec.ts kill.spec.ts perf.spec.ts",
+    "test:browser:memory": "bun e2e/build.ts && playwright test memory.spec.ts"
   },
   "dependencies": {
     "@qntx/marmot": "^0.0.0"
