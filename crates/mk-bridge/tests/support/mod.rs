@@ -109,11 +109,11 @@ pub struct HostState {
     pub history: Vec<KvBatch>,
     /// When set, commits fail once `history.len() >= n`.
     pub fail_after: Option<usize>,
-    /// Serve only the first `n` committed batches on `load` (torn-write
-    /// reopen). `None` serves everything committed.
-    pub load_prefix: Option<usize>,
     /// `load` fails.
     pub fail_load: bool,
+    /// The encoded rows the most recent `load` served — this
+    /// incarnation's durable baseline.
+    pub last_served: Vec<u8>,
 }
 
 /// An in-memory host: records batches in commit order and rebuilds the
@@ -143,25 +143,49 @@ impl MemHost {
         self.state.lock().unwrap().fail_load = fail;
     }
 
-    /// On `load`, serve only the first `n` committed batches.
-    pub fn load_prefix(&self, n: Option<usize>) {
-        self.state.lock().unwrap().load_prefix = n;
+    /// Drop every committed batch past `n` — a store that rolled back to a
+    /// snapshot. Unlike `load_prefix`, the tail is gone for good: later
+    /// commits append at `n`.
+    pub fn truncate(&self, n: usize) {
+        self.state.lock().unwrap().history.truncate(n);
+    }
+
+    /// Durable row values behind the invariant check: every `Put` value
+    /// of committed batches up to `watermark`, plus the row set this
+    /// incarnation loaded at `open`.
+    pub fn durable_values(&self, watermark: u64) -> Vec<Vec<u8>> {
+        let state = self.state.lock().unwrap();
+        let mut values: Vec<Vec<u8>> = state
+            .history
+            .iter()
+            .filter(|batch| batch.seq.get() <= watermark)
+            .flat_map(|batch| batch.ops.iter())
+            .filter_map(|op| match op {
+                KvOp::Put { value, .. } => Some(value.clone()),
+                KvOp::Delete { .. } => None,
+            })
+            .collect();
+        if let Ok(rows) = mk_bridge::decode_rows(&state.last_served) {
+            values.extend(rows.into_iter().map(|(_, value)| value));
+        }
+        values
     }
 }
 
 impl Host for MemHost {
     fn load(&mut self) -> Result<Vec<u8>, HostError> {
-        let state = self.state.lock().unwrap();
+        let mut state = self.state.lock().unwrap();
         if state.fail_load {
             return Err(HostError::new());
         }
-        let take = state.load_prefix.unwrap_or(state.history.len());
         let mut rows = BTreeMap::new();
-        for batch in state.history.iter().take(take) {
+        for batch in &state.history {
             apply(&mut rows, batch);
         }
         let rows: Vec<Row> = rows.into_iter().collect();
-        Ok(encode_rows(&rows))
+        let encoded = encode_rows(&rows);
+        state.last_served.clone_from(&encoded);
+        Ok(encoded)
     }
 
     fn commit(&mut self, batch: &[u8]) -> Result<(), HostError> {
@@ -257,6 +281,30 @@ pub fn group_events(relay: &FakeRelay, route_hex: &str) -> Vec<Event> {
     relay.fetch(|event| event.kind == 445 && tag(event, "h") == Some(route_hex))
 }
 
+/// The durability invariant: a published event's id must already sit
+/// inside a durable value — a committed batch at or below the acked
+/// watermark, or the rows this incarnation loaded at open (a batch
+/// committed before a restart is durable even though its in-session ack
+/// died). Row values are host-defined bytes — the fanout codec stores
+/// the id raw, JSON rows store it hex — so accept either encoding.
+pub fn assert_durable(durable: &[Vec<u8>], item: &Outbound) {
+    assert!(
+        durable
+            .iter()
+            .any(|value| contains_id(value, &item.event.id)),
+        "published event escaped its gating batch: {}",
+        hex::encode(item.event.id)
+    );
+}
+
+/// Whether `buf` contains `id` as ASCII hex or raw bytes.
+pub fn contains_id(buf: &[u8], id: &[u8; 32]) -> bool {
+    let event_hex = hex::encode(id);
+    buf.windows(event_hex.len())
+        .any(|w| w == event_hex.as_bytes())
+        || buf.windows(32).any(|w| w == id)
+}
+
 /// The newest kind-30443 `KeyPackage` event authored by `account_hex`.
 pub fn key_package_of(relay: &FakeRelay, account_hex: &str) -> Event {
     relay
@@ -278,6 +326,11 @@ pub struct Member {
     pub signer: LocalSigner,
     pub unix_ms: u64,
     pub mono_ms: u64,
+    /// The cumulative acked watermark this incarnation has acked — the
+    /// highest seq ever passed to `ack_durable`. `awaiting_durability`
+    /// reports only still-gated seqs, so a round with nothing new pending
+    /// returns `None` even though earlier rounds acked higher.
+    pub acked: u64,
 }
 
 impl Member {
@@ -290,6 +343,7 @@ impl Member {
             signer: LocalSigner::new(),
             unix_ms: 1_700_000_000_000,
             mono_ms: 1_000,
+            acked: 0,
         }
     }
 
@@ -447,6 +501,7 @@ impl Member {
     pub async fn restart(&mut self) {
         self.bridge.close();
         self.bridge = Bridge::new(self.host.clone());
+        self.acked = 0;
         let response = self.open().await;
         assert!(
             matches!(response, OpenResponse::Ready { .. }),
@@ -457,7 +512,7 @@ impl Member {
     /// The highest committed seq the session reports behind the gate,
     /// then ack it (the driver's durability contract).
     pub async fn ack_all(&mut self) -> u64 {
-        let response = self.call(Request::AwaitingDurability).await;
+        let response = self.call(Request::AwaitingDurability(NoArgs {})).await;
         let Response::Ok { result } = &response else {
             panic!("awaiting_durability failed: {response:?}");
         };
@@ -469,43 +524,79 @@ impl Member {
                 .call(Request::AckDurable(AckDurableRequest { seq }))
                 .await;
             assert!(matches!(response, Response::Ok { .. }), "ack {seq}");
+            self.acked = self.acked.max(seq);
         }
-        seq.unwrap_or(0)
+        self.acked
+    }
+
+    /// Fault-tolerant publish loop for fault-injection tests: identical to
+    /// [`Self::publish`], including the durability invariant on every item,
+    /// but stops and reports `clean = false` on the first error response
+    /// (a poisoned bridge) instead of panicking. Returns the
+    /// `(item, resolution)` pairs completed before the failure.
+    pub async fn try_publish(
+        &mut self,
+        relay: &mut FakeRelay,
+    ) -> (Vec<(Outbound, PublishResolution)>, bool) {
+        let mut done = Vec::new();
+        for _ in 0..64 {
+            // Ack everything outstanding, tolerating a dead bridge.
+            let response = self.call(Request::AwaitingDurability(NoArgs {})).await;
+            let Response::Ok { result } = response else {
+                return (done, false);
+            };
+            let OpResult::AwaitingDurability(AwaitingDurabilityResult { seq }) = *result else {
+                return (done, false);
+            };
+            if let Some(seq) = seq {
+                let response = self
+                    .call(Request::AckDurable(AckDurableRequest { seq }))
+                    .await;
+                if !matches!(response, Response::Ok { .. }) {
+                    return (done, false);
+                }
+                self.acked = self.acked.max(seq);
+            }
+            let response = self.call(Request::TakeOutbound(NoArgs {})).await;
+            let Response::Ok { result } = response else {
+                return (done, false);
+            };
+            let OpResult::Outbound(OutboundResult { items }) = *result else {
+                return (done, false);
+            };
+            if items.is_empty() {
+                break;
+            }
+            let durable = self.host.durable_values(self.acked);
+            for item in items {
+                assert_durable(&durable, &item);
+                let results = relay.publish(&item, self.acked);
+                let id = item.id;
+                let response = self
+                    .call(Request::ReportPublish(ReportPublishRequest { id, results }))
+                    .await;
+                let Response::Ok { result } = response else {
+                    return (done, false);
+                };
+                let OpResult::PublishResolution(PublishResolutionResult { resolution }) = *result
+                else {
+                    return (done, false);
+                };
+                done.push((item, resolution));
+            }
+        }
+        (done, true)
     }
 
     /// Release gated outbound, publish every item to `relay`, and report
     /// verdicts back — the host's delivery loop. Returns resolutions per
     /// outbound id.
     pub async fn publish(&mut self, relay: &mut FakeRelay) -> Vec<(String, PublishResolution)> {
-        let mut resolutions = Vec::new();
-        for _ in 0..64 {
-            let watermark = self.ack_all().await;
-            let Response::Ok { result } = self.call(Request::TakeOutbound).await else {
-                panic!("take_outbound failed");
-            };
-            let OpResult::Outbound(OutboundResult { items }) = *result else {
-                panic!("take_outbound result: {result:?}");
-            };
-            if items.is_empty() {
-                break;
-            }
-            for item in items {
-                let results = relay.publish(&item, watermark);
-                let id = item.id;
-                let Response::Ok { result } = self
-                    .call(Request::ReportPublish(ReportPublishRequest { id, results }))
-                    .await
-                else {
-                    panic!("report_publish failed");
-                };
-                let OpResult::PublishResolution(PublishResolutionResult { resolution }) = *result
-                else {
-                    panic!("report_publish result: {result:?}");
-                };
-                resolutions.push((hex::encode(id), resolution));
-            }
-        }
-        resolutions
+        let (done, clean) = self.try_publish(relay).await;
+        assert!(clean, "publish loop hit an error response");
+        done.into_iter()
+            .map(|(item, resolution)| (hex::encode(item.id), resolution))
+            .collect()
     }
 
     /// Publish the account's `KeyPackage` and inbox relay list.
@@ -526,18 +617,21 @@ impl Member {
         self.publish(relay).await;
     }
 
-    /// Ingest events, then drain (and ack) delivered messages like a host
-    /// clearing its UI buffer. Returns the drained session events.
+    /// Ingest `events`, then drain and acknowledge message deliveries.
     pub async fn ingest_and_drain(&mut self, events: Vec<Event>) -> Vec<SessionEvent> {
         let response = self.call(Request::Ingest(IngestRequest { events })).await;
         assert!(matches!(response, Response::Ok { .. }), "ingest");
+        self.drain_and_ack().await
+    }
+
+    /// Drain pending session events and acknowledge every message
+    /// delivery — the host's receive contract.
+    pub async fn drain_and_ack(&mut self) -> Vec<SessionEvent> {
         let drained = self.drained_events();
-        let ids: Vec<String> = drained
+        let ids: Vec<[u8; 32]> = drained
             .iter()
             .filter_map(|event| match event {
-                SessionEvent::MessageReceived { message, .. } => {
-                    Some(hex::encode(message.transport_id))
-                }
+                SessionEvent::MessageReceived { message, .. } => Some(message.transport_id),
                 _ => None,
             })
             .collect();
@@ -578,7 +672,7 @@ impl Member {
         for _ in 0..8 {
             let backlog = group_events(relay, &route);
             self.ingest_and_drain(backlog).await;
-            let response = self.call(Request::Tick).await;
+            let response = self.call(Request::Tick(NoArgs {})).await;
             assert!(matches!(response, Response::Ok { .. }), "tick");
             self.advance(2_000);
             self.publish(relay).await;

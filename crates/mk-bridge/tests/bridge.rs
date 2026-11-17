@@ -185,9 +185,12 @@ async fn every_request_variant() {
     );
     mark!(
         "awaiting_durability",
-        &a.call(Request::AwaitingDurability).await
+        &a.call(Request::AwaitingDurability(NoArgs {})).await
     );
-    mark!("take_outbound", &a.call(Request::TakeOutbound).await);
+    mark!(
+        "take_outbound",
+        &a.call(Request::TakeOutbound(NoArgs {})).await
+    );
     a.publish(&mut relay).await; // exercises ack_durable + report_publish accepted
     covered.insert("ack_durable".to_owned());
     covered.insert("report_publish".to_owned());
@@ -254,7 +257,7 @@ async fn every_request_variant() {
         "remove_members",
         &a.call(Request::RemoveMembers(RemoveMembersRequest {
             group: group.clone(),
-            members: vec![c.account_hex()],
+            members: vec![c.signer.account().0],
         }))
         .await,
     );
@@ -309,7 +312,7 @@ async fn every_request_variant() {
     for _ in 0..8 {
         let backlog = group_events(&relay, &route);
         events.extend(b.ingest_and_drain(backlog).await);
-        let response = b.call(Request::Tick).await;
+        let response = b.call(Request::Tick(NoArgs {})).await;
         assert!(matches!(response, Response::Ok { .. }), "tick");
         b.advance(2_000);
         b.publish(&mut relay).await;
@@ -341,15 +344,15 @@ async fn every_request_variant() {
     }
     assert!(opened, "B opened A's attachment");
 
-    mark!("tick", &a.call(Request::Tick).await);
+    mark!("tick", &a.call(Request::Tick(NoArgs {})).await);
     mark!(
         "acknowledge_messages",
         &a.call(Request::AcknowledgeMessages(AcknowledgeMessagesRequest {
-            ids: vec![hex::encode([0x11u8; 32])],
+            ids: vec![[0x11u8; 32]],
         }))
         .await,
     );
-    mark!("groups", &a.call(Request::Groups).await);
+    mark!("groups", &a.call(Request::Groups(NoArgs {})).await);
     mark!(
         "group",
         &a.call(Request::Group(GroupRequest {
@@ -435,19 +438,17 @@ async fn full_flow() {
         a.send_chat(&mut relay, &group, &format!("m{i}")).await;
     }
     let route = b.route_hex(&group).await;
-    let mut received = BTreeSet::new();
-    for _ in 0..8 {
-        let backlog = group_events(&relay, &route);
-        let events = b.ingest_and_drain(backlog).await;
-        received.extend(events.iter().filter_map(|event| match event {
-            SessionEvent::MessageReceived { message, .. } => Some(message.content.clone()),
-            _ => None,
-        }));
-        let response = b.call(Request::Tick).await;
-        assert!(matches!(response, Response::Ok { .. }), "tick");
-        b.advance(2_000);
-        b.publish(&mut relay).await;
-    }
+    // One ingest delivers the whole backlog: `drain_events` is not
+    // budgeted and the ingest already settles every deferred peel (the
+    // deterministic `until_settled` form), so a single ingest + tick
+    // suffices — verified: all 500 messages arrive in the first drain.
+    let backlog = group_events(&relay, &route);
+    let events = b.ingest_and_drain(backlog).await;
+    let received = received_messages(&events);
+    let response = b.call(Request::Tick(NoArgs {})).await;
+    assert!(matches!(response, Response::Ok { .. }), "tick");
+    b.advance(2_000);
+    b.publish(&mut relay).await;
     assert_eq!(received.len(), 500, "B delivered every message");
     assert!(received.contains("m0") && received.contains("m499"));
 
@@ -479,7 +480,7 @@ async fn full_flow() {
     let response = a
         .call(Request::RemoveMembers(RemoveMembersRequest {
             group: group.clone(),
-            members: vec![c.account_hex()],
+            members: vec![c.signer.account().0],
         }))
         .await;
     assert!(matches!(response, Response::Ok { .. }), "remove c");
@@ -507,7 +508,7 @@ async fn full_flow() {
         "all-unavailable verdicts stay pending: {failed:?}"
     );
     relay.down = false;
-    let response = a.call(Request::Tick).await;
+    let response = a.call(Request::Tick(NoArgs {})).await;
     assert!(matches!(response, Response::Ok { .. }), "tick");
     let retried = a.publish(&mut relay).await;
     assert!(
@@ -638,7 +639,7 @@ async fn durability_gate() {
         }))
         .await;
     assert!(matches!(response, Response::Ok { .. }));
-    let Response::Ok { result } = a.call(Request::TakeOutbound).await else {
+    let Response::Ok { result } = a.call(Request::TakeOutbound(NoArgs {})).await else {
         panic!()
     };
     let OpResult::Outbound(OutboundResult { items }) = *result else {
@@ -666,7 +667,7 @@ async fn durability_gate() {
         .call(Request::AckDurable(AckDurableRequest { seq: last }))
         .await;
     assert!(matches!(response, Response::Ok { .. }));
-    let Response::Ok { result } = a.call(Request::TakeOutbound).await else {
+    let Response::Ok { result } = a.call(Request::TakeOutbound(NoArgs {})).await else {
         panic!()
     };
     let OpResult::Outbound(OutboundResult { items }) = *result else {
@@ -727,7 +728,7 @@ async fn durability_gate() {
     assert!(matches!(response, Response::Ok { .. }), "op completes");
     // The deferred ack released the pre-suspension send; the op's own
     // batch was committed at completion and still waits on its own ack.
-    let Response::Ok { result } = a.call(Request::TakeOutbound).await else {
+    let Response::Ok { result } = a.call(Request::TakeOutbound(NoArgs {})).await else {
         panic!()
     };
     let OpResult::Outbound(OutboundResult { items }) = *result else {
@@ -745,7 +746,7 @@ async fn durability_gate() {
             .any(|item| item.purpose == OutboundPurpose::KeyPackage),
         "the op's own batch still waits on its own ack"
     );
-    let response = a.call(Request::AwaitingDurability).await;
+    let response = a.call(Request::AwaitingDurability(NoArgs {})).await;
     let Response::Ok { result } = response else {
         panic!()
     };
@@ -754,7 +755,7 @@ async fn durability_gate() {
     };
     let response = a.call(Request::AckDurable(AckDurableRequest { seq })).await;
     assert!(matches!(response, Response::Ok { .. }));
-    let Response::Ok { result } = a.call(Request::TakeOutbound).await else {
+    let Response::Ok { result } = a.call(Request::TakeOutbound(NoArgs {})).await else {
         panic!()
     };
     let OpResult::Outbound(OutboundResult { items }) = *result else {
@@ -923,7 +924,7 @@ async fn protocol_errors() {
         matches!(opened, OpenResponse::NeedsAccountProof { .. }),
         "fresh open needs proof: {opened:?}"
     );
-    let response = member.call_once(Request::Groups);
+    let response = member.call_once(Request::Groups(NoArgs {}));
     assert_eq!(error_kind(&response), "awaiting_proof");
 
     // Reopening a live bridge is refused.
@@ -937,6 +938,9 @@ async fn protocol_errors() {
     // failures, not lifecycle errors.
     let mut busy = Member::new();
     busy.open().await;
+    // Unknown fields are refused on argument-less requests too.
+    let response = busy.call_bytes(&raw_call(now(&busy), json!({"type": "groups", "extra": 1})));
+    assert_eq!(error_kind(&response), "invalid_request");
     let response = busy.call_bytes(&raw_call(
         now(&busy),
         json!({"type": "ack_durable", "seq": "0", "extra": 1}),
@@ -956,7 +960,7 @@ async fn protocol_errors() {
         matches!(response, Response::SignerPending { .. }),
         "publish_key_package suspends"
     );
-    let response = busy.call_once(Request::Groups);
+    let response = busy.call_once(Request::Groups(NoArgs {}));
     assert_eq!(error_kind(&response), "busy");
 
     // Clock regression on the suspended member: `now` older than the last
@@ -972,7 +976,7 @@ async fn protocol_errors() {
 
     // A suspended bridge closes directly.
     busy.bridge.close();
-    let response = busy.call_once(Request::Groups);
+    let response = busy.call_once(Request::Groups(NoArgs {}));
     assert_eq!(error_kind(&response), "closed");
 
     // Poisoned: a host commit failure kills the bridge for good.
@@ -991,116 +995,281 @@ async fn protocol_errors() {
         matches!(response, Response::Error { .. }),
         "commit failure produces an error: {response:?}"
     );
-    let response = broken.call_once(Request::Groups);
+    let response = broken.call_once(Request::Groups(NoArgs {}));
     assert_eq!(error_kind(&response), "poisoned");
     let opened = broken.open_bytes(&fresh_config);
     assert_eq!(open_error_kind(&opened), "already_open");
 }
 
-/// Crash consistency: unacked batches never release outbound; torn writes
-/// reopen consistently; a mid-ingest commit failure converges after
-/// re-ingest.
+/// One scripted step of the commit/ack crash scenario: `create` a group
+/// inviting B, then `send` three messages, `publish`ing after each step.
+enum Step {
+    Create,
+    Publish,
+    Send(usize),
+}
+
+/// What one scenario replay recorded.
+struct ScenarioRun {
+    /// Whether each executed step finished without an error response
+    /// (steps after the first failure never ran).
+    step_ok: Vec<bool>,
+    /// Outbound ids (hex) staged by each `send` that returned `Staged`.
+    staged: Vec<Vec<String>>,
+    /// The created group id, once `create` succeeded.
+    group: Vec<u8>,
+    /// `host.committed()` when the run stopped.
+    total_commits: usize,
+}
+
+/// Replay the scenario, stopping at the first failed step (or, when
+/// `stop_after_commits` is set, as soon as that commit index is
+/// persisted). `accepted` collects every event id that reached a
+/// terminal-accept resolution — inserting the same id twice means a
+/// finished publish was duplicated.
+async fn run_scenario(
+    a: &mut Member,
+    b_key_package: &Event,
+    relay: &mut FakeRelay,
+    accepted: &mut BTreeSet<[u8; 32]>,
+    publish_steps: bool,
+    stop_after_commits: Option<usize>,
+) -> ScenarioRun {
+    const STEPS: [Step; 8] = [
+        Step::Create,
+        Step::Publish,
+        Step::Send(0),
+        Step::Publish,
+        Step::Send(1),
+        Step::Publish,
+        Step::Send(2),
+        Step::Publish,
+    ];
+    let mut run = ScenarioRun {
+        step_ok: Vec::new(),
+        staged: Vec::new(),
+        group: Vec::new(),
+        total_commits: 0,
+    };
+    for step in &STEPS {
+        let ok = match step {
+            Step::Create => {
+                let response = a
+                    .call(Request::CreateGroup(CreateGroupRequest {
+                        name: "crash".to_owned(),
+                        description: String::new(),
+                        relays: vec![RELAY.to_owned()],
+                        invitees: vec![Invitee {
+                            key_package: b_key_package.clone(),
+                            inbox_relays: vec![RELAY.to_owned()],
+                        }],
+                        admins: Vec::new(),
+                        components: Vec::new(),
+                    }))
+                    .await;
+                match response {
+                    Response::Ok { result } => match *result {
+                        OpResult::GroupCreated(created) => {
+                            run.group.clone_from(&created.group.id);
+                            true
+                        }
+                        _ => false,
+                    },
+                    _ => false,
+                }
+            }
+            Step::Send(i) => {
+                a.advance(1_000);
+                let response = a
+                    .call(Request::SendMessage(SendMessageRequest {
+                        group: run.group.clone(),
+                        message: AppMessage {
+                            kind: 9,
+                            tags: Vec::new(),
+                            content: format!("m{i}"),
+                        },
+                    }))
+                    .await;
+                match response {
+                    Response::Ok { result } => {
+                        if let OpResult::SendOutcome(SendOutcomeResult {
+                            outcome: SendOutcome::Staged { ids },
+                        }) = *result
+                        {
+                            run.staged.push(ids);
+                        }
+                        true
+                    }
+                    _ => false,
+                }
+            }
+            Step::Publish => {
+                if publish_steps {
+                    let (done, clean) = a.try_publish(relay).await;
+                    record_accepts(&done, accepted);
+                    clean
+                } else {
+                    true
+                }
+            }
+        };
+        run.step_ok.push(ok);
+        run.total_commits = a.host.committed();
+        if !ok || stop_after_commits.is_some_and(|n| run.total_commits > n) {
+            break;
+        }
+    }
+    run
+}
+
+/// Every terminally accepted event id must be new — a second accept for
+/// the same event means a finished publish was handed out again.
+fn record_accepts(done: &[(Outbound, PublishResolution)], accepted: &mut BTreeSet<[u8; 32]>) {
+    for (item, resolution) in done {
+        if matches!(
+            resolution,
+            PublishResolution::Confirmed | PublishResolution::Complete
+        ) {
+            assert!(
+                accepted.insert(item.event.id),
+                "event accepted twice: {}",
+                hex::encode(item.event.id)
+            );
+        }
+    }
+}
+
+/// Crash consistency, as a fault-injection matrix over durable commits.
+///
+/// a) Commit/ack: A creates a group inviting B, sends three messages,
+///    publishing as it goes. For every commit index the scenario produces:
+///    (drop) make that commit fail — the bridge poisons and the op dies —
+///    then reopen and finish the publish loop; and (torn) persist the
+///    batch but crash before its ack — replay ops without publishing so
+///    nothing is ever acked, stop once the batch exists, then reopen and
+///    publish. Either way the reopen must be `ready`, committed sends
+///    must be released or already published, and no event may be
+///    terminally accepted twice.
+/// b) Mid-ingest: for every (sampled) commit index of a 50-event ingest,
+///    fail the commit, reopen from the pre-ingest rows, re-ingest, and
+///    converge to the uncrashed receiver's snapshot and message set.
 #[tokio::test(flavor = "current_thread")]
 async fn crash_consistency() {
-    let mut relay = FakeRelay::new();
-    let mut a = Member::new();
-    a.open().await;
-    a.publish_identity(&mut relay).await;
-    let response = a
-        .call(Request::CreateGroup(CreateGroupRequest {
-            name: "crash".to_owned(),
-            description: String::new(),
-            relays: vec![RELAY.to_owned()],
-            invitees: Vec::new(),
-            admins: Vec::new(),
-            components: Vec::new(),
-        }))
-        .await;
-    let OpResult::GroupCreated(created) = ok_result(response) else {
-        panic!()
-    };
-    let group = created.group.id.clone();
-    a.publish(&mut relay).await;
-    let published_before = relay.publishes.len();
-    let acked_commits = a.host.committed();
+    // ---- a) commit/ack matrix over create + three sends ----
 
-    // Stage a send, then "crash" before acking: drop the bridge mid-flight.
-    a.advance(1_000);
-    let response = a
-        .call(Request::SendMessage(SendMessageRequest {
-            group: group.clone(),
-            message: AppMessage {
-                kind: 9,
-                tags: Vec::new(),
-                content: "unacked".to_owned(),
-            },
-        }))
-        .await;
-    assert!(matches!(response, Response::Ok { .. }));
-    a.bridge = Bridge::new(a.host.clone());
-    let opened = a.open().await;
-    assert!(matches!(opened, OpenResponse::Ready { .. }));
-    // Its batch was committed before the crash, so the host persisted it:
-    // a reopen loads it from durable rows and the gate releases it (no
-    // in-flight gate record survives a restart).
-    let Response::Ok { result } = a.call(Request::TakeOutbound).await else {
-        panic!()
-    };
-    let OpResult::Outbound(OutboundResult { items }) = *result else {
-        panic!()
-    };
-    assert_eq!(
-        items.len(),
-        1,
-        "committed send is releasable after reopen: {items:?}"
-    );
-
-    // Reopen from acked-only rows: the unacked write never existed.
-    a.bridge = Bridge::new(a.host.clone());
-    a.host.load_prefix(Some(acked_commits));
-    let opened = a.open().await;
-    a.host.load_prefix(None);
-    assert!(matches!(opened, OpenResponse::Ready { .. }));
-    let Response::Ok { result } = a.call(Request::TakeOutbound).await else {
-        panic!()
-    };
-    let OpResult::Outbound(OutboundResult { items }) = *result else {
-        panic!()
+    // A quiet baseline run counts the scenario's commit stream.
+    let (setup_commits, total_commits) = {
+        let mut relay = FakeRelay::new();
+        let mut a = Member::new();
+        let mut b = Member::new();
+        a.open().await;
+        b.open().await;
+        a.publish_identity(&mut relay).await;
+        b.publish_identity(&mut relay).await;
+        let setup = a.host.committed();
+        let key_package = key_package_of(&relay, &b.account_hex());
+        let mut accepted = BTreeSet::new();
+        let run = run_scenario(&mut a, &key_package, &mut relay, &mut accepted, true, None).await;
+        assert_eq!(run.step_ok, [true; 8], "baseline scenario completes");
+        (setup, run.total_commits)
     };
     assert!(
-        items.is_empty(),
-        "torn write: nothing published for lost batches"
-    );
-    assert_eq!(
-        relay.publishes.len(),
-        published_before,
-        "nothing published before its gating batch was acked"
+        total_commits > setup_commits,
+        "scenario produced commits {setup_commits}..{total_commits}"
     );
 
-    // Ack before publish, then crash: the item is released again and the
-    // publish completes once accepted.
-    let mut b = Member::new();
-    b.open().await;
-    b.publish_identity(&mut relay).await;
-    let response = b
-        .call(Request::PublishKeyPackage(PublishKeyPackageRequest {
-            relays: vec![RELAY.to_owned()],
-        }))
-        .await;
-    assert!(matches!(response, Response::Ok { .. }));
-    b.ack_all().await;
-    b.bridge = Bridge::new(b.host.clone());
-    let opened = b.open().await;
-    assert!(matches!(opened, OpenResponse::Ready { .. }));
-    let resolutions = b.publish(&mut relay).await;
-    assert!(
-        resolutions
+    for cut in setup_commits..total_commits {
+        // Drop variant: commit index `cut` fails; the op dies mid-flight.
+        let mut relay = FakeRelay::new();
+        let mut a = Member::new();
+        let mut b = Member::new();
+        a.open().await;
+        b.open().await;
+        a.publish_identity(&mut relay).await;
+        b.publish_identity(&mut relay).await;
+        let key_package = key_package_of(&relay, &b.account_hex());
+        let mut accepted = BTreeSet::new();
+        a.host.fail_after(cut);
+        let run = run_scenario(&mut a, &key_package, &mut relay, &mut accepted, true, None).await;
+        a.host.fail_after(usize::MAX);
+        a.restart().await;
+        // Regenerate queued intents, then finish every releasable item.
+        let response = a.call(Request::Tick(NoArgs {})).await;
+        assert!(matches!(response, Response::Ok { .. }), "drop {cut}: tick");
+        let (done, clean) = a.try_publish(&mut relay).await;
+        assert!(clean, "drop {cut}: post-reopen publish must finish");
+        record_accepts(&done, &mut accepted);
+        // A completed create is durable state: the group survives reopen.
+        if run.step_ok.first() == Some(&true) {
+            let response = a.call(Request::Groups(NoArgs {})).await;
+            let OpResult::Groups(GroupsResult { groups }) = ok_result(response) else {
+                panic!("drop {cut}: groups")
+            };
+            assert!(
+                groups.iter().any(|snapshot| snapshot.id == run.group),
+                "drop {cut}: committed create lost"
+            );
+        }
+        // Every send whose call finished had its batch committed; each
+        // staged outbound is either already published or must release now.
+        let published: BTreeSet<[u8; 32]> = relay
+            .publishes
             .iter()
-            .any(|(_, resolution)| !matches!(resolution, PublishResolution::Pending)),
-        "re-released outbound resolves once accepted"
-    );
+            .map(|published| published.item.id)
+            .collect();
+        for ids in &run.staged {
+            for id in ids {
+                assert!(
+                    published.contains(&hex_to_32(id)),
+                    "drop {cut}: staged outbound {id} never published"
+                );
+            }
+        }
 
-    // Mid-ingest commit failure: poison, reopen, re-ingest, converge.
+        // Torn variant: batch `cut` persisted but never acked — ops run
+        // without any publish (nothing is ever acked), stop once the
+        // batch exists, then reopen with it included.
+        let mut relay = FakeRelay::new();
+        let mut a = Member::new();
+        let mut b = Member::new();
+        a.open().await;
+        b.open().await;
+        a.publish_identity(&mut relay).await;
+        b.publish_identity(&mut relay).await;
+        let key_package = key_package_of(&relay, &b.account_hex());
+        let mut accepted = BTreeSet::new();
+        let run = run_scenario(
+            &mut a,
+            &key_package,
+            &mut relay,
+            &mut accepted,
+            false,
+            Some(cut),
+        )
+        .await;
+        a.restart().await;
+        let response = a.call(Request::Tick(NoArgs {})).await;
+        assert!(matches!(response, Response::Ok { .. }), "torn {cut}: tick");
+        let (done, clean) = a.try_publish(&mut relay).await;
+        assert!(clean, "torn {cut}: post-reopen publish must finish");
+        record_accepts(&done, &mut accepted);
+        let published: BTreeSet<[u8; 32]> = relay
+            .publishes
+            .iter()
+            .map(|published| published.item.id)
+            .collect();
+        for ids in &run.staged {
+            for id in ids {
+                assert!(
+                    published.contains(&hex_to_32(id)),
+                    "torn {cut}: unacked staged outbound {id} never published"
+                );
+            }
+        }
+    }
+
+    // ---- b) mid-ingest commit-failure matrix ----
+    let mut relay = FakeRelay::new();
     let mut sender = Member::new();
     let mut clean = Member::new();
     let mut crashed = Member::new();
@@ -1157,29 +1326,66 @@ async fn crash_consistency() {
     let route = sender.route_hex(&group).await;
     let backlog = group_events(&relay, &route);
 
-    clean.ingest_and_drain(backlog.clone()).await;
-    clean.sync(&mut relay, &group).await;
-
-    crashed.host.fail_after(crashed.host.committed() + 1);
-    let response = crashed
+    // Count the ingest's own commits on the clean receiver —
+    // `acknowledge_messages` would inflate the index space the matrix
+    // cuts through.
+    let clean_commits_before = clean.host.committed();
+    let response = clean
         .call(Request::Ingest(IngestRequest {
             events: backlog.clone(),
         }))
         .await;
-    assert!(
-        matches!(response, Response::Error { .. }),
-        "mid-ingest commit failure surfaces"
-    );
-    crashed.host.fail_after(usize::MAX);
-    crashed.bridge = Bridge::new(crashed.host.clone());
-    let opened = crashed.open().await;
-    assert!(matches!(opened, OpenResponse::Ready { .. }));
-    crashed.ingest_and_drain(backlog).await;
-    crashed.sync(&mut relay, &group).await;
-
+    assert!(matches!(response, Response::Ok { .. }), "clean ingest");
+    let ingest_commits = clean.host.committed() - clean_commits_before;
+    let clean_events = clean.drain_and_ack().await;
+    clean.sync(&mut relay, &group).await;
     let clean_snapshot = group_snapshot(&mut clean, &group).await;
-    let crashed_snapshot = group_snapshot(&mut crashed, &group).await;
-    assert_eq!(clean_snapshot, crashed_snapshot, "re-ingest converges");
+    let clean_messages = received_messages(&clean_events);
+
+    let baseline = crashed.host.committed();
+    let stride = ingest_commits.div_ceil(40).max(1);
+    let mut cuts: Vec<usize> = (0..ingest_commits).step_by(stride).collect();
+    if ingest_commits > 0 && cuts.last() != Some(&(ingest_commits - 1)) {
+        cuts.push(ingest_commits - 1);
+    }
+    for cut in cuts {
+        // Roll durable state back to the pre-ingest snapshot, then fail
+        // the `cut`-th commit of this incarnation's ingest. `truncate`
+        // discards the tail permanently — a rolled-back store.
+        crashed.host.truncate(baseline);
+        crashed.bridge = Bridge::new(crashed.host.clone());
+        crashed.acked = 0;
+        let opened = crashed.open().await;
+        assert!(matches!(opened, OpenResponse::Ready { .. }), "reopen ready");
+        let position = crashed.host.committed();
+        crashed.host.fail_after(position + cut);
+        let response = crashed
+            .call(Request::Ingest(IngestRequest {
+                events: backlog.clone(),
+            }))
+            .await;
+        assert!(
+            matches!(response, Response::Error { .. }),
+            "ingest cut {cut} must poison the bridge"
+        );
+        crashed.host.fail_after(usize::MAX);
+        crashed.bridge = Bridge::new(crashed.host.clone());
+        crashed.acked = 0;
+        let opened = crashed.open().await;
+        assert!(matches!(opened, OpenResponse::Ready { .. }), "reopen ready");
+        let events = crashed.ingest_and_drain(backlog.clone()).await;
+        crashed.sync(&mut relay, &group).await;
+        assert_eq!(
+            group_snapshot(&mut crashed, &group).await,
+            clean_snapshot,
+            "ingest cut {cut}: snapshot converges"
+        );
+        assert_eq!(
+            received_messages(&events),
+            clean_messages,
+            "ingest cut {cut}: message set converges"
+        );
+    }
 }
 
 /// Every vector file entry runs through `open`/`call` without panicking —
@@ -1220,6 +1426,17 @@ async fn vectors_and_fuzz_seeds_never_panic() {
     let mut second = Member::new();
     let config = std::fs::read(dir.join("config.json")).expect("config");
     second.open_bytes(&config);
+}
+
+/// The received-message contents of a drained event list, as a set.
+fn received_messages(events: &[SessionEvent]) -> BTreeSet<String> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            SessionEvent::MessageReceived { message, .. } => Some(message.content.clone()),
+            _ => None,
+        })
+        .collect()
 }
 
 async fn group_snapshot(member: &mut Member, group: &[u8]) -> Value {
