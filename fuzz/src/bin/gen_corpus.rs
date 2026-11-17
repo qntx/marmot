@@ -141,4 +141,50 @@ async fn main() {
     {
         write(&corpus, "stream_anchor", "policy-0x8006", &component.data);
     }
+
+    // bridge_request: every `Request` variant wrapped in a call envelope,
+    // plus the canonical `call` vector.
+    let vectors = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("vectors")
+        .join("bridge");
+    let requests: serde_json::Map<String, serde_json::Value> = serde_json::from_str(
+        &std::fs::read_to_string(vectors.join("request.json")).expect("request vector"),
+    )
+    .expect("request vector parses");
+    for (variant, request) in &requests {
+        let envelope = serde_json::json!({
+            "now": {"unix_ms": "1700000000000", "monotonic_ms": "0"},
+            "request": request,
+        });
+        write(
+            &corpus,
+            "bridge_request",
+            &format!("request-{variant}"),
+            serde_json::to_string(&envelope)
+                .expect("envelope encodes")
+                .as_bytes(),
+        );
+    }
+    write(
+        &corpus,
+        "bridge_request",
+        "call",
+        &std::fs::read(vectors.join("call.json")).expect("call vector"),
+    );
+
+    // bridge_config: the canonical config, plus a real encoded durable-row
+    // set as `Host::load` input.
+    write(
+        &corpus,
+        "bridge_config",
+        "config",
+        &std::fs::read(vectors.join("config.json")).expect("config vector"),
+    );
+    write(
+        &corpus,
+        "bridge_config",
+        "rows-0",
+        &mk_bridge::encode_rows(&rows),
+    );
 }
