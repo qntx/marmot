@@ -97,6 +97,13 @@ pub(crate) enum Table {
     /// `group/transport_id` — the only custody of the key material
     /// `open_attachment` needs after the source epoch is pruned.
     MediaSecret = 36,
+    /// `cgka_committed_rosters` + `cgka_committed_roster_members`: each
+    /// group's committed roster — revision and normalized member list in one
+    /// value. Outside every snapshot/checkpoint; deleted with the group.
+    CommittedRoster = 37,
+    /// `cgka_committed_roster_revision`: one row — the account-wide roster
+    /// revision counter. Never reset, never deleted, not group-scoped.
+    CommittedRosterRevision = 38,
 }
 
 /// Meta row keys inside [`Table::Meta`].

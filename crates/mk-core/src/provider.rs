@@ -1,6 +1,6 @@
 //! `KvStorageProvider`: the Marmot storage traits over the KV store.
 //!
-//! Every method mirrors `storage-sqlite` v0.16.0 semantics: insertion-order
+//! Every method mirrors `storage-sqlite` v0.17.0 semantics: insertion-order
 //! listings, upsert-keeps-position, `INSERT OR IGNORE`/`ON CONFLICT DO UPDATE`
 //! idempotency, `SnapshotMissing`/`NotFound`/`AlreadyExists` error classes,
 //! the 4,096 ingress-dedup FIFO bound, the outbound-fanout successor guard,
@@ -25,14 +25,15 @@ use cgka_traits::maintenance::{
 use cgka_traits::message::{DeferredMessageMetadata, MessageRecord, MessageState};
 use cgka_traits::storage::{
     AccountDeviceHistoryKey, AccountDeviceHistoryKeyStorage, AccountDeviceSignerBinding,
-    AccountDeviceSignerStorage, CapabilityStorage, ConvergencePassStorage,
-    ConvergencePolicyStorage, DeferredPeelGeneration, DeferredPeelGenerationStorage,
-    DeviceGroupWelcomeExpectation, DeviceGroupWelcomeStorage, DisbandCandidateStorage,
-    DisbandRequestStorage, DisbandTombstoneStorage, GroupStateCheckpointRef, GroupStorage,
-    KeyPackageBundleStorage, LeaveRequestStorage, MaintenanceStorage, MemberValidationCacheStorage,
-    MessageStorage, OpenMlsContentFilter, OutboundFanoutStorage, OutboundIntentStorage,
-    StorageError, StorageProvider, StorageResult, StoredKeyPackageBundle, TransportGroupRoute,
-    WelcomeStorage,
+    AccountDeviceSignerStorage, CapabilityStorage, CommittedMembers, CommittedRoster,
+    CommittedRosterStorage, CommittedRosterWrite, ConvergencePassStorage, ConvergencePolicyStorage,
+    DeferredPeelGeneration, DeferredPeelGenerationStorage, DeviceGroupWelcomeExpectation,
+    DeviceGroupWelcomeStorage, DisbandCandidateStorage, DisbandRequestStorage,
+    DisbandTombstoneStorage, GroupStateCheckpointRef, GroupStorage, KeyPackageBundleStorage,
+    LeaveRequestStorage, MaintenanceStorage, MemberValidationCacheStorage, MessageStorage,
+    MlsStorageError, OpenMlsContentFilter, OutboundFanoutStorage, OutboundIntentStorage,
+    RosterRevision, StorageError, StorageProvider, StorageResult, StoredKeyPackageBundle,
+    TransportGroupRoute, WelcomeStorage,
 };
 use cgka_traits::transport_adapter::OutboundFanout;
 use cgka_traits::types::{Backend, EpochId, GroupId, MemberId, MessageId};
@@ -65,7 +66,7 @@ const OPENMLS_CONTENT_UNCLASSIFIED: i64 = 4;
 /// [`StorageProvider`] plus the `OpenMLS` storage trait (via
 /// [`Self::mls_storage`]).
 ///
-/// `backend()` reports [`Backend::Sqlite`] because MDK v0.16.0's `Backend`
+/// `backend()` reports [`Backend::Sqlite`] because MDK v0.17.0's `Backend`
 /// enum has no generic KV variant — an upstream gap, recorded here rather
 /// than papered over with a wrong answer.
 ///
@@ -161,7 +162,7 @@ const INTERN_CAP: usize = 128;
 const INTERN_LEN_CAP: usize = 1024;
 
 /// Descriptions this crate registers through `register_feature`:
-/// `cgka-engine` v0.16.0's own `FeatureRegistry::new()` is empty — every
+/// `cgka-engine` v0.17.0's own `FeatureRegistry::new()` is empty — every
 /// registration arrives from the app layer — and this crate registers
 /// `SelfRemove` only. Resolution is by content equality; the static is
 /// returned so a known string costs no allocation. Unknown strings intern
@@ -617,17 +618,24 @@ impl GroupStorage for KvStorageProvider {
         )
     }
 
-    /// The `reject_forgotten_group_insert` trigger (migrations
-    /// `0070`/`0071`) aborts any `cgka_groups` insert while the group is
-    /// forgotten and awaiting a fresh Welcome.
-    fn put_group(&self, group: &Group) -> StorageResult<()> {
-        self.store.ensure_writable()?;
-        if self.is_group_forgotten(&group.id)? {
-            return Err(StorageError::Backend(
-                "kv group awaiting fresh welcome".into(),
-            ));
-        }
-        self.put_ser(Table::Group, &[gid_seg(&group.id)], group)
+    /// Joins a caller's `with_transaction` rather than beginning its own
+    /// (sqlite `connection.with_transaction` passthrough): the record write
+    /// and the committed-roster write are one unit, so a failure leaves
+    /// neither.
+    fn put_group_with_roster(
+        &self,
+        group: &Group,
+        committed: &CommittedMembers,
+    ) -> StorageResult<()> {
+        self.store.transact(|| -> StorageResult<()> {
+            self.put_group_record(group)?;
+            self.write_committed_roster(&group.id, committed)?;
+            Ok(())
+        })
+    }
+
+    fn put_group_keeping_roster(&self, group: &Group) -> StorageResult<()> {
+        self.put_group_record(group)
     }
 
     fn get_group(&self, id: &GroupId) -> StorageResult<Group> {
@@ -812,6 +820,130 @@ impl GroupStorage for KvStorageProvider {
     fn delete_transport_group_routes_for_group(&self, group_id: &GroupId) -> StorageResult<()> {
         self.store
             .transact(|| self.delete_transport_routes(group_id, None))
+    }
+}
+
+// CommittedRosterStorage -----------------------------------------------------
+
+/// The `cgka_committed_rosters` + `cgka_committed_roster_members` pair in one
+/// row value: revision and normalized member list together, so a read can
+/// never pair one roster's revision with another's members (the guarantee
+/// sqlite's `committed_roster` takes a `with_deferred_read` snapshot for).
+/// The member list is `CommittedMembers`-normalized (distinct, byte order)
+/// at write, matching `members_on`'s `BTreeSet`.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct RosterRow {
+    revision: u64,
+    members: Vec<MemberId>,
+}
+
+/// The `cgka_committed_roster_revision` counter row's single segment.
+const ROSTER_REVISION_ROW: &[u8] = b"last";
+
+impl CommittedRosterStorage for KvStorageProvider {
+    fn committed_roster(&self, group_id: &GroupId) -> StorageResult<Option<CommittedRoster>> {
+        Ok(self
+            .de_row::<RosterRow>(Table::CommittedRoster, &[gid_seg(group_id)])?
+            .map(|row| CommittedRoster {
+                revision: RosterRevision(row.revision),
+                members: CommittedMembers::from_ids(row.members),
+            }))
+    }
+
+    fn committed_roster_revision(
+        &self,
+        group_id: &GroupId,
+    ) -> StorageResult<Option<RosterRevision>> {
+        Ok(self
+            .de_row::<RosterRow>(Table::CommittedRoster, &[gid_seg(group_id)])?
+            .map(|row| RosterRevision(row.revision)))
+    }
+
+    /// Its own savepoint, like sqlite's `with_savepoint`: inside a caller's
+    /// transaction a refused write undoes its own rows — and the revision it
+    /// consumed — while the caller can still commit.
+    fn put_committed_roster(
+        &self,
+        group_id: &GroupId,
+        members: &CommittedMembers,
+    ) -> StorageResult<CommittedRosterWrite> {
+        self.store
+            .savepoint(|| self.write_committed_roster(group_id, members))
+    }
+}
+
+impl KvStorageProvider {
+    /// The `reject_forgotten_group_insert` trigger (migrations
+    /// `0070`/`0071`) aborts any `cgka_groups` insert while the group is
+    /// forgotten and awaiting a fresh Welcome — sqlite's `put_group_record`.
+    fn put_group_record(&self, group: &Group) -> StorageResult<()> {
+        self.store.ensure_writable()?;
+        if self.is_group_forgotten(&group.id)? {
+            return Err(StorageError::Backend(
+                "kv group awaiting fresh welcome".into(),
+            ));
+        }
+        self.put_ser(Table::Group, &[gid_seg(&group.id)], group)
+    }
+
+    /// `UPDATE cgka_committed_roster_revision SET last = last + 1 RETURNING
+    /// last`: the account-wide counter every revision is drawn from — a
+    /// missing row is the seeded `last = 0`; it is never reset or deleted.
+    fn next_roster_revision(&self) -> StorageResult<RosterRevision> {
+        let last = self
+            .row(Table::CommittedRosterRevision, &[ROSTER_REVISION_ROW])?
+            .map_or(Ok(0), |value| {
+                value
+                    .as_slice()
+                    .try_into()
+                    .map(u64::from_be_bytes)
+                    .map_err(|_| malformed_row())
+            })?;
+        let next = last
+            .checked_add(1)
+            .ok_or_else(|| StorageError::Backend("kv committed-roster revision overflow".into()))?;
+        self.put_row(
+            Table::CommittedRosterRevision,
+            &[ROSTER_REVISION_ROW],
+            next.to_be_bytes().to_vec(),
+        )?;
+        Ok(RosterRevision(next))
+    }
+
+    /// `write_committed_roster` (`committed_rosters.rs`), in the caller's unit:
+    /// writes nothing when the stored members already equal `members`;
+    /// otherwise takes the next account-wide revision and replaces the row.
+    /// The `INSERT INTO cgka_committed_rosters` foreign key makes a missing
+    /// group record refuse the write — after the counter move, exactly as
+    /// sqlite (a savepoint undoes both).
+    fn write_committed_roster(
+        &self,
+        group_id: &GroupId,
+        members: &CommittedMembers,
+    ) -> StorageResult<CommittedRosterWrite> {
+        let previous: Option<RosterRow> =
+            self.de_row(Table::CommittedRoster, &[gid_seg(group_id)])?;
+        if let Some(previous) = &previous
+            && previous.members.as_slice() == members.ids()
+        {
+            return Ok(CommittedRosterWrite::Unchanged(RosterRevision(
+                previous.revision,
+            )));
+        }
+        let revision = self.next_roster_revision()?;
+        self.require_group(group_id)?;
+        self.put_ser(
+            Table::CommittedRoster,
+            &[gid_seg(group_id)],
+            &RosterRow {
+                revision: revision.0,
+                members: members.ids().to_vec(),
+            },
+        )?;
+        Ok(match previous {
+            Some(_) => CommittedRosterWrite::Replaced(revision),
+            None => CommittedRosterWrite::Recorded(revision),
+        })
     }
 }
 
@@ -1004,6 +1136,9 @@ impl KvStorageProvider {
     pub(crate) fn delete_group_tx(&self, id: &GroupId) -> StorageResult<()> {
         let gid = gid_seg(id);
         self.del_row(Table::Group, &[gid])?;
+        // `cgka_committed_rosters` cascades with the group record; the
+        // account-wide revision counter is never deleted.
+        self.del_row(Table::CommittedRoster, &[gid])?;
         self.del_row(Table::InvitationAdmission, &[gid])?;
         self.del_row(Table::ConvergencePolicy, &[gid])?;
         self.del_row(Table::MemberValidation, &[gid])?;
@@ -2272,6 +2407,17 @@ impl StorageProvider for KvStorageProvider {
         &self.mls
     }
 
+    /// `None` when the error is a stored value that did not decode (sqlite's
+    /// `is_undecodable_value`); otherwise the storage failure itself — the
+    /// `Self::Storage(error) => error.clone()` arm of sqlite's
+    /// `storage_failure`.
+    fn mls_storage_failure(&self, error: &MlsStorageError<Self>) -> Option<StorageError> {
+        if crate::mls::is_undecodable(error) {
+            return None;
+        }
+        Some(error.clone())
+    }
+
     fn pending_ref_high_water(&self) -> StorageResult<u64> {
         self.store.pending_high_water()
     }
@@ -2333,6 +2479,13 @@ impl StorageProvider for KvStorageProvider {
         self.store.savepoint(|| f(self))
     }
 
+    /// The overlay savepoint above is a real savepoint: it writes no
+    /// snapshot, and only the outermost commit emits a batch, so a crash
+    /// inside `f` leaves none of `f`'s writes — same as sqlite's `SAVEPOINT`.
+    fn has_atomic_group_savepoints(&self) -> bool {
+        true
+    }
+
     /// Canonical-state-only restore, even from a full image — sqlite's
     /// override delegates to `rollback_group_state_to_snapshot`.
     fn rollback_group_state_keeping_live_records(
@@ -2350,7 +2503,7 @@ impl StorageProvider for KvStorageProvider {
         snapshot::list_with_prefixes(self, prefixes)
     }
 
-    /// MDK v0.16.0's `Backend` enum has no generic KV variant; `Sqlite` is
+    /// MDK v0.17.0's `Backend` enum has no generic KV variant; `Sqlite` is
     /// the only honest answer the enum admits. Upstream gap.
     fn backend(&self) -> Backend {
         Backend::Sqlite

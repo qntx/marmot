@@ -190,7 +190,7 @@ fn indexed_row(index_key: &[u8]) -> StorageResult<(Vec<u8>, Vec<u8>)> {
 /// sqlite's `is_undecodable_value`: a decode failure on either era's
 /// encoding recovers on the queued-proposals path; every other error class
 /// propagates.
-const fn is_undecodable(error: &StorageError) -> bool {
+pub(crate) const fn is_undecodable(error: &StorageError) -> bool {
     matches!(error, StorageError::Serialization(_))
 }
 

@@ -21,7 +21,7 @@ mk-core -> mk-bridge -> mk-wasm -> @qntx/marmot-wasm
   (`indexedDbKv` with an injected row-key-bound cipher + Web Locks), `testing` (`memoryKv`,
   `manualClock`, `fakeRelay`, `runFlow`).
 - `packages/marmot-wasm` — `@qntx/marmot-wasm`: the loader around the
-  release wasm artifact (raw 5,306,013 B, 2,744,734 B gzipped).
+  release wasm artifact (raw 5,321,864 B, 2,749,730 B gzipped).
 
 ## wasm build and tests
 

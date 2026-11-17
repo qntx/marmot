@@ -79,10 +79,10 @@ use cgka_traits::maintenance::{
 };
 use cgka_traits::message::{MessageRecord, MessageState};
 use cgka_traits::storage::{
-    AccountDeviceHistoryKey, AccountDeviceSignerBinding, DeferredPeelGeneration,
-    DeviceGroupWelcomeExpectation, DisbandCandidate, DisbandRequest, DisbandRequestStatus,
-    GroupStateCheckpointRef, LeaveRequest, OwnCommitBaseline, OwnCommitIntent,
-    QueuedOutboundIntent, StorageError, StorageProvider,
+    AccountDeviceHistoryKey, AccountDeviceSignerBinding, CommittedMembers, CommittedRoster,
+    CommittedRosterWrite, DeferredPeelGeneration, DeviceGroupWelcomeExpectation, DisbandCandidate,
+    DisbandRequest, DisbandRequestStatus, GroupStateCheckpointRef, LeaveRequest, OwnCommitBaseline,
+    OwnCommitIntent, QueuedOutboundIntent, RosterRevision, StorageError, StorageProvider,
 };
 use cgka_traits::transport::{Timestamp, TransportEnvelope, TransportMessage, TransportSource};
 use cgka_traits::transport_adapter::{
@@ -139,6 +139,13 @@ fn mid(n: u8) -> MessageId {
 
 fn member(n: u8) -> MemberId {
     MemberId::new(vec![n; 32])
+}
+
+/// A small member set from a seed: empty for low seeds, duplicates folded
+/// away by `CommittedMembers::from_ids`.
+fn members(seed: u8) -> CommittedMembers {
+    const POOL: [u8; 4] = [0, 1, 2, 7];
+    CommittedMembers::from_ids((0..seed % 4).map(|i| member(POOL[usize::from(seed / 4 + i) % 4])))
 }
 
 fn mls_gid(n: u8) -> MlsGroupId {
@@ -505,7 +512,12 @@ impl mls_traits::EpochKey<CURRENT_VERSION> for K {}
 
 #[derive(Debug, Clone)]
 enum Op {
-    PutGroup(u8, u64),
+    PutGroupWithRoster(u8, u64, u8),
+    PutGroupKeepingRoster(u8, u64),
+    PutCommittedRoster(u8, u8),
+    CommittedRoster(u8),
+    CommittedRosterRevision(u8),
+    HasAtomicSavepoints,
     DeleteGroup(u8),
     GetGroup(u8),
     PutMessage(u8, u8, u8, u64),
@@ -590,7 +602,13 @@ enum Op {
 
 fn leaf_strategy() -> impl Strategy<Value = Op> {
     prop_oneof![
-        3 => (0..GROUPS, 0..4u64).prop_map(|(g, e)| Op::PutGroup(g, e)),
+        2 => (0..GROUPS, 0..4u64, 0..16u8)
+            .prop_map(|(g, e, m)| Op::PutGroupWithRoster(g, e, m)),
+        1 => (0..GROUPS, 0..4u64).prop_map(|(g, e)| Op::PutGroupKeepingRoster(g, e)),
+        2 => (0..GROUPS, 0..16u8).prop_map(|(g, m)| Op::PutCommittedRoster(g, m)),
+        1 => (0..GROUPS).prop_map(Op::CommittedRoster),
+        1 => (0..GROUPS).prop_map(Op::CommittedRosterRevision),
+        1 => Just(Op::HasAtomicSavepoints),
         1 => (0..GROUPS).prop_map(Op::DeleteGroup),
         1 => (0..GROUPS).prop_map(Op::GetGroup),
         4 => (0..MESSAGES, 0..GROUPS, 0..7u8, 0..4u64).prop_map(|(m, g, s, e)| {
@@ -742,6 +760,9 @@ enum Outcome {
     Group(Result<Group, String>),
     Message(Result<MessageRecord, String>),
     Welcome(Result<PendingWelcome, String>),
+    Roster(Result<Option<CommittedRoster>, String>),
+    RosterRevision(Result<Option<RosterRevision>, String>),
+    RosterWrite(Result<CommittedRosterWrite, String>),
     Bool(Result<bool, String>),
 }
 
@@ -832,7 +853,21 @@ where
     S::Mls: MlsStorage<CURRENT_VERSION>,
 {
     match op {
-        Op::PutGroup(g, e) => unit(p.put_group(&group(*g, *e))),
+        Op::PutGroupWithRoster(g, e, m) => {
+            unit(p.put_group_with_roster(&group(*g, *e), &members(*m)))
+        }
+        Op::PutGroupKeepingRoster(g, e) => unit(p.put_group_keeping_roster(&group(*g, *e))),
+        Op::PutCommittedRoster(g, m) => Outcome::RosterWrite(
+            p.put_committed_roster(&gid(*g), &members(*m))
+                .map_err(|e| kind(&e)),
+        ),
+        Op::CommittedRoster(g) => {
+            Outcome::Roster(p.committed_roster(&gid(*g)).map_err(|e| kind(&e)))
+        }
+        Op::CommittedRosterRevision(g) => {
+            Outcome::RosterRevision(p.committed_roster_revision(&gid(*g)).map_err(|e| kind(&e)))
+        }
+        Op::HasAtomicSavepoints => Outcome::Bool(Ok(p.has_atomic_group_savepoints())),
         Op::DeleteGroup(g) => unit(p.delete_group(&gid(*g))),
         Op::GetGroup(g) => Outcome::Group(p.get_group(&gid(*g)).map_err(|e| kind(&e))),
         Op::PutMessage(m, g, s, e) => unit(p.put_message(&record(*m, *g, state_of(*s), *e))),
@@ -1157,6 +1192,12 @@ where
         put(
             &format!("expectation-{g}"),
             p.device_group_welcome_expectation(&id)
+                .map(|v| format!("{v:?}"))
+                .map_err(|e| kind(&e)),
+        );
+        put(
+            &format!("roster-{g}"),
+            p.committed_roster(&id)
                 .map(|v| format!("{v:?}"))
                 .map_err(|e| kind(&e)),
         );

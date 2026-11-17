@@ -113,7 +113,7 @@ fn provider_with_group() -> (KvStorageProvider, Arc<TestHost>, GroupId, MlsGroup
     let mls_id = MlsGroupId::from_slice(b"regression-group-id");
     let gid = GroupId::new(mls_id.as_slice().to_vec());
     provider
-        .put_group(&Group {
+        .put_group_keeping_roster(&Group {
             id: gid.clone(),
             name: "regression".into(),
             description: String::new(),

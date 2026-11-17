@@ -65,7 +65,9 @@ pub enum RelayStatus {
     /// rejection). Maps to a terminal no-exposure failure on the fanout.
     Rejected,
     /// The relay could not be reached or did not answer (timeout, offline).
-    /// The target stays retryable; the event is not assumed exposed.
+    /// The target stays retryable, but the event may have left: it counts
+    /// as possible exposure, so a pending MLS commit is not rolled back
+    /// after it (mdk#2332).
     Unavailable,
     /// The outcome is ambiguous (connection died mid-write, unknown response
     /// shape). The event may have been exposed: the fanout records possible

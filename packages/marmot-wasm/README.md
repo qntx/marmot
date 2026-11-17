@@ -17,7 +17,7 @@ every handle returns the encoded `{"type":"error","error":{"kind":"poisoned"}}`
 envelope.
 
 The shipped release build (`opt-level = "z"` + `wasm-opt -Oz`) measured
-5,306,013 bytes raw and 2,744,734 bytes gzipped (gzip -9, 2026-02);
+5,321,864 bytes raw and 2,749,730 bytes gzipped (gzip -9, 2026-11);
 `check:size` enforces the 3,000,000-byte gzip gate and asserts the release
 artifact does not export the `test-panic` feature's `triggerPanic`.
 
