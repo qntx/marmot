@@ -16,6 +16,7 @@ const PAGE = `<!doctype html>
 const paths: Record<string, { file: string; type: string }> = {
   "/harness.js": { file: `${root}dist/harness.js`, type: "text/javascript" },
   "/harness.js.map": { file: `${root}dist/harness.js.map`, type: "application/json" },
+  "/marmot.mjs": { file: `${root}dist/marmot.mjs`, type: "text/javascript" },
   "/marmot_wasm_bg.wasm": {
     file: `${root}../dist/marmot_wasm_bg.wasm`,
     type: "application/wasm",

@@ -7,7 +7,6 @@
  * injected by `page.exposeFunction`.
  */
 
-import { load } from "@qntx/marmot-wasm";
 import { Engine, decodeKvBatch } from "@qntx/marmot/backend";
 import type { Backend } from "@qntx/marmot/backend";
 import { indexedDbKv, webLocks } from "@qntx/marmot/storage";
@@ -15,8 +14,26 @@ import type { Cipher, IdbFactoryLike, KvDriver, LockManagerLike } from "@qntx/ma
 import { fakeRelay, manualClock, memoryKv, runFlow } from "@qntx/marmot/testing";
 import type { FakeRelay } from "@qntx/marmot/testing";
 
+/**
+ * The packed loader+glue, reached at runtime as `/marmot.mjs` (served from the `dist/` bundle
+ * `e2e/build.ts` emits). The glue and the `.wasm` are a build-matched pair — wasm-bindgen shim
+ * names are build-local — so the bundle must execute the shipped glue, not the committed source
+ * copy. The runtime import keeps lint and typecheck independent of `dist/`.
+ */
+import type { load } from "../../src/index.ts";
 import { testSigner } from "../../tests/signer.ts";
 import type { Harness } from "../types.ts";
+
+type MarmotWasmModule = { load: typeof load };
+
+let loader: Promise<MarmotWasmModule> | undefined;
+async function wasmModule(): Promise<MarmotWasmModule> {
+  const { href } = new URL("marmot.mjs", location.href);
+  loader ??=
+    // oxlint-disable-next-line no-unsafe-type-assertion -- the served module is packed src/index.ts
+    import(href) as Promise<MarmotWasmModule>;
+  return loader;
+}
 
 const RELAY = "wss://relay.example";
 const STORE = "rows";
@@ -228,7 +245,8 @@ const api: Harness = {
     const response = await fetch("/marmot_wasm_bg.wasm");
     const bytes = new Uint8Array(await response.arrayBuffer());
     const t1 = performance.now();
-    backend = await load(bytes);
+    const module_ = await wasmModule();
+    backend = await module_.load(bytes);
     const t2 = performance.now();
     return { fetchMs: t1 - t0, instantiateMs: t2 - t1 };
   },
