@@ -102,6 +102,7 @@ export class Engine {
   private failed: BridgeError | undefined = undefined;
   private queue: Promise<void> = Promise.resolve();
   private readonly pendingCommits = new Set<Promise<void>>();
+  private deferredAcks: bigint[] | undefined = undefined;
 
   private constructor(options: EngineOptions) {
     this.backend = options.backend;
@@ -144,20 +145,30 @@ export class Engine {
       throw new BridgeError(response.error);
     }
     this.handle = handle;
-    if (response.type === "needs_account_proof") {
-      try {
+    // The bridge rejects `ack_durable` while `awaiting_proof`, but `open` already emitted
+    // durable batches: defer their acks and flush them once `submit_proof` makes it ready.
+    const deferred: bigint[] = [];
+    this.deferredAcks = deferred;
+    try {
+      if (response.type === "needs_account_proof") {
         const signed = await this.signer.signEvent(response.unsigned);
         const result = await this.runOp({ type: "submit_proof", event: signed });
         if (result.type !== "ready") {
           throw UNEXPECTED_RESULT();
         }
-      } catch (error) {
-        if (this.handle === handle) {
-          this.handle = undefined;
-          handle.close();
-        }
-        throw error;
       }
+      this.deferredAcks = undefined;
+      for (const seq of deferred) {
+        this.ack(seq);
+      }
+    } catch (error) {
+      if (this.handle === handle) {
+        this.handle = undefined;
+        handle.close();
+      }
+      throw error;
+    } finally {
+      this.deferredAcks = undefined;
     }
   }
 
@@ -203,6 +214,10 @@ export class Engine {
    */
   private ack(seq: bigint): void {
     if (this.failed !== undefined) {
+      return;
+    }
+    if (this.deferredAcks !== undefined) {
+      this.deferredAcks.push(seq);
       return;
     }
     const { handle } = this;
