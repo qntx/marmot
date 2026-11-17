@@ -12,6 +12,7 @@
 
 import { Engine } from "../backend/engine.ts";
 import type { Signer } from "../backend/engine.ts";
+import { BridgeError } from "../backend/errors.ts";
 import type { Backend } from "../backend/port.ts";
 import type {
   NostrEvent,
@@ -203,18 +204,43 @@ export async function runFlow(env: FlowEnv): Promise<FlowTimings> {
   // ---- send N: A messages B, publishing as it goes ----
   for (let i = 0; i < env.messages; i += 1) {
     a.clock.advance(1000);
-    // oxlint-disable-next-line no-await-in-loop -- the flow is sequential by design
-    await a.engine.sendMessage(group.id, { kind: 9, tags: [], content: `m${i}` });
+    // `group_busy` is a legitimate transient verdict while the engine settles
+    // convergence or maintenance work; a host settles and retries the send.
+    for (let attempt = 0; attempt < 64; attempt += 1) {
+      try {
+        // oxlint-disable-next-line no-await-in-loop -- the flow is sequential by design
+        await a.engine.sendMessage(group.id, { kind: 9, tags: [], content: `m${i}` });
+        break;
+      } catch (error) {
+        if (attempt === 63 || !(error instanceof BridgeError) || error.kind !== "group_busy") {
+          throw error;
+        }
+        // oxlint-disable-next-line no-await-in-loop -- the flow is sequential by design
+        await sync(a, relay, group.id);
+      }
+    }
     // oxlint-disable-next-line no-await-in-loop -- the flow is sequential by design
     await publish(a, relay);
   }
   stamp("send");
 
-  // ---- ingest N: one ingest delivers the whole backlog, in order ----
+  // ---- ingest N: one ingest call feeds the whole backlog; delivery drains in order ----
+  // The engine bounds deferred peels by a real-time foreground budget, so a
+  // slower runtime completes the drain over tick rounds — collect to quiescent.
   const route = await routeHex(b, group.id);
-  const drained = await ingestAndDrain(b, relay.groupEvents(route, b.name));
-  const contents = messageContents(drained);
   const expected = Array.from({ length: env.messages }, (_, i) => `m${i}`);
+  const contents = messageContents(await ingestAndDrain(b, relay.groupEvents(route, b.name)));
+  for (let round = 0; contents.length < expected.length && round < 64; round += 1) {
+    // oxlint-disable-next-line no-await-in-loop -- the flow is sequential by design
+    await b.engine.tick();
+    b.clock.advance(2000);
+    const fresh = relay.groupEvents(route, b.name);
+    // oxlint-disable-next-line no-await-in-loop -- the flow is sequential by design
+    const drained = await ingestAndDrain(b, fresh);
+    contents.push(...messageContents(drained));
+    // oxlint-disable-next-line no-await-in-loop -- the flow is sequential by design
+    await publish(b, relay);
+  }
   assert(
     contents.length === expected.length && contents.every((text, i) => text === expected[i]),
     `ingest delivered ${contents.length}/${expected.length} messages`,
