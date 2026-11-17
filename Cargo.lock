@@ -1890,6 +1890,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "mk-wasm"
+version = "0.0.0"
+dependencies = [
+ "js-sys",
+ "mk-bridge",
+ "universal-time",
+ "wasm-bindgen",
+ "web-time",
+]
+
+[[package]]
 name = "nom"
 version = "7.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"

@@ -28,6 +28,14 @@
 //! runtime is enough). On wasm32 the engine uses gloo-timers instead. This
 //! crate itself never depends on tokio.
 
+#![cfg_attr(
+    target_family = "wasm",
+    allow(
+        clippy::future_not_send,
+        reason = "wasm futures are single-threaded by construction"
+    )
+)]
+
 use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 

@@ -1,5 +1,5 @@
 [workspace]
-members  = ["crates/mk-core", "crates/mk-bridge"]
+members  = ["crates/mk-core", "crates/mk-bridge", "crates/mk-wasm"]
 exclude  = ["spike", "crates/interop", "crates/conformance", "fuzz"]
 resolver = "3"
 
@@ -47,6 +47,25 @@ codegen-units = 1
 lto           = "thin"
 panic         = "abort"
 strip         = true
+
+# The shipped @qntx/marmot-wasm artifact; opt-level chosen by the
+# build-wasm.ts size matrix.
+[profile.wasm]
+inherits      = "release"
+opt-level     = "z"
+lto           = "fat"
+codegen-units = 1
+panic         = "abort"
+# strip = false: wasm-bindgen needs the target_features section; wasm-opt strips.
+strip = false
+
+# Fast build for the test-panic variant exercised by the panic tests.
+[profile.wasm-test]
+inherits  = "dev"
+opt-level = 1
+lto       = false
+panic     = "abort"
+debug     = false
 
 [profile.dev]
 debug     = true
