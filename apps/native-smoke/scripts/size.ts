@@ -188,7 +188,10 @@ async function main(): Promise<void> {
   }
   mkdirSync(join(APP_DIR, "target"), { recursive: true });
   const out = join(APP_DIR, "target/appsize.json");
-  writeFileSync(out, JSON.stringify(report, null, 2));
+  const existing = existsSync(out)
+    ? (JSON.parse(readFileSync(out, "utf8")) as Record<string, unknown>)
+    : {};
+  writeFileSync(out, JSON.stringify({ ...existing, ...report }, null, 2));
   console.log(JSON.stringify(report, null, 2));
   console.log(`-> ${out}`);
 }
