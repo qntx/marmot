@@ -26,6 +26,34 @@ export function excludedCrates(cargoToml: unknown): Set<string> {
   );
 }
 
+/**
+ * App directory names (relative to `apps/`) that are standalone projects with their own lockfile
+ * and versioning — like the workspace-`exclude`d crates, they take no part in package version
+ * checks (which read `packages/` only) or in `sync-versions`. Register every `apps/` project here
+ * so the exclusion is a deliberate list, not an accident of directory layout.
+ */
+export const STANDALONE_APPS = new Set(["native-smoke"]);
+
+/**
+ * Assert every `apps/` project is registered in `STANDALONE_APPS` and marked private — an
+ * unregistered app could silently drift into publishable/workspaces territory.
+ */
+export function checkStandaloneApps(apps: PackageEntry[]): string[] {
+  const errors: string[] = [];
+  for (const { path, pkg } of apps) {
+    const dir = path.slice("apps/".length, -"/package.json".length);
+    if (!STANDALONE_APPS.has(dir)) {
+      errors.push(
+        `${path}: not registered in STANDALONE_APPS — apps/ projects are excluded from version checks and must be listed explicitly`,
+      );
+    }
+    if (asRecord(pkg)["private"] !== true) {
+      errors.push(`${path}: standalone apps must declare "private": true`);
+    }
+  }
+  return errors;
+}
+
 function isRecord(value: unknown): value is JsonObject {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -198,16 +226,27 @@ if (import.meta.main) {
       memberTomls[path] = Bun.TOML.parse(readFileSync(path, "utf8"));
     }
   }
-  const errors = checkVersion(
-    packages,
-    Bun.TOML.parse(cargoText),
-    cargoText,
-    memberTomls,
-    // No crates yet → no Cargo.lock; lockfile checks resume when the first
-    // crate lands and the lockfile exists.
-    existsSync("Cargo.lock") ? Bun.TOML.parse(readFileSync("Cargo.lock", "utf8")) : null,
-    Bun.JSONC.parse(readFileSync("bun.lock", "utf8")),
-  );
+  const apps: PackageEntry[] = existsSync("apps")
+    ? readdirSync("apps", { withFileTypes: true })
+        .filter((entry) => entry.isDirectory())
+        .map((entry) => {
+          const path = join("apps", entry.name, "package.json");
+          return { path, pkg: JSON.parse(readFileSync(path, "utf8")) as unknown };
+        })
+    : [];
+  const errors = [
+    ...checkVersion(
+      packages,
+      Bun.TOML.parse(cargoText),
+      cargoText,
+      memberTomls,
+      // No crates yet → no Cargo.lock; lockfile checks resume when the first
+      // crate lands and the lockfile exists.
+      existsSync("Cargo.lock") ? Bun.TOML.parse(readFileSync("Cargo.lock", "utf8")) : null,
+      Bun.JSONC.parse(readFileSync("bun.lock", "utf8")),
+    ),
+    ...checkStandaloneApps(apps),
+  ];
   for (const error of errors) {
     console.error(`check-version: ${error}`);
   }

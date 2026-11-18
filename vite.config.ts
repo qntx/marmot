@@ -98,6 +98,8 @@ const config: UserConfig = defineConfig({
       "3rdparty/**",
       "target/**",
       "spike/**",
+      // Standalone Expo project: its own toolchain, lockfile, and Expo-required CJS configs.
+      "apps/**",
       // Committed wasm-bindgen --target web glue (regenerated, diffed by check:generated).
       "packages/marmot-wasm/src/generated/**",
       "packages/marmot-wasm/tests/generated/**",
@@ -176,6 +178,8 @@ const config: UserConfig = defineConfig({
       "**/*.toml",
       "vectors/**",
       "spike/**",
+      // Standalone Expo project: Expo-required CJS configs, its own style.
+      "apps/**",
       // Committed wasm-bindgen glue is generated output, not hand-written.
       "packages/marmot-wasm/src/generated/**",
       "packages/marmot-wasm/tests/generated/**",
