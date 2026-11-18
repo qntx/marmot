@@ -4,6 +4,7 @@
  * (`am force-stop`). Shuts the emulator down on exit; only ever touches its own serial.
  *
  * Usage: bun scripts/android.ts [--flow] [--kill] [--iterations=N] [--seed=N]
+ *        bun scripts/android.ts --perf [--cases=a,b] [--source=R --db=D --key=K --secret=S]
  */
 
 import { spawnSync } from "node:child_process";
@@ -12,7 +13,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 
 import { startCollector } from "./collector.ts";
-import { driveFlow, driveKillLoop } from "./drive.ts";
+import { driveFlow, driveKillLoop, drivePerf } from "./drive.ts";
 import type { PlatformDriver } from "./drive.ts";
 import { syncLocalPackages } from "./sync-local.ts";
 
@@ -101,6 +102,18 @@ async function main(): Promise<void> {
   const seed = Number(flag("seed") ?? "20260209");
   const onlyFlow = argv.includes("--flow");
   const onlyKill = argv.includes("--kill");
+  const perf = argv.includes("--perf");
+  const perfCases = flag("cases")?.split(",");
+  const keepEmulator = argv.includes("--keep-emulator");
+  const memrecv =
+    flag("source") === undefined
+      ? undefined
+      : {
+          source: flag("source") as string,
+          db: flag("db") ?? "",
+          key: flag("key") ?? "",
+          secret: flag("secret") ?? "",
+        };
 
   const { collector, stop } = startCollector();
   let emulatorUp = false;
@@ -164,21 +177,56 @@ async function main(): Promise<void> {
         await Promise.resolve();
         adb(["shell", "am", "force-stop", PKG]);
       },
+      sampleMemory: async () => {
+        await Promise.resolve();
+        const out = adb(["shell", "dumpsys", "meminfo", PKG]);
+        const kb = (pattern: RegExp): number | undefined => {
+          const hit = pattern.exec(out);
+          return hit === null ? undefined : Number((hit[1] ?? "").replaceAll(",", ""));
+        };
+        return {
+          totalPssKb: kb(/TOTAL PSS:\s+([\d,]+)/),
+          totalRssKb: kb(/TOTAL RSS:\s+([\d,]+)/),
+          nativeHeapPssKb: kb(/Native Heap:\s+([\d,]+)/),
+        };
+      },
+      device: async () => {
+        await Promise.resolve();
+        const prop = (key: string): string => adb(["shell", "getprop", key]).trim();
+        return {
+          model: prop("ro.product.model"),
+          osRelease: prop("ro.build.version.release"),
+          sdk: prop("ro.build.version.sdk"),
+          pageSizeKb: Number(adb(["shell", "getconf", "PAGE_SIZE"]).trim()) / 1024,
+          memTotalKb: Number(
+            /MemTotal:\s+(\d+)/.exec(adb(["shell", "cat", "/proc/meminfo"]))?.[1] ?? "0",
+          ),
+          cores: Number(adb(["shell", "nproc"]).trim()),
+        };
+      },
     };
 
-    if (!onlyKill) {
-      const flow = await driveFlow(driver, collector);
-      if (flow.ok !== true) {
-        throw new Error(`flow failed: ${JSON.stringify(flow)}`);
+    if (perf) {
+      await drivePerf(driver, collector, {
+        cases: perfCases,
+        memTimeLimitSec: 3600,
+        ...(memrecv === undefined ? {} : { memrecv }),
+      });
+    } else {
+      if (!onlyKill) {
+        const flow = await driveFlow(driver, collector);
+        if (flow.ok !== true) {
+          throw new Error(`flow failed: ${JSON.stringify(flow)}`);
+        }
+        await driver.kill();
       }
-      await driver.kill();
-    }
-    if (!onlyFlow) {
-      await driveKillLoop(driver, collector, { iterations, seed });
+      if (!onlyFlow) {
+        await driveKillLoop(driver, collector, { iterations, seed });
+      }
     }
   } finally {
     stop();
-    if (emulatorUp) {
+    if (emulatorUp && !keepEmulator) {
       spawnSync(ADB, ["-s", SERIAL, "emu", "kill"], { env: ENV });
       console.log("emulator shut down, collector stopped");
     } else {

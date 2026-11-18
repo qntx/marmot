@@ -11,6 +11,7 @@ import { post } from "./collector.ts";
 import { parseRunUrl, readRunParams } from "./params.ts";
 import type { RunParams } from "./params.ts";
 import { runFlowMode, runKillMode, runVerifyMode } from "./modes.ts";
+import { runPerfMode } from "./perf.ts";
 
 const deviceInfo = (): { platform: string; osVersion: string; model: string } => ({
   platform: Platform.OS,
@@ -43,7 +44,9 @@ export function App() {
               ? await runVerifyMode(params)
               : params.mode === "kill"
                 ? await runKillMode(params)
-                : {};
+                : params.mode === "perf"
+                  ? await runPerfMode(params)
+                  : {};
         await post(`/${params.run}/result`, { ...base, ok: true, ...extra });
         setStatus(`${params.mode} ok`);
       } catch (error) {

@@ -4,6 +4,8 @@
  * process — simulator apps are host processes). Cleans up device, slot, and collector on exit.
  *
  * Usage: bun scripts/ios.ts [--flow] [--kill] [--iterations=N] [--seed=N]
+ *        bun scripts/ios.ts --perf [--cases=a,b] [--keep-device]
+ *               [--source=R --db=D --key=K --secret=S]
  */
 
 import { spawnSync } from "node:child_process";
@@ -11,7 +13,7 @@ import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { startCollector } from "./collector.ts";
-import { driveFlow, driveKillLoop } from "./drive.ts";
+import { driveFlow, driveKillLoop, drivePerf } from "./drive.ts";
 import type { PlatformDriver } from "./drive.ts";
 import { syncLocalPackages } from "./sync-local.ts";
 
@@ -126,6 +128,33 @@ function appPid(udid: string): number | undefined {
   return undefined;
 }
 
+function describeDevice(udid: string): Record<string, unknown> {
+  const list = JSON.parse(
+    sh("xcrun", ["simctl", "list", "devices", "-j", "available"]),
+  ) as { devices: Record<string, { udid: string; deviceTypeIdentifier?: string }[]> };
+  for (const [runtime, devices] of Object.entries(list.devices)) {
+    for (const device of devices) {
+      if (device.udid === udid) {
+        const types = (
+          JSON.parse(sh("xcrun", ["simctl", "list", "devicetypes", "-j"])) as {
+            devicetypes: { identifier: string; name: string }[];
+          }
+        ).devicetypes;
+        return {
+          udid,
+          deviceType: types.find((t) => t.identifier === device.deviceTypeIdentifier)?.name ??
+            device.deviceTypeIdentifier,
+          // Key form: com.apple.CoreSimulator.SimRuntime.iOS-27-2 → "iOS 27.2".
+          runtime: runtime
+            .replace(/^.*SimRuntime\./, "")
+            .replace(/-(\d+)-(\d+)$/, " $1.$2"),
+        };
+      }
+    }
+  }
+  return { udid };
+}
+
 async function main(): Promise<void> {
   const argv = process.argv.slice(2);
   const flag = (name: string): string | undefined =>
@@ -134,6 +163,18 @@ async function main(): Promise<void> {
   const seed = Number(flag("seed") ?? "20260209");
   const onlyFlow = argv.includes("--flow");
   const onlyKill = argv.includes("--kill");
+  const perf = argv.includes("--perf");
+  const perfCases = flag("cases")?.split(",");
+  const keepDevice = argv.includes("--keep-device");
+  const memrecv =
+    flag("source") === undefined
+      ? undefined
+      : {
+          source: flag("source") as string,
+          db: flag("db") ?? "",
+          key: flag("key") ?? "",
+          secret: flag("secret") ?? "",
+        };
 
   const { collector, stop } = startCollector();
   const slot = acquireSlot();
@@ -192,23 +233,52 @@ async function main(): Promise<void> {
           spawnSync("kill", ["-9", String(pid)]);
         }
       },
+      sampleMemory: async () => {
+        await Promise.resolve();
+        const pid = appPid(udid as string);
+        if (pid === undefined) {
+          return { pid: null };
+        }
+        const rssKb = Number(sh("ps", ["-o", "rss=", "-p", String(pid)]).trim());
+        const footprint = sh("footprint", [String(pid)]);
+        const phys = /phys_footprint:\s*([\d.]+)\s*(\w+)/.exec(footprint);
+        return {
+          pid,
+          rssKb,
+          physFootprint: phys === null ? undefined : `${phys[1]} ${phys[2]}`,
+        };
+      },
+      device: async () => {
+        await Promise.resolve();
+        return describeDevice(udid as string);
+      },
     };
 
-    if (!onlyKill) {
-      const flow = await driveFlow(driver, collector);
-      if (flow.ok !== true) {
-        throw new Error(`flow failed: ${JSON.stringify(flow)}`);
+    if (perf) {
+      await drivePerf(driver, collector, {
+        cases: perfCases,
+        memTimeLimitSec: 1500,
+        ...(memrecv === undefined ? {} : { memrecv }),
+      });
+    } else {
+      if (!onlyKill) {
+        const flow = await driveFlow(driver, collector);
+        if (flow.ok !== true) {
+          throw new Error(`flow failed: ${JSON.stringify(flow)}`);
+        }
+        await driver.kill();
       }
-      await driver.kill();
-    }
-    if (!onlyFlow) {
-      await driveKillLoop(driver, collector, { iterations, seed });
+      if (!onlyFlow) {
+        await driveKillLoop(driver, collector, { iterations, seed });
+      }
     }
   } finally {
     stop();
     if (udid !== undefined) {
       spawnSync("xcrun", ["simctl", "shutdown", udid], { env: ENV });
-      spawnSync("xcrun", ["simctl", "delete", udid], { env: ENV });
+      if (!keepDevice) {
+        spawnSync("xcrun", ["simctl", "delete", udid], { env: ENV });
+      }
     }
     rmSync(slot, { recursive: true, force: true });
     console.log("simulator shut down, slot released, collector stopped");

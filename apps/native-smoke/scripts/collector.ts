@@ -18,10 +18,14 @@ export type RunJournal = {
   results: ResultRecord[];
   ops: Record<string, unknown>[];
   violations: string[];
+  milestones: Record<string, unknown>[];
 };
 
 function freshJournal(): RunJournal {
-  return { batches: [], acked: [], published: [], dumps: [], results: [], ops: [], violations: [] };
+  return {
+    batches: [], acked: [], published: [], dumps: [], results: [], ops: [], violations: [],
+    milestones: [],
+  };
 }
 
 export class Collector {
@@ -58,6 +62,8 @@ export class Collector {
       journal.ops.push(record);
     } else if (record["kind"] === "violation") {
       journal.violations.push(String(record["text"]));
+    } else if (record["kind"] === "milestone") {
+      journal.milestones.push(record);
     }
     for (const wake of this.listeners.get(run) ?? []) {
       wake();

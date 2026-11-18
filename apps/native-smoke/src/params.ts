@@ -18,6 +18,13 @@ export type RunParams = {
   key: string | undefined;
   secret: string | undefined;
   messages: number;
+  /** Perf mode only. */
+  case: string;
+  reps: number;
+  members: number;
+  windows: number[];
+  timeLimitSec: number;
+  source: string | undefined;
 };
 
 function normalize(fields: Map<string, string>): RunParams | undefined {
@@ -32,6 +39,15 @@ function normalize(fields: Map<string, string>): RunParams | undefined {
     key: fields.get("key"),
     secret: fields.get("secret"),
     messages: Number(fields.get("messages") ?? "500"),
+    case: fields.get("case") ?? "",
+    reps: Number(fields.get("reps") ?? "1"),
+    members: Number(fields.get("members") ?? "0"),
+    windows: (fields.get("windows") ?? "")
+      .split(",")
+      .map((w) => Number(w))
+      .filter((w) => Number.isFinite(w) && w > 0),
+    timeLimitSec: Number(fields.get("timeLimitSec") ?? "0"),
+    source: fields.get("source"),
   };
 }
 
