@@ -23,6 +23,7 @@ const config: UserConfig = defineConfig({
       index: "src/index.ts",
       core: "src/core/index.ts",
       backend: "src/backend/index.ts",
+      client: "src/client/index.ts",
       storage: "src/storage/index.ts",
       testing: "src/testing/index.ts",
     },

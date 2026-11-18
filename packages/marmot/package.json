@@ -39,6 +39,11 @@
       "import": "./dist/backend.mjs",
       "default": "./dist/backend.mjs"
     },
+    "./client": {
+      "types": "./dist/client.d.mts",
+      "import": "./dist/client.mjs",
+      "default": "./dist/client.mjs"
+    },
     "./core": {
       "types": "./dist/core.d.mts",
       "import": "./dist/core.mjs",
@@ -66,6 +71,9 @@
     "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.src.json",
     "check:pkg": "vp pack && publint && attw --pack . --profile esm-only",
     "pack:local": "vp pack && bun pm pack"
+  },
+  "dependencies": {
+    "@qntx/nostr": "^0.15.4"
   },
   "devDependencies": {
     "@arethetypeswrong/cli": "0.18.5",

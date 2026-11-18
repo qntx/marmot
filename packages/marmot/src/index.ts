@@ -8,3 +8,4 @@
 export * from "./core/index.ts";
 export * from "./backend/index.ts";
 export * from "./storage/index.ts";
+export * from "./client/index.ts";
