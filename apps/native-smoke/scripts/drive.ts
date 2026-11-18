@@ -187,27 +187,37 @@ const loadAverage = (): string =>
 export async function drivePerf(
   driver: PlatformDriver,
   collector: Collector,
-  opts: { cases?: string[]; memTimeLimitSec: number; memrecv?: MemSource },
+  opts: {
+    cases?: string[];
+    memTimeLimitSec: number;
+    memrecv?: MemSource;
+    /** memgen `members` override (e.g. the 100-member fallback curve) — also labels the files. */
+    members?: number;
+  },
 ): Promise<void> {
   const cases = opts.cases ?? PERF_CASES;
+  const label = opts.members === undefined ? "" : `-m${opts.members}`;
   const machine = hostInfo();
   mkdirSync(TARGET, { recursive: true });
   let mem: MemSource | undefined = opts.memrecv;
   const device = (await driver.device?.()) ?? {};
 
   for (const caseName of cases) {
-    const defaults = PERF_DEFAULTS[caseName];
-    if (defaults === undefined) {
+    if (PERF_DEFAULTS[caseName] === undefined) {
       throw new Error(`unknown perf case ${caseName}`);
     }
+    const defaults = { ...PERF_DEFAULTS[caseName] };
     const loadBefore = loadAverage();
-    const run = `perf-${driver.name}-${caseName}-${Date.now()}`;
+    const run = `perf-${driver.name}-${caseName}${label}-${Date.now()}`;
     const params: Record<string, string> = { mode: "perf", run, case: caseName, ...defaults };
     if (caseName === "memgen") {
       const db = `mem-${Date.now()}`;
       const key = hex(randomBytes(32));
       const secret = hex(generateSecretKey());
-      Object.assign(params, { db, key, secret, timeLimitSec: String(opts.memTimeLimitSec) });
+      Object.assign(params, {
+        db, key, secret, timeLimitSec: String(opts.memTimeLimitSec),
+        ...(opts.members === undefined ? {} : { members: String(opts.members) }),
+      });
       mem = { source: run, db, key, secret };
     } else if (caseName === "memrecv") {
       if (mem === undefined) {
@@ -250,7 +260,7 @@ export async function drivePerf(
     // oxlint-disable-next-line no-await-in-loop -- cases are strictly sequential
     await driver.kill();
 
-    const out = join(TARGET, `perf-${driver.name}-${caseName}.json`);
+    const out = join(TARGET, `perf-${driver.name}-${caseName}${label}.json`);
     writeFileSync(
       out,
       JSON.stringify(

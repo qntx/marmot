@@ -17,9 +17,9 @@ if (process.env.MARMOT_SMOKE_NO_NATIVE === "1") {
     if (moduleName === "@qntx/marmot-native") {
       return { type: "sourceFile", filePath: stub };
     }
-    return previous === undefined
-      ? context.resolveRequest(context, moduleName, platform)
-      : previous(context, moduleName, platform);
+    return typeof previous === "function"
+      ? previous(context, moduleName, platform)
+      : context.resolveRequest(context, moduleName, platform);
   };
 }
 

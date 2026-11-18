@@ -165,6 +165,7 @@ async function main(): Promise<void> {
   const onlyKill = argv.includes("--kill");
   const perf = argv.includes("--perf");
   const perfCases = flag("cases")?.split(",");
+  const perfMembers = flag("members") === undefined ? undefined : Number(flag("members"));
   const keepDevice = argv.includes("--keep-device");
   const memrecv =
     flag("source") === undefined
@@ -258,6 +259,7 @@ async function main(): Promise<void> {
       await drivePerf(driver, collector, {
         cases: perfCases,
         memTimeLimitSec: 1500,
+        ...(perfMembers === undefined ? {} : { members: perfMembers }),
         ...(memrecv === undefined ? {} : { memrecv }),
       });
     } else {
