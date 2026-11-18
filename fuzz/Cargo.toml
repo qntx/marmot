@@ -17,6 +17,7 @@ non_kebab_case_bins = "allow"
 libfuzzer-sys = "0.4"
 mk-bridge     = { path = "../crates/mk-bridge" }
 mk-core       = { path = "../crates/mk-core", features = ["testing"] }
+mk-ffi        = { path = "../crates/mk-ffi" }
 # cgka-traits / openmls name the storage traits `kv_rows` exercises; the same
 # pinned revisions as the root workspace.
 cgka-traits    = { git = "https://github.com/marmot-protocol/mdk", rev = "a2e0558a634bbd20607cdd5afb93abc6220ee58d", version = "=0.16.0" }
@@ -79,6 +80,12 @@ doc  = false
 [[bin]]
 name = "bridge_config"
 path = "fuzz_targets/bridge_config.rs"
+test = false
+doc  = false
+
+[[bin]]
+name = "ffi_call"
+path = "fuzz_targets/ffi_call.rs"
 test = false
 doc  = false
 
