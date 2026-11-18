@@ -202,6 +202,22 @@ describe("sqliteKv", () => {
     await again.close();
   });
 
+  test("localLocks release is idempotent and frees only its own grant", async () => {
+    const locks = localLocks();
+    const first = await locks.acquire("marmot:x");
+    expect(first).toBeDefined();
+    expect(await locks.acquire("marmot:x")).toBeUndefined();
+    first?.();
+    const second = await locks.acquire("marmot:x");
+    expect(second).toBeDefined();
+    // The stale release must not free the lock the second holder now owns.
+    first?.();
+    expect(await locks.acquire("marmot:x")).toBeUndefined();
+    second?.();
+    second?.();
+    expect(await locks.acquire("marmot:x")).toBeDefined();
+  });
+
   test("op-sqlite's DB shape is assignable to SqlitePort", () => {
     const db = null as unknown as OpSqliteDb;
     const port: SqlitePort = db;

@@ -7,6 +7,8 @@ declare module "bun:test" {
   export function expect(actual: unknown): {
     toStrictEqual: (expected: unknown) => void;
     toBe: (expected: unknown) => void;
+    toBeDefined: () => void;
+    toBeUndefined: () => void;
     toHaveLength: (expected: number) => void;
   };
 }
