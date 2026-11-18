@@ -132,6 +132,29 @@ jobs:
           command: check
           manifest-path: crates/conformance/Cargo.toml
 
+  # The marmot-native export gate: the host libmarmot_ffi.so must export
+  # exactly the mk_* ABI (no dep symbols, no mk_bridge_test_panic). The
+  # iOS/Android prebuilt builds stay local gates (Xcode/NDK, see
+  # CONTRIBUTING.md).
+  native:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: "1.4"
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: "1.99.1"
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - run: bun install --frozen-lockfile
+      - run: bun run build:native --host
+
   # cargo fuzz starts from an empty corpus when fuzz/corpus/<target> is
   # absent (it is gitignored; seeds regenerate via fuzz's gen_corpus bin).
   # The fuzz job discovers every fuzz_targets/*.rs stem automatically.
