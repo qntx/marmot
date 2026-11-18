@@ -60,3 +60,13 @@ trusted publishing / OIDC).
 
 - MDK pin `v0.16.0` (`a2e0558`) → `v0.17.0` (`4df811a`); the spec pin is
   unchanged at `f825024`.
+- `crates/mk-core` store schema version 2: the `MessageState` index now
+  keys `[group, state, epoch, seq, message-id, content-class, epoch]` with
+  empty values and `MessageIndex` maps message-id to that key, so every
+  message listing, existence probe, content-filtered listing, early-exit
+  visit, deferred-metadata scan, group delete and full-snapshot capture
+  answers from index keys and decodes only the rows it returns. Stores
+  written by schema version 1 refuse to open
+  (`OpenError::UnsupportedSchemaVersion`); `mk_core::testing` gains
+  `check_message_index`, which verifies the index tables match the stored
+  message rows exactly.

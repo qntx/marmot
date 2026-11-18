@@ -10,9 +10,13 @@
 use std::collections::BTreeMap;
 use std::sync::Mutex;
 
+use cgka_traits::message::MessageRecord;
+
 use crate::clock::{Clock, Time};
+use crate::keys::{self, Table};
 use crate::kv::{CommitSeq, KvBatch, KvHost, KvOp};
 use crate::provider::KvStorageProvider;
+use crate::ser;
 use crate::signer::{AccountSigner, SignerError, SignerFuture};
 use crate::types::{AccountId, Event, UnsignedEvent};
 
@@ -354,4 +358,71 @@ impl ProofRequest {
     pub fn check(&self, signed: &Event) -> Result<[u8; 64], crate::ProofError> {
         crate::session::check_account_proof(self.account, &self.request, signed)
     }
+}
+
+/// Rebuild the expected `MessageState` and `MessageIndex` rows from the
+/// stored `Message` rows and require exact equality with what is stored —
+/// no missing keys, no extra keys, identical values, `MessageState` values
+/// empty. Every durable prefix a test hands in is checked the same way.
+///
+/// # Errors
+/// A fixed-string drift report naming the table and both row counts.
+pub fn check_message_index(rows: &[(Vec<u8>, Vec<u8>)]) -> Result<(), String> {
+    let mut expected_state = BTreeMap::new();
+    let mut expected_index = BTreeMap::new();
+    let mut stored_state = BTreeMap::new();
+    let mut stored_index = BTreeMap::new();
+    for (key, value) in rows {
+        match key.first().copied() {
+            Some(t) if t == Table::Message as u8 => {
+                let [gid, seq, mid]: [&[u8]; 3] = keys::segments(key)
+                    .and_then(|segments| segments.try_into().ok())
+                    .ok_or_else(|| "malformed message row key".to_owned())?;
+                let record: MessageRecord =
+                    ser::de(value).map_err(|_| "undecodable message row".to_owned())?;
+                if record.id.as_slice() != mid || record.group_id.as_slice() != gid {
+                    return Err("message row key drifted from its record".to_owned());
+                }
+                let seq = u64::from_be_bytes(
+                    seq.try_into()
+                        .map_err(|_| "malformed message row key".to_owned())?,
+                );
+                let (class, openmls_epoch) =
+                    KvStorageProvider::openmls_content_columns(&record.payload);
+                let state_key = keys::message_state_key(
+                    gid,
+                    record.state,
+                    record.epoch.0,
+                    seq,
+                    mid,
+                    class,
+                    openmls_epoch,
+                );
+                expected_state.insert(state_key.clone(), Vec::new());
+                expected_index.insert(keys::key(Table::MessageIndex, &[mid]), state_key);
+            }
+            Some(t) if t == Table::MessageState as u8 => {
+                stored_state.insert(key.clone(), value.clone());
+            }
+            Some(t) if t == Table::MessageIndex as u8 => {
+                stored_index.insert(key.clone(), value.clone());
+            }
+            _ => {}
+        }
+    }
+    if stored_state != expected_state {
+        return Err(format!(
+            "MessageState index drift: expected {} rows, stored {}",
+            expected_state.len(),
+            stored_state.len()
+        ));
+    }
+    if stored_index != expected_index {
+        return Err(format!(
+            "MessageIndex drift: expected {} rows, stored {}",
+            expected_index.len(),
+            stored_index.len()
+        ));
+    }
+    Ok(())
 }

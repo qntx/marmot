@@ -115,7 +115,7 @@ pub(crate) const META_PENDING_HIGH_WATER: &[u8] = b"pending-ref-high-water";
 
 /// Current store schema version. Bumped when the row format or layout changes;
 /// older or newer stores refuse to open (no migration code by design).
-pub(crate) const SCHEMA_VERSION: u32 = 1;
+pub(crate) const SCHEMA_VERSION: u32 = 2;
 
 /// Encode a row key or scan prefix. `segments` must be nonempty content for a
 /// row key; prefixes use fewer segments of the same layout.
@@ -182,4 +182,131 @@ pub(crate) fn segments(row_key: &[u8]) -> Option<Vec<&[u8]>> {
 pub(crate) fn prefix_range(prefix: &[u8]) -> (std::ops::Bound<Vec<u8>>, std::ops::Bound<Vec<u8>>) {
     let end = prefix_end(prefix).map_or(std::ops::Bound::Unbounded, std::ops::Bound::Excluded);
     (std::ops::Bound::Included(prefix.to_vec()), end)
+}
+
+/// The range `[start, prefix_end(end_prefix))`: the contiguous tail of the
+/// `end_prefix` row set beginning at `start`.
+pub(crate) fn tail_range(
+    start: Vec<u8>,
+    end_prefix: &[u8],
+) -> (std::ops::Bound<Vec<u8>>, std::ops::Bound<Vec<u8>>) {
+    let end = prefix_end(end_prefix).map_or(std::ops::Bound::Unbounded, std::ops::Bound::Excluded);
+    (std::ops::Bound::Included(start), end)
+}
+
+/// The `state1` segment of a `Table::MessageState` key. The match is
+/// exhaustive on purpose: an upstream `MessageState` addition fails to
+/// compile here rather than silently aliasing a byte.
+pub(crate) const fn message_state_byte(state: cgka_traits::message::MessageState) -> u8 {
+    use cgka_traits::message::MessageState;
+    match state {
+        MessageState::Sent => 0,
+        MessageState::Created => 1,
+        MessageState::Processed => 2,
+        MessageState::Failed => 3,
+        MessageState::Retryable => 4,
+        MessageState::ConvergenceDeferred => 5,
+        MessageState::PeelDeferred => 6,
+        MessageState::EpochInvalidated => 7,
+    }
+}
+
+/// Inverse of [`message_state_byte`].
+pub(crate) const fn message_state_from_byte(
+    byte: u8,
+) -> Option<cgka_traits::message::MessageState> {
+    use cgka_traits::message::MessageState;
+    match byte {
+        0 => Some(MessageState::Sent),
+        1 => Some(MessageState::Created),
+        2 => Some(MessageState::Processed),
+        3 => Some(MessageState::Failed),
+        4 => Some(MessageState::Retryable),
+        5 => Some(MessageState::ConvergenceDeferred),
+        6 => Some(MessageState::PeelDeferred),
+        7 => Some(MessageState::EpochInvalidated),
+        _ => None,
+    }
+}
+
+/// A `Table::MessageState` row key:
+/// `[gid, state1, epoch8, seq8, mid, class1, oepoch(0|8 bytes)]`. Within one
+/// `gid,state` prefix byte order is `(epoch, seq, mid)`, so `epoch >= e`
+/// is one contiguous tail. `class` and `openmls_epoch` are the
+/// `openmls_content`/`openmls_epoch` columns of the sqlite layout, computed
+/// at write time; `openmls_epoch` is absent (empty segment) for `NONE` and
+/// `UNCLASSIFIED` rows.
+pub(crate) fn message_state_key(
+    group_id: &[u8],
+    state: cgka_traits::message::MessageState,
+    epoch: u64,
+    seq: u64,
+    mid: &[u8],
+    class: u8,
+    openmls_epoch: Option<u64>,
+) -> Vec<u8> {
+    let state_seg = [message_state_byte(state)];
+    let epoch_seg = u64_seg(epoch);
+    let seq_seg = u64_seg(seq);
+    let class_seg = [class];
+    let oepoch_seg = openmls_epoch.map_or_else(Vec::new, |e| e.to_be_bytes().to_vec());
+    key(
+        Table::MessageState,
+        &[
+            group_id,
+            &state_seg,
+            &epoch_seg,
+            &seq_seg,
+            mid,
+            &class_seg,
+            &oepoch_seg,
+        ],
+    )
+}
+
+/// The decoded fields of a `Table::MessageState` row key.
+pub(crate) struct ParsedMessageStateKey {
+    /// Raw group-id segment.
+    pub(crate) group_id: Vec<u8>,
+    /// Message state the row is indexed under.
+    pub(crate) state: cgka_traits::message::MessageState,
+    /// Message epoch.
+    pub(crate) epoch: u64,
+    /// Durable insertion order of the message row.
+    pub(crate) seq: u64,
+    /// Raw message-id segment.
+    pub(crate) mid: Vec<u8>,
+    /// `openmls_content` column value.
+    pub(crate) class: u8,
+    /// `openmls_epoch` column value for classified rows.
+    pub(crate) openmls_epoch: Option<u64>,
+}
+
+/// Parse a `Table::MessageState` row key; `None` when the layout, the
+/// fixed-width segments, or the state byte are malformed.
+pub(crate) fn parse_message_state_key(row_key: &[u8]) -> Option<ParsedMessageStateKey> {
+    let [gid, state, epoch, seq, mid, class, oepoch]: [&[u8]; 7] =
+        segments(row_key)?.try_into().ok()?;
+    let [state_byte] = *state else {
+        return None;
+    };
+    let epoch = u64::from_be_bytes(epoch.try_into().ok()?);
+    let seq = u64::from_be_bytes(seq.try_into().ok()?);
+    let [class] = *class else {
+        return None;
+    };
+    let openmls_epoch = match oepoch.len() {
+        0 => None,
+        8 => Some(u64::from_be_bytes(oepoch.try_into().ok()?)),
+        _ => return None,
+    };
+    Some(ParsedMessageStateKey {
+        group_id: gid.to_vec(),
+        state: message_state_from_byte(state_byte)?,
+        epoch,
+        seq,
+        mid: mid.to_vec(),
+        class,
+        openmls_epoch,
+    })
 }

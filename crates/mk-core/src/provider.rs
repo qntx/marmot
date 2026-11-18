@@ -54,13 +54,13 @@ use crate::store::KvStore;
 /// are deliberately NOT bounded — `messages.rs` has no capacity there.
 pub const INGRESS_DEDUP_MARKER_CAPACITY: usize = 4096;
 
-/// `openmls_content` classes, mirroring `messages.rs`.
-const OPENMLS_CONTENT_PENDING: i64 = -1;
-const OPENMLS_CONTENT_NONE: i64 = 0;
-const OPENMLS_CONTENT_COMMIT: i64 = 1;
-const OPENMLS_CONTENT_PROPOSAL: i64 = 2;
-const OPENMLS_CONTENT_APPLICATION: i64 = 3;
-const OPENMLS_CONTENT_UNCLASSIFIED: i64 = 4;
+/// `openmls_content` classes, mirroring `messages.rs`. sqlite's `PENDING`
+/// (-1) is never produced here, so it is not representable in a `u8`.
+const OPENMLS_CONTENT_NONE: u8 = 0;
+const OPENMLS_CONTENT_COMMIT: u8 = 1;
+const OPENMLS_CONTENT_PROPOSAL: u8 = 2;
+const OPENMLS_CONTENT_APPLICATION: u8 = 3;
+const OPENMLS_CONTENT_UNCLASSIFIED: u8 = 4;
 
 /// The storage provider: one `KvStore` behind `cgka_traits`'s aggregate
 /// [`StorageProvider`] plus the `OpenMLS` storage trait (via
@@ -177,18 +177,22 @@ fn mid_seg(id: &MessageId) -> &[u8] {
     id.as_slice()
 }
 
-/// The message-state index fragment: the serde of the variant name is
-/// deterministic and survives new variants.
-fn state_frag(state: MessageState) -> StorageResult<Vec<u8>> {
-    ser::ser(&state)
-}
-
 fn malformed_row() -> StorageError {
     StorageError::Backend("kv row key malformed".into())
 }
 
 fn missing_row() -> StorageError {
     StorageError::Backend("kv index points at a missing row".into())
+}
+
+/// The `Message` row key a `MessageState` index key points at: same
+/// `gid/seq/mid` segments, different table and layout.
+fn message_row_key_of(state_key: &[u8]) -> StorageResult<Vec<u8>> {
+    let parsed = keys::parse_message_state_key(state_key).ok_or_else(malformed_row)?;
+    Ok(keys::key(
+        Table::Message,
+        &[&parsed.group_id, &keys::u64_seg(parsed.seq), &parsed.mid],
+    ))
 }
 
 impl KvStorageProvider {
@@ -328,8 +332,18 @@ impl KvStorageProvider {
         Ok(rows.into_iter().map(|(_, record)| record).collect())
     }
 
-    pub(crate) fn message_row_key(&self, id: &MessageId) -> StorageResult<Option<Vec<u8>>> {
+    /// The `MessageIndex` row for `id`: its value is the message's
+    /// `MessageState` index key.
+    fn message_state_row_key(&self, id: &MessageId) -> StorageResult<Option<Vec<u8>>> {
         self.row(Table::MessageIndex, &[mid_seg(id)])
+    }
+
+    /// The `Message` row key for `id`, derived from the indexed
+    /// `MessageState` key's `gid/seq/mid` segments.
+    pub(crate) fn message_row_key(&self, id: &MessageId) -> StorageResult<Option<Vec<u8>>> {
+        self.message_state_row_key(id)?
+            .map(|state_key| message_row_key_of(&state_key))
+            .transpose()
     }
 
     pub(crate) fn message_record(&self, id: &MessageId) -> StorageResult<Option<MessageRecord>> {
@@ -342,69 +356,50 @@ impl KvStorageProvider {
         }
     }
 
+    /// Write `record` at durable position `seq` plus its `MessageState` key
+    /// (with the content columns computed here) and the `MessageIndex` entry
+    /// pointing at it — one store unit's worth of writes.
+    fn write_message_rows(&self, record: &MessageRecord, seq: u64) -> StorageResult<()> {
+        let mid = mid_seg(&record.id);
+        let gid = gid_seg(&record.group_id);
+        self.store.put(
+            keys::key(Table::Message, &[gid, &keys::u64_seg(seq), mid]),
+            ser::ser(record)?,
+        )?;
+        let (class, openmls_epoch) = Self::openmls_content_columns(&record.payload);
+        let state_key = keys::message_state_key(
+            gid,
+            record.state,
+            record.epoch.0,
+            seq,
+            mid,
+            class,
+            openmls_epoch,
+        );
+        self.put_row(Table::MessageIndex, &[mid], state_key.clone())?;
+        self.store.put(state_key, Vec::new())
+    }
+
     /// Insert `record`, keeping an existing row's position when `id` repeats —
-    /// `INSERT .. ON CONFLICT(id) DO UPDATE` keeps `insert_order`.
+    /// `INSERT .. ON CONFLICT(id) DO UPDATE` keeps `insert_order`. A replace
+    /// rewrites the record and rebuilds its index from the new content.
     fn put_message_record(&self, record: &MessageRecord) -> StorageResult<()> {
         self.require_group(&record.group_id)?;
-        let mid = mid_seg(&record.id);
-        if let Some(row_key) = self.message_row_key(&record.id)? {
-            let old: MessageRecord = ser::de(&self.store.get(&row_key)?.ok_or_else(missing_row)?)?;
-            let old_state = state_frag(old.state)?;
-            let seq = keys::segments(&row_key)
-                .ok_or_else(malformed_row)?
-                .get(1)
-                .copied()
-                .ok_or_else(malformed_row)?;
-            self.store.delete(&row_key)?;
-            self.del_row(
-                Table::MessageState,
-                &[gid_seg(&old.group_id), &old_state, mid],
-            )?;
-            let new_row_key = keys::key(Table::Message, &[gid_seg(&record.group_id), seq, mid]);
-            self.store.put(new_row_key.clone(), ser::ser(record)?)?;
-            self.store
-                .put(keys::key(Table::MessageIndex, &[mid]), new_row_key.clone())?;
-            let state = state_frag(record.state)?;
-            self.put_row(
-                Table::MessageState,
-                &[gid_seg(&record.group_id), &state, mid],
-                new_row_key,
-            )
+        if let Some(state_key) = self.message_state_row_key(&record.id)? {
+            let parsed = keys::parse_message_state_key(&state_key).ok_or_else(malformed_row)?;
+            self.store.delete(&message_row_key_of(&state_key)?)?;
+            self.store.delete(&state_key)?;
+            self.write_message_rows(record, parsed.seq)
         } else {
             let seq = self.store.next_sequence()?;
-            let row_key = keys::key(
-                Table::Message,
-                &[gid_seg(&record.group_id), &keys::u64_seg(seq), mid],
-            );
-            self.store.put(row_key.clone(), ser::ser(record)?)?;
-            self.store
-                .put(keys::key(Table::MessageIndex, &[mid]), row_key.clone())?;
-            let state = state_frag(record.state)?;
-            self.put_row(
-                Table::MessageState,
-                &[gid_seg(&record.group_id), &state, mid],
-                row_key,
-            )
+            self.write_message_rows(record, seq)
         }
     }
 
     /// `put_message_on_connection` at an explicit position, for snapshot
     /// restore.
     pub(crate) fn put_message_at(&self, seq: u64, record: &MessageRecord) -> StorageResult<()> {
-        let mid = mid_seg(&record.id);
-        let row_key = keys::key(
-            Table::Message,
-            &[gid_seg(&record.group_id), &keys::u64_seg(seq), mid],
-        );
-        self.store.put(row_key.clone(), ser::ser(record)?)?;
-        self.store
-            .put(keys::key(Table::MessageIndex, &[mid]), row_key.clone())?;
-        let state = state_frag(record.state)?;
-        self.put_row(
-            Table::MessageState,
-            &[gid_seg(&record.group_id), &state, mid],
-            row_key,
-        )
+        self.write_message_rows(record, seq)
     }
 
     /// `delete_message_on_connection` minus its pending-application
@@ -416,32 +411,79 @@ impl KvStorageProvider {
     /// sqlite's group-scoped rows do.
     pub(crate) fn delete_message_row(&self, record: &MessageRecord) -> StorageResult<()> {
         let mid = mid_seg(&record.id);
-        if let Some(row_key) = self.message_row_key(&record.id)? {
-            self.store.delete(&row_key)?;
+        if let Some(state_key) = self.message_state_row_key(&record.id)? {
+            self.store.delete(&message_row_key_of(&state_key)?)?;
+            self.store.delete(&state_key)?;
         }
-        self.del_row(Table::MessageIndex, &[mid])?;
-        let state = state_frag(record.state)?;
-        self.del_row(
-            Table::MessageState,
-            &[gid_seg(&record.group_id), &state, mid],
-        )
+        self.del_row(Table::MessageIndex, &[mid])
     }
 
-    pub(crate) fn ordered_messages(
+    /// Delete every message row, state key and index row of `group_id`,
+    /// driven by `Table::MessageState` keys alone — no record is decoded.
+    pub(crate) fn delete_group_message_rows(&self, group_id: &GroupId) -> StorageResult<()> {
+        for state_key in self.store.keys_in(keys::prefix_range(&keys::key(
+            Table::MessageState,
+            &[gid_seg(group_id)],
+        )))? {
+            let parsed = keys::parse_message_state_key(&state_key).ok_or_else(malformed_row)?;
+            self.store.delete(&keys::key(
+                Table::Message,
+                &[&parsed.group_id, &keys::u64_seg(parsed.seq), &parsed.mid],
+            ))?;
+            self.store.delete(&state_key)?;
+            self.del_row(Table::MessageIndex, &[&parsed.mid])?;
+        }
+        Ok(())
+    }
+
+    /// The `MessageState` keys of `group_id` in `states` with
+    /// `epoch >= at_or_after_epoch`, parsed and merged by `seq` — the epoch
+    /// bound is the range start, so nothing outside it is touched.
+    fn message_state_entries(
         &self,
         group_id: &GroupId,
-    ) -> StorageResult<Vec<(u64, MessageRecord)>> {
-        let mut out = Vec::new();
-        for (row_key, value) in self.scan_rows(Table::Message, &[gid_seg(group_id)])? {
-            let seq_bytes = keys::segments(&row_key)
-                .ok_or_else(malformed_row)?
-                .get(1)
-                .copied()
-                .ok_or_else(malformed_row)?;
-            let seq = u64::from_be_bytes(seq_bytes.try_into().map_err(|_| malformed_row())?);
-            out.push((seq, ser::de::<MessageRecord>(&value)?));
+        states: &[MessageState],
+        at_or_after_epoch: EpochId,
+    ) -> StorageResult<Vec<keys::ParsedMessageStateKey>> {
+        let mut entries = Vec::new();
+        for state in states {
+            let state_seg = [keys::message_state_byte(*state)];
+            let prefix = keys::key(Table::MessageState, &[gid_seg(group_id), &state_seg]);
+            let start = keys::key(
+                Table::MessageState,
+                &[
+                    gid_seg(group_id),
+                    &state_seg,
+                    &keys::u64_seg(at_or_after_epoch.0),
+                ],
+            );
+            for state_key in self.store.keys_in(keys::tail_range(start, &prefix))? {
+                entries.push(keys::parse_message_state_key(&state_key).ok_or_else(malformed_row)?);
+            }
         }
-        out.sort_by_key(|(seq, _)| *seq);
+        entries.sort_by_key(|entry| entry.seq);
+        entries.dedup_by(|a, b| a.mid == b.mid);
+        Ok(entries)
+    }
+
+    /// Fetch and decode the `Message` row of each parsed index key — the
+    /// only decode step in the message listings, applied to exactly the
+    /// rows being returned.
+    fn records_from_state_keys(
+        &self,
+        entries: &[keys::ParsedMessageStateKey],
+    ) -> StorageResult<Vec<MessageRecord>> {
+        let mut out = Vec::with_capacity(entries.len());
+        for entry in entries {
+            let row_key = keys::key(
+                Table::Message,
+                &[&entry.group_id, &keys::u64_seg(entry.seq), &entry.mid],
+            );
+            let Some(value) = self.store.get(&row_key)? else {
+                continue;
+            };
+            out.push(ser::de(&value)?);
+        }
         Ok(out)
     }
 
@@ -451,7 +493,7 @@ impl KvStorageProvider {
     /// to a `ProtocolMessage`, and read its content type and epoch. Anything
     /// unparseable is `UNCLASSIFIED`, which every listing returns for the
     /// engine to judge.
-    fn openmls_content_columns(payload: &[u8]) -> (i64, Option<u64>) {
+    pub(crate) fn openmls_content_columns(payload: &[u8]) -> (u8, Option<u64>) {
         use cgka_traits::message::StoredMessagePayload;
         use openmls::prelude::tls_codec::Deserialize as _;
         let Ok(payload) = StoredMessagePayload::decode(payload) else {
@@ -477,32 +519,33 @@ impl KvStorageProvider {
         (content, Some(protocol.epoch().as_u64()))
     }
 
-    /// Whether `record` matches one arm of `openmls_filtered_message_sql`.
-    /// Pending and unclassified rows match every arm, exactly as sqlite's
-    /// `openmls_content IN (-1, 4)` clauses.
-    fn openmls_filter_match(record: &MessageRecord, filter: &OpenMlsContentFilter) -> bool {
-        let (content, epoch) = Self::openmls_content_columns(&record.payload);
-        if matches!(
-            content,
-            OPENMLS_CONTENT_PENDING | OPENMLS_CONTENT_UNCLASSIFIED
-        ) {
+    /// Whether a `MessageState` key's columns match one arm of
+    /// `openmls_filtered_message_sql`, evaluated before the row is fetched.
+    /// Unclassified rows match every arm, exactly as sqlite's
+    /// `openmls_content IN (-1, 4)` clauses — `PENDING` is never produced.
+    fn openmls_filter_match_key(
+        state: MessageState,
+        class: u8,
+        openmls_epoch: Option<u64>,
+        filter: &OpenMlsContentFilter,
+    ) -> bool {
+        if class == OPENMLS_CONTENT_UNCLASSIFIED {
             return true;
         }
-        let epoch = epoch.unwrap_or(0);
+        let epoch = openmls_epoch.unwrap_or(0);
         match filter {
             OpenMlsContentFilter::ApplicationsAt(at) => {
-                content == OPENMLS_CONTENT_APPLICATION && epoch == at.0
+                class == OPENMLS_CONTENT_APPLICATION && epoch == at.0
             }
             OpenMlsContentFilter::CommitsAndProposalsBetween { from, through } => {
-                matches!(content, OPENMLS_CONTENT_COMMIT | OPENMLS_CONTENT_PROPOSAL)
+                matches!(class, OPENMLS_CONTENT_COMMIT | OPENMLS_CONTENT_PROPOSAL)
                     && epoch >= from.0
                     && epoch <= through.0
             }
-            OpenMlsContentFilter::Commits => content == OPENMLS_CONTENT_COMMIT,
+            OpenMlsContentFilter::Commits => class == OPENMLS_CONTENT_COMMIT,
             OpenMlsContentFilter::WithoutProcessedApplicationsThrough(_)
             | OpenMlsContentFilter::WithoutProcessedApplications => {
-                !matches!(content, OPENMLS_CONTENT_APPLICATION)
-                    || record.state != MessageState::Processed
+                class != OPENMLS_CONTENT_APPLICATION || state != MessageState::Processed
             }
         }
     }
@@ -1206,9 +1249,7 @@ impl KvStorageProvider {
         }
         self.delete_maintenance_rows(gid)?;
         // Messages: row set, both indexes, and per-message pending rows.
-        for (_, record) in self.ordered_messages(id)? {
-            self.delete_message_row(&record)?;
-        }
+        self.delete_group_message_rows(id)?;
         self.del_prefix(Table::Snapshot, &[gid])?;
         self.del_prefix(Table::Checkpoint, &[gid])?;
         self.del_prefix(Table::MediaSecret, &[gid])?;
@@ -1251,42 +1292,82 @@ impl MessageStorage for KvStorageProvider {
 
     fn update_message_state(&self, id: &MessageId, new_state: MessageState) -> StorageResult<()> {
         self.store.transact(|| -> StorageResult<()> {
-            let row_key = self.message_row_key(id)?.ok_or(StorageError::NotFound)?;
+            let state_key = self
+                .message_state_row_key(id)?
+                .ok_or(StorageError::NotFound)?;
+            let parsed = keys::parse_message_state_key(&state_key).ok_or_else(malformed_row)?;
+            let row_key = message_row_key_of(&state_key)?;
             let value = self.store.get(&row_key)?.ok_or(StorageError::NotFound)?;
             let mut record: MessageRecord = ser::de(&value)?;
-            let old_state = state_frag(record.state)?;
             record.state = new_state;
-            self.store.put(row_key.clone(), ser::ser(&record)?)?;
-            let mid = mid_seg(id);
-            self.del_row(
-                Table::MessageState,
-                &[gid_seg(&record.group_id), &old_state, mid],
-            )?;
-            let state = state_frag(new_state)?;
-            self.put_row(
-                Table::MessageState,
-                &[gid_seg(&record.group_id), &state, mid],
-                row_key,
-            )
+            self.store.put(row_key, ser::ser(&record)?)?;
+            self.store.delete(&state_key)?;
+            let new_state_key = keys::message_state_key(
+                &parsed.group_id,
+                new_state,
+                parsed.epoch,
+                parsed.seq,
+                mid_seg(id),
+                parsed.class,
+                parsed.openmls_epoch,
+            );
+            self.put_row(Table::MessageIndex, &[mid_seg(id)], new_state_key.clone())?;
+            self.store.put(new_state_key, Vec::new())
         })
     }
 
+    /// `EXISTS` over `state IN .. AND epoch >= ?` — an index probe per
+    /// state; nothing is decoded.
+    fn has_messages_in_states(
+        &self,
+        group_id: &GroupId,
+        states: &[MessageState],
+        at_or_after_epoch: EpochId,
+    ) -> StorageResult<bool> {
+        for state in states {
+            let state_seg = [keys::message_state_byte(*state)];
+            let prefix = keys::key(Table::MessageState, &[gid_seg(group_id), &state_seg]);
+            let start = keys::key(
+                Table::MessageState,
+                &[
+                    gid_seg(group_id),
+                    &state_seg,
+                    &keys::u64_seg(at_or_after_epoch.0),
+                ],
+            );
+            if self.store.any_key_in(keys::tail_range(start, &prefix))? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// `ORDER BY insert_order` over `epoch >= ?` across every state — the
+    /// epoch bound is read out of the index keys, so only returned rows are
+    /// decoded.
     fn list_messages(
         &self,
         group_id: &GroupId,
         at_or_after_epoch: EpochId,
     ) -> StorageResult<Vec<MessageRecord>> {
-        Ok(self
-            .ordered_messages(group_id)?
-            .into_iter()
-            .filter(|(_, record)| record.epoch >= at_or_after_epoch)
-            .map(|(_, record)| record)
-            .collect())
+        let mut entries = Vec::new();
+        for state_key in self.store.keys_in(keys::prefix_range(&keys::key(
+            Table::MessageState,
+            &[gid_seg(group_id)],
+        )))? {
+            let entry = keys::parse_message_state_key(&state_key).ok_or_else(malformed_row)?;
+            if entry.epoch >= at_or_after_epoch.0 {
+                entries.push(entry);
+            }
+        }
+        entries.sort_by_key(|entry| entry.seq);
+        entries.dedup_by(|a, b| a.mid == b.mid);
+        self.records_from_state_keys(&entries)
     }
 
-    /// `ORDER BY insert_order` over `state IN .. AND epoch >= ?` — the mst
-    /// index orders by position within each state; merging by row key (which
-    /// embeds the position) gives the global insertion order.
+    /// `ORDER BY insert_order` over `state IN .. AND epoch >= ?` — the
+    /// per-state range starts at the epoch bound; merging by `seq` gives the
+    /// global insertion order.
     fn list_messages_in_states(
         &self,
         group_id: &GroupId,
@@ -1296,35 +1377,14 @@ impl MessageStorage for KvStorageProvider {
         if states.is_empty() {
             return Ok(Vec::new());
         }
-        let mut rows = Vec::new();
-        for state in states {
-            let frag = state_frag(*state)?;
-            for (index_key, row_key) in
-                self.scan_rows(Table::MessageState, &[gid_seg(group_id), &frag])?
-            {
-                let _ = index_key;
-                rows.push(row_key);
-            }
-        }
-        rows.sort();
-        rows.dedup();
-        let mut out = Vec::with_capacity(rows.len());
-        for row_key in rows {
-            let Some(value) = self.store.get(&row_key)? else {
-                continue;
-            };
-            let record: MessageRecord = ser::de(&value)?;
-            if record.epoch >= at_or_after_epoch {
-                out.push(record);
-            }
-        }
-        Ok(out)
+        let entries = self.message_state_entries(group_id, states, at_or_after_epoch)?;
+        self.records_from_state_keys(&entries)
     }
 
-    /// The content-filtered listing: same scan, then the
-    /// `openmls_content`/`openmls_epoch` arms of `openmls_filtered_message_sql`
-    /// evaluated per row (the classifier is a pure function of the payload,
-    /// so a stored column is unnecessary).
+    /// The content-filtered listing: same scan, with the
+    /// `openmls_content`/`openmls_epoch` arms of
+    /// `openmls_filtered_message_sql` evaluated on the index-key columns
+    /// before the row is fetched.
     fn list_openmls_messages_in_states(
         &self,
         group_id: &GroupId,
@@ -1335,11 +1395,44 @@ impl MessageStorage for KvStorageProvider {
         if states.is_empty() {
             return Ok(Vec::new());
         }
-        Ok(self
-            .list_messages_in_states(group_id, states, at_or_after_epoch)?
+        let entries: Vec<_> = self
+            .message_state_entries(group_id, states, at_or_after_epoch)?
             .into_iter()
-            .filter(|record| Self::openmls_filter_match(record, &filter))
-            .collect())
+            .filter(|entry| {
+                Self::openmls_filter_match_key(
+                    entry.state,
+                    entry.class,
+                    entry.openmls_epoch,
+                    &filter,
+                )
+            })
+            .collect();
+        self.records_from_state_keys(&entries)
+    }
+
+    /// Insertion-order iteration with early exit: the visitor is decoded-to
+    /// lazily, one row at a time, and the store lock is never held across a
+    /// callback.
+    fn visit_messages_in_states(
+        &self,
+        group_id: &GroupId,
+        states: &[MessageState],
+        at_or_after_epoch: EpochId,
+        visitor: &mut dyn FnMut(MessageRecord) -> bool,
+    ) -> StorageResult<()> {
+        for entry in self.message_state_entries(group_id, states, at_or_after_epoch)? {
+            let row_key = keys::key(
+                Table::Message,
+                &[&entry.group_id, &keys::u64_seg(entry.seq), &entry.mid],
+            );
+            let Some(value) = self.store.get(&row_key)? else {
+                continue;
+            };
+            if !visitor(ser::de(&value)?) {
+                break;
+            }
+        }
+        Ok(())
     }
 
     /// Peel-deferred rows in insertion order — sqlite's SQL fixes
@@ -1348,12 +1441,13 @@ impl MessageStorage for KvStorageProvider {
         &self,
         group_id: &GroupId,
     ) -> StorageResult<Vec<DeferredMessageMetadata>> {
-        Ok(self
-            .ordered_messages(group_id)?
-            .into_iter()
-            .filter(|(_, record)| record.state == MessageState::PeelDeferred)
-            .map(|(_, record)| DeferredMessageMetadata::from(record))
-            .collect())
+        let entries =
+            self.message_state_entries(group_id, &[MessageState::PeelDeferred], EpochId(0))?;
+        let mut out = Vec::with_capacity(entries.len());
+        for record in self.records_from_state_keys(&entries)? {
+            out.push(DeferredMessageMetadata::from(record));
+        }
+        Ok(out)
     }
 
     /// `put_pending_application_event`: `MessageReceived` keyed by its source

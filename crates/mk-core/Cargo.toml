@@ -51,5 +51,9 @@ tokio               = { workspace = true }
 openmls   = { workspace = true, features = ["js"] }
 getrandom = { workspace = true, features = ["wasm_js"] }
 
+[[test]]
+name              = "model"
+required-features = ["testing"]
+
 [lints]
 workspace = true

@@ -1493,7 +1493,7 @@ proptest! {
     #[test]
     fn kv_matches_sqlite(ops in prop::collection::vec(op_strategy(), 8..64)) {
         let host = Arc::new(TestHost::default());
-        let kv = KvStorageProvider::open(Vec::new(), host).expect("kv open");
+        let kv = KvStorageProvider::open(Vec::new(), host.clone()).expect("kv open");
         let sqlite = SqliteAccountStorage::in_memory_for_test().expect("sqlite open");
 
         for (i, op) in ops.iter().enumerate() {
@@ -1515,5 +1515,24 @@ proptest! {
             }
         }
         prop_assert_eq!(kv_dump, sql_dump, "final observable dump diverged");
+
+        assert_message_index_held(&host);
     }
+}
+
+/// Every stored `Message` row must be exactly reflected by the two index
+/// tables — checked on the durable rows at the end of each case.
+fn assert_message_index_held(host: &TestHost) {
+    let kv_rows: Vec<(Vec<u8>, Vec<u8>)> = host
+        .rows
+        .lock()
+        .expect("host rows")
+        .iter()
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect();
+    assert_eq!(
+        mk_core::testing::check_message_index(&kv_rows),
+        Ok(()),
+        "message index drifted from the stored message rows"
+    );
 }

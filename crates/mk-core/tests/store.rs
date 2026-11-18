@@ -299,6 +299,32 @@ fn open_rejects_mismatched_schema_version() {
 }
 
 #[test]
+fn open_rejects_version_one_rows() {
+    // Version 1 was the pre-index message layout; it is refused at open,
+    // never migrated.
+    let (_provider, host) = open_provider();
+    let mut rows = host.durable_rows();
+    let version_key = {
+        let mut k = vec![0u8]; // Table::Meta discriminant
+        k.extend_from_slice(&14u32.to_be_bytes()); // len of "schema-version"
+        k.extend_from_slice(b"schema-version");
+        k
+    };
+    let mut touched = false;
+    for (key, value) in &mut rows {
+        if *key == version_key {
+            *value = 1u32.to_be_bytes().to_vec();
+            touched = true;
+        }
+    }
+    assert!(touched, "schema-version row exists");
+    assert!(matches!(
+        KvStorageProvider::open(rows, host),
+        Err(OpenError::UnsupportedSchemaVersion { found: 1 })
+    ));
+}
+
+#[test]
 fn open_rejects_rows_without_version() {
     let host = TestHost::new();
     // A stray row but no schema-version row.
@@ -658,4 +684,164 @@ fn reopen_observes_identical_state() {
     );
     let record = reopened.get_message(&mid(5)).expect("row");
     assert_eq!(record.state, MessageState::Processed);
+}
+
+#[cfg(feature = "testing")]
+mod support;
+
+/// "Decodes nothing it doesn't return": with one Processed
+/// application-classified row's value corrupted, every index-driven query
+/// that does not return that row must still answer correctly.
+#[cfg(feature = "testing")]
+mod indexed_queries {
+    use cgka_traits::message::MessageState;
+    use cgka_traits::storage::{MessageStorage, OpenMlsContentFilter};
+    use cgka_traits::types::{EpochId, GroupId as EngineGroupId};
+    use mk_core::{CreateGroup, Invitee, KvStorageProvider};
+
+    use super::TestHost;
+    use super::support::*;
+
+    const RELAY: &str = "ws://127.0.0.1:7777";
+    const TABLE_MESSAGE: u8 = 3;
+    const TABLE_MESSAGE_STATE: u8 = 5;
+    const STATE_PROCESSED: u8 = 2;
+    const CLASS_APPLICATION: u8 = 3;
+
+    /// Decode `keys.rs`'s `[table][u32 len + segment]...` layout.
+    fn segments(key: &[u8]) -> Vec<&[u8]> {
+        let mut rest = &key[1..];
+        let mut out = Vec::new();
+        while !rest.is_empty() {
+            let len = u32::from_be_bytes(rest[..4].try_into().expect("len")) as usize;
+            out.push(&rest[4..4 + len]);
+            rest = &rest[4 + len..];
+        }
+        out
+    }
+
+    /// The `keys.rs` encoder, reimplemented at the test boundary.
+    fn row_key(table: u8, segments: &[&[u8]]) -> Vec<u8> {
+        let mut out = vec![table];
+        for segment in segments {
+            out.extend_from_slice(&(segment.len() as u32).to_be_bytes());
+            out.extend_from_slice(segment);
+        }
+        out
+    }
+
+    #[tokio::test]
+    async fn queries_skip_undecodable_unreturned_rows() {
+        let mut a = open_member().await;
+        let mut b = open_member().await;
+        let relay = FakeRelay::new();
+        publish_identity(&mut a, &relay, RELAY).await;
+        publish_identity(&mut b, &relay, RELAY).await;
+        let gid = a
+            .session
+            .create_group(CreateGroup {
+                name: "index".to_owned(),
+                description: String::new(),
+                relays: vec![RELAY.to_owned()],
+                invitees: vec![Invitee {
+                    key_package: key_package_of(&relay, RELAY, &b.account_hex()),
+                    inbox_relays: inbox_relays_of(&relay, RELAY, &b.account_hex()),
+                }],
+                admins: Vec::new(),
+                components: Vec::new(),
+            })
+            .await
+            .expect("create_group");
+        flush(&mut a, &relay).await;
+        let welcomes = welcomes_for(&relay, RELAY, &b.account_hex());
+        ingest_backlog(&mut b, &welcomes).await;
+        b.session.tick().await.expect("tick");
+        flush(&mut b, &relay).await;
+        send_chat(&mut a, &relay, &gid, "one").await;
+        send_chat(&mut a, &relay, &gid, "two").await;
+        sync_member(&mut b, &relay, RELAY, &gid).await;
+
+        let rows = b.host.durable_rows();
+        // The latest Processed application-classified row, located through
+        // the index key alone (state byte 2, class byte 3).
+        let mut target = None;
+        for (key, _) in &rows {
+            if key.first() != Some(&TABLE_MESSAGE_STATE) {
+                continue;
+            }
+            let segs = segments(key);
+            if segs.len() != 7 || segs[1] != [STATE_PROCESSED] || segs[5] != [CLASS_APPLICATION] {
+                continue;
+            }
+            target = Some(row_key(TABLE_MESSAGE, &[segs[0], segs[3], segs[4]]));
+        }
+        let target = target.expect("a processed application row exists");
+        assert_eq!(mk_core::testing::check_message_index(&rows), Ok(()));
+
+        let mut damaged = rows;
+        let mut rewritten = false;
+        for (key, value) in &mut damaged {
+            if *key == target {
+                *value = vec![0xFF, 0xFE];
+                rewritten = true;
+            }
+        }
+        assert!(rewritten, "corruption landed on the target row");
+        let provider =
+            KvStorageProvider::open(damaged, TestHost::new()).expect("reopen over damaged rows");
+        let engine_gid = EngineGroupId::new(gid.0.clone());
+
+        // Positive control: the damaged row is decoded when it is returned.
+        assert!(
+            provider.list_messages(&engine_gid, EpochId(0)).is_err(),
+            "list_messages returns the damaged row and must fail"
+        );
+        assert!(
+            provider
+                .has_messages_in_states(&engine_gid, &[MessageState::Processed], EpochId(0))
+                .expect("has probe answers from the index")
+        );
+        assert!(
+            !provider
+                .has_messages_in_states(&engine_gid, &[MessageState::Failed], EpochId(0))
+                .expect("absent state answers false")
+        );
+        assert!(
+            !provider
+                .has_messages_in_states(&engine_gid, &[], EpochId(0))
+                .expect("empty states answer false")
+        );
+        assert!(
+            provider
+                .list_messages_in_states(&engine_gid, &[MessageState::Created], EpochId(0))
+                .expect("other states list cleanly")
+                .is_empty()
+        );
+        let kept = provider
+            .list_openmls_messages_in_states(
+                &engine_gid,
+                &[MessageState::Processed],
+                EpochId(0),
+                OpenMlsContentFilter::WithoutProcessedApplications,
+            )
+            .expect("filtered listing excludes the damaged row");
+        let target_segments = segments(&target);
+        assert!(
+            kept.iter()
+                .all(|record| record.id.as_slice() != target_segments[2])
+        );
+        let mut visited = 0;
+        provider
+            .visit_messages_in_states(
+                &engine_gid,
+                &[MessageState::Processed],
+                EpochId(0),
+                &mut |_| {
+                    visited += 1;
+                    false
+                },
+            )
+            .expect("early-exit visit stops before the damaged row");
+        assert_eq!(visited, 1);
+    }
 }
