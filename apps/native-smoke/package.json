@@ -8,6 +8,9 @@
     "prebuild": "expo prebuild",
     "smoke:ios": "bun scripts/ios.ts",
     "smoke:android": "bun scripts/android.ts",
+    "perf:ios": "bun scripts/ios.ts --perf",
+    "perf:android": "bun scripts/android.ts --perf",
+    "size": "bun scripts/size.ts",
     "collector": "bun scripts/collector.ts",
     "test": "bun test"
   },

@@ -214,6 +214,10 @@ Release build. The app runs one mode per launch from
   mid-write (`kill -9` of the app process on iOS, `am force-stop` on
   Android), relaunch, dump the decrypted durable rows, and check the
   prefix/ack/publish invariants.
+- `perf` — the measurement cases in `src/perf.ts` (`kp`, `ingest500`,
+  `add50`, `send`, `memgen`, `memrecv`), one fresh process per case, with
+  device/host metadata, load averages, and process memory sampled around
+  the memory cases.
 
 Prerequisites: the mk-ffi prebuilts (`bun run build:native --ios
 --android`), Xcode + an iOS runtime for the simulator, and for Android the
@@ -235,6 +239,19 @@ suite's seed). Results land under `apps/native-smoke/target/`:
 Local packages are synced into `node_modules` by `scripts/sync-local.ts`
 (file copies — Expo autolinking does not follow the repo symlinks); rerun
 it after changing `packages/marmot` or `packages/marmot-native`.
+
+Perf runs reuse the same drivers — `bun run perf:ios` /
+`bun run perf:android` (`--perf`), with `--cases=kp,ingest500,...` to pick
+a subset, `--members=N` to override the `memgen` member count (labelled
+`-m<N>` in the output filename), `--source=<run>` plus
+`--db/--key/--secret` to point `memrecv` at a previous `memgen` database,
+and `--keep-emulator`/`--keep-device` to leave the device up between
+runs. Results: `target/perf-<platform>-<case>[-m<N>].json`.
+
+`bun run size` (`scripts/size.ts`) builds the Release app with and without
+`@qntx/marmot-native` (temporary `expo.autolinking.exclude` + the
+`MARMOT_SMOKE_NO_NATIVE` metro stub) and reports APK/`.app`/zip/native
+library sizes to `target/appsize.json`.
 
 Shared-machine discipline: the iOS driver takes a simulator slot under
 `~/Desktop/qntx/meowl.social/.cache/sim-slots/` (max 3, 40-minute hold,
