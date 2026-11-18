@@ -229,7 +229,10 @@ impl KvStorageProvider {
     /// even when nothing matches, so declare write intent first.
     fn del_prefix(&self, table: Table, segments: &[&[u8]]) -> StorageResult<()> {
         self.store.ensure_writable()?;
-        for (row_key, _) in self.scan_rows(table, segments)? {
+        for row_key in self
+            .store
+            .keys_in(keys::prefix_range(&keys::key(table, segments)))?
+        {
             self.store.delete(&row_key)?;
         }
         Ok(())

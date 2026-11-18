@@ -17,7 +17,9 @@
 //!
 //! Lock poisoning maps to [`StorageError::Backend`]; it never panics.
 
-use std::collections::BTreeMap;
+use std::cmp::Ordering;
+use std::collections::{BTreeMap, BTreeSet};
+use std::ops::Bound;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use cgka_traits::storage::{StorageError, StorageResult};
@@ -295,7 +297,7 @@ impl KvStore {
 
     /// Does `key` resolve to a live row.
     pub(crate) fn contains(&self, key: &[u8]) -> StorageResult<bool> {
-        Ok(self.get(key)?.is_some())
+        self.any_key_in((Bound::Included(key.to_vec()), Bound::Included(key.to_vec())))
     }
 
     /// Insert or replace one row inside the current unit (or as a bare unit).
@@ -314,17 +316,33 @@ impl KvStore {
     /// over committed state; results are always sorted by key bytes.
     pub(crate) fn scan(&self, prefix: &[u8]) -> StorageResult<Vec<(Vec<u8>, Vec<u8>)>> {
         let inner = self.lock()?;
-        let (start, end) = keys::prefix_range(prefix);
-        let mut out: BTreeMap<Vec<u8>, Vec<u8>> = inner
-            .rows
-            .range((start, end))
-            .map(|(key, value)| (key.clone(), value.clone()))
+        let range = keys::prefix_range(prefix);
+        let rows = inner
+            .live_keys(&range)
+            .into_iter()
+            .filter_map(|key| inner.get(&key).map(|value| (key, value)))
             .collect();
-        for overlay in &inner.overlays {
-            merge_overlay(&mut out, overlay, prefix);
-        }
         drop(inner);
-        Ok(out.into_iter().collect())
+        Ok(rows)
+    }
+
+    /// All live keys in `range`, in key order, with the same overlay-merge
+    /// semantics as `scan` — overlay tombstones hide committed keys and
+    /// overlay puts contribute their keys. Values are never cloned.
+    pub(crate) fn keys_in(
+        &self,
+        range: (Bound<Vec<u8>>, Bound<Vec<u8>>),
+    ) -> StorageResult<Vec<Vec<u8>>> {
+        Ok(self.lock()?.live_keys(&range))
+    }
+
+    /// Whether `range` holds at least one live key, under the same
+    /// overlay-merge semantics as `keys_in`, exiting on the first hit.
+    pub(crate) fn any_key_in(
+        &self,
+        range: (Bound<Vec<u8>>, Bound<Vec<u8>>),
+    ) -> StorageResult<bool> {
+        Ok(self.lock()?.any_key_in(&range))
     }
 
     /// Allocate the next durable insertion-order value. The counter lives in a
@@ -390,6 +408,26 @@ impl KvStore {
     }
 }
 
+/// Whether `range` names no key: start past end, or equal bounds that
+/// exclude an endpoint. `BTreeMap::range` panics on inverted and on
+/// excluded-excluded equal bounds, so the callers check before probing.
+fn range_is_empty(range: &(Bound<Vec<u8>>, Bound<Vec<u8>>)) -> bool {
+    let (start, end) = match range {
+        (
+            Bound::Included(start) | Bound::Excluded(start),
+            Bound::Included(end) | Bound::Excluded(end),
+        ) => (start, end),
+        (Bound::Unbounded, _) | (_, Bound::Unbounded) => return false,
+    };
+    match start.cmp(end) {
+        Ordering::Greater => true,
+        Ordering::Equal => {
+            matches!(range.0, Bound::Excluded(_)) || matches!(range.1, Bound::Excluded(_))
+        }
+        Ordering::Less => false,
+    }
+}
+
 impl Inner {
     /// Read `key` through the overlay stack into committed state.
     fn get(&self, key: &[u8]) -> Option<Vec<u8>> {
@@ -399,6 +437,62 @@ impl Inner {
             }
         }
         self.rows.get(key).cloned()
+    }
+
+    /// All live keys in `range`, in key order: committed keys merged with
+    /// every overlay layer's edits, tombstones hiding committed keys.
+    fn live_keys(&self, range: &(Bound<Vec<u8>>, Bound<Vec<u8>>)) -> Vec<Vec<u8>> {
+        if range_is_empty(range) {
+            return Vec::new();
+        }
+        let mut out: BTreeSet<Vec<u8>> = self
+            .rows
+            .range(range.clone())
+            .map(|(key, _)| key.clone())
+            .collect();
+        for overlay in &self.overlays {
+            merge_overlay_keys(&mut out, overlay, range);
+        }
+        out.into_iter().collect()
+    }
+
+    /// The merged verdict for a committed key: the topmost overlay entry for
+    /// it wins, otherwise the committed row is live.
+    fn key_is_live(&self, key: &[u8]) -> bool {
+        self.overlays
+            .iter()
+            .rev()
+            .find_map(|overlay| overlay.get(key))
+            .is_none_or(Option::is_some)
+    }
+
+    /// Whether `range` holds at least one live key, exiting on the first hit.
+    fn any_key_in(&self, range: &(Bound<Vec<u8>>, Bound<Vec<u8>>)) -> bool {
+        if range_is_empty(range) {
+            return false;
+        }
+        if self
+            .rows
+            .range(range.clone())
+            .any(|(key, _)| self.key_is_live(key))
+        {
+            return true;
+        }
+        self.overlay_only_live_key(range)
+    }
+
+    /// Whether any key present only in overlays resolves to a live put. Each
+    /// key's verdict is its topmost entry, so layers are walked top-down and
+    /// each key is settled once.
+    fn overlay_only_live_key(&self, range: &(Bound<Vec<u8>>, Bound<Vec<u8>>)) -> bool {
+        let mut resolved = BTreeSet::new();
+        self.overlays
+            .iter()
+            .rev()
+            .flat_map(|overlay| overlay.range(range.clone()))
+            .any(|(key, entry)| {
+                !self.rows.contains_key(key) && resolved.insert(key) && entry.is_some()
+            })
     }
 
     /// Write into the top overlay, or commit a bare unit when the stack is
@@ -543,17 +637,204 @@ impl std::fmt::Debug for KvStore {
     }
 }
 
-/// Fold one overlay layer's `range(prefix)` edits into `out`.
-fn merge_overlay(out: &mut BTreeMap<Vec<u8>, Vec<u8>>, overlay: &Overlay, prefix: &[u8]) {
-    let (scan_start, scan_end) = keys::prefix_range(prefix);
-    for (key, entry) in overlay.range((scan_start, scan_end)) {
+/// Fold one overlay layer's edits to keys in `range` into `out`: puts add
+/// their key, tombstones remove it.
+fn merge_overlay_keys(
+    out: &mut BTreeSet<Vec<u8>>,
+    overlay: &Overlay,
+    range: &(Bound<Vec<u8>>, Bound<Vec<u8>>),
+) {
+    for (key, entry) in overlay.range(range.clone()) {
         match entry {
-            Some(value) => {
-                out.insert(key.clone(), value.clone());
+            Some(_) => {
+                out.insert(key.clone());
             }
             None => {
                 out.remove(key);
             }
+        }
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    reason = "test code"
+)]
+mod tests {
+    use super::*;
+
+    #[derive(Debug)]
+    struct NoopHost;
+
+    impl KvHost for NoopHost {
+        fn commit(&self, _batch: KvBatch) {}
+    }
+
+    fn open() -> KvStore {
+        KvStore::open(Vec::new(), Arc::new(NoopHost)).unwrap()
+    }
+
+    fn all_range() -> (Bound<Vec<u8>>, Bound<Vec<u8>>) {
+        (
+            Bound::Included(b"k".to_vec()),
+            Bound::Excluded(b"l".to_vec()),
+        )
+    }
+
+    fn put(store: &KvStore, key: &[u8]) {
+        store.put(key.to_vec(), b"v".to_vec()).unwrap();
+    }
+
+    #[test]
+    fn keys_in_reports_committed_keys_only() {
+        let store = open();
+        put(&store, b"k1");
+        put(&store, b"k2");
+        put(&store, b"out");
+        assert_eq!(
+            store.keys_in(all_range()).unwrap(),
+            vec![b"k1".to_vec(), b"k2".to_vec()]
+        );
+        assert!(store.any_key_in(all_range()).unwrap());
+    }
+
+    #[test]
+    fn any_key_in_sees_committed_keys() {
+        let store = open();
+        assert!(!store.any_key_in(all_range()).unwrap());
+        put(&store, b"k1");
+        assert!(store.any_key_in(all_range()).unwrap());
+        assert!(
+            !store
+                .any_key_in((Bound::Included(b"z".to_vec()), Bound::Unbounded))
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn open_transaction_delete_hides_committed_key() {
+        let store = open();
+        put(&store, b"k1");
+        put(&store, b"k2");
+        store
+            .transact::<_, StorageError, _>(|| {
+                store.delete(b"k1")?;
+                assert_eq!(
+                    store.keys_in(all_range())?,
+                    vec![b"k2".to_vec()],
+                    "deleted key must be hidden inside its unit"
+                );
+                assert!(!store.any_key_in((
+                    Bound::Included(b"k1".to_vec()),
+                    Bound::Included(b"k1".to_vec())
+                ))?);
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(
+            store.keys_in(all_range()).unwrap(),
+            vec![b"k2".to_vec()],
+            "committed delete must stay hidden after the unit lands"
+        );
+    }
+
+    #[test]
+    fn nested_savepoint_puts_are_visible() {
+        let store = open();
+        put(&store, b"k1");
+        store
+            .transact::<_, StorageError, _>(|| {
+                store
+                    .savepoint::<_, StorageError, _>(|| {
+                        put(&store, b"k9");
+                        assert!(store.any_key_in((
+                            Bound::Included(b"k9".to_vec()),
+                            Bound::Included(b"k9".to_vec())
+                        ))?);
+                        Ok(())
+                    })
+                    .unwrap();
+                assert_eq!(
+                    store.keys_in(all_range())?,
+                    vec![b"k1".to_vec(), b"k9".to_vec()]
+                );
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn rolled_back_layer_leaves_no_trace() {
+        let store = open();
+        put(&store, b"k1");
+        let result = store.transact::<(), StorageError, _>(|| {
+            store.delete(b"k1")?;
+            put(&store, b"k9");
+            Err(StorageError::Backend("abort".into()))
+        });
+        assert!(result.is_err());
+        assert_eq!(store.keys_in(all_range()).unwrap(), vec![b"k1".to_vec()]);
+        assert!(
+            !store
+                .any_key_in((
+                    Bound::Included(b"k9".to_vec()),
+                    Bound::Included(b"k9".to_vec())
+                ))
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn reads_inside_snapshot_see_live_keys() {
+        let store = open();
+        put(&store, b"k1");
+        store
+            .read_snapshot::<_, StorageError, _>(|| {
+                assert_eq!(store.keys_in(all_range())?, vec![b"k1".to_vec()]);
+                assert!(store.any_key_in(all_range())?);
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn empty_range_finds_nothing() {
+        let store = open();
+        put(&store, b"k1");
+        let empty = (
+            Bound::Included(b"x".to_vec()),
+            Bound::Excluded(b"y".to_vec()),
+        );
+        assert_eq!(store.keys_in(empty.clone()).unwrap(), Vec::<Vec<u8>>::new());
+        assert!(!store.any_key_in(empty).unwrap());
+    }
+
+    #[test]
+    fn inverted_and_excluded_ranges_find_nothing() {
+        let store = open();
+        put(&store, b"k1");
+        for range in [
+            // start > end: `BTreeMap::range` panics.
+            (
+                Bound::Included(b"z".to_vec()),
+                Bound::Included(b"a".to_vec()),
+            ),
+            // start == end, both excluded: also a panic range.
+            (
+                Bound::Excluded(b"k1".to_vec()),
+                Bound::Excluded(b"k1".to_vec()),
+            ),
+            // start == end, one excluded: empty either way.
+            (
+                Bound::Included(b"k1".to_vec()),
+                Bound::Excluded(b"k1".to_vec()),
+            ),
+        ] {
+            assert_eq!(store.keys_in(range.clone()).unwrap(), Vec::<Vec<u8>>::new());
+            assert!(!store.any_key_in(range).unwrap());
         }
     }
 }
