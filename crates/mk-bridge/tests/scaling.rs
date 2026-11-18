@@ -85,6 +85,7 @@ async fn send_time_is_bounded_against_history() {
     let mut relay = FakeRelay::new();
     let mut a = Member::with_host(CompactHost::new());
     let mut b = Member::with_host(CompactHost::new());
+    a.indexed_publish = true;
     a.open().await;
     b.open().await;
     a.publish_identity(&mut relay).await;
