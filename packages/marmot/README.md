@@ -18,7 +18,9 @@ storage and testing support under dedicated subpaths:
 
 - `@qntx/marmot/storage` — `indexedDbKv`, the durable KV driver for
   browsers. It **requires** an injected `cipher` (encrypts every stored
-  value) and `lock` (e.g. `webLocks(navigator.locks)`) — a driver that
+  value, authenticating the row key as associated data so sealed values
+  cannot be swapped between rows) and `lock` (e.g.
+  `webLocks(navigator.locks)`) — a driver that
   cannot take the exclusive lock reports `StorageError` kind `locked`, and
   a driver is terminal after a failed `commit`.
 - `@qntx/marmot/testing` — `memoryKv`, `manualClock`, `fakeRelay` and

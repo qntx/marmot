@@ -12,38 +12,90 @@ const factory: IdbFactoryLike = indexedDB;
 
 const SEAL_PREFIX = Uint8Array.of(0x9d, 0x4c);
 
-/** Rotating cipher with a magic prefix; `open` rejects anything without the prefix. */
+/** A key-binding check byte: `open` under a different key rejects. */
+function keyCheck(key: Uint8Array): number {
+  let sum = 0;
+  for (const byte of key) {
+    sum = (sum + byte) % 256;
+  }
+  return sum;
+}
+
+/** Rotating cipher with a magic prefix and a key check; `open` rejects a wrong prefix or key. */
 const cipher: Cipher = {
-  seal: async (plain) => {
-    const out = new Uint8Array(plain.length + 2);
+  seal: async (key, plain) => {
+    const out = new Uint8Array(plain.length + 3);
     out.set(SEAL_PREFIX);
+    out[2] = keyCheck(key);
     for (const [i, byte] of plain.entries()) {
-      out[i + 2] = (byte + 165) % 256;
+      out[i + 3] = (byte + 165) % 256;
     }
     return Promise.resolve(out);
   },
-  open: async (sealed) => {
-    if (sealed.length < 2 || sealed[0] !== SEAL_PREFIX[0] || sealed[1] !== SEAL_PREFIX[1]) {
+  open: async (key, sealed) => {
+    if (
+      sealed.length < 3 ||
+      sealed[0] !== SEAL_PREFIX[0] ||
+      sealed[1] !== SEAL_PREFIX[1] ||
+      sealed[2] !== keyCheck(key)
+    ) {
       throw new Error("not sealed");
     }
-    const out = new Uint8Array(sealed.length - 2);
-    for (let i = 2; i < sealed.length; i += 1) {
-      out[i - 2] = ((sealed[i] ?? 0) + 91) % 256;
+    const out = new Uint8Array(sealed.length - 3);
+    for (let i = 3; i < sealed.length; i += 1) {
+      out[i - 3] = ((sealed[i] ?? 0) + 91) % 256;
     }
     return Promise.resolve(out);
   },
 };
 
+/** Real WebCrypto AES-GCM bound to the row key via `additionalData`; stored as IV ‖ ciphertext. */
+function aesGcmCipher(keyBytes: Uint8Array): Cipher {
+  const key = crypto.subtle.importKey("raw", new Uint8Array(keyBytes), { name: "AES-GCM" }, false, [
+    "encrypt",
+    "decrypt",
+  ]);
+  return {
+    seal: async (rowKey, plain) => {
+      const iv = crypto.getRandomValues(new Uint8Array(12));
+      const sealed = new Uint8Array(
+        await crypto.subtle.encrypt(
+          { name: "AES-GCM", iv, additionalData: new Uint8Array(rowKey) },
+          await key,
+          new Uint8Array(plain),
+        ),
+      );
+      const out = new Uint8Array(iv.length + sealed.length);
+      out.set(iv);
+      out.set(sealed, iv.length);
+      return out;
+    },
+    open: async (rowKey, sealed) => {
+      return new Uint8Array(
+        await crypto.subtle.decrypt(
+          {
+            name: "AES-GCM",
+            iv: new Uint8Array(sealed.subarray(0, 12)),
+            additionalData: new Uint8Array(rowKey),
+          },
+          await key,
+          new Uint8Array(sealed.subarray(12)),
+        ),
+      );
+    },
+  };
+}
+
 /** A cipher that throws a plain error on its `nth` (1-based) seal call. */
 function flakyCipher(nth: number): Cipher {
   let seals = 0;
   return {
-    seal: async (plain) => {
+    seal: async (key, plain) => {
       seals += 1;
       if (seals === nth) {
         throw new Error("seal unavailable");
       }
-      return cipher.seal(plain);
+      return cipher.seal(key, plain);
     },
     open: cipher.open,
   };
@@ -208,7 +260,7 @@ function plainAppearsIn(value: unknown): boolean {
 }
 
 function roundTrip(value: unknown): number[] {
-  return Array.from(asBytes(value).slice(2), (b) => (b + 91) % 256);
+  return Array.from(asBytes(value).slice(3), (b) => (b + 91) % 256);
 }
 
 describe("indexedDbKv", () => {
@@ -248,6 +300,38 @@ describe("indexedDbKv", () => {
     const again = await indexedDbKv(factory, name, { lock: lock.port, cipher });
     const outcome = await capture(again.load());
     expect(kindOf(outcome)).toBe("corrupt_row");
+    await again.close();
+  });
+
+  test("a sealed row swapped under another key decodes as undecryptable_row", async () => {
+    const name = dbName("swap");
+    const lock = fakeLock();
+    const aead = aesGcmCipher(crypto.getRandomValues(new Uint8Array(32)));
+    const kv = await indexedDbKv(factory, name, { lock: lock.port, cipher: aead });
+    await kv.commit(
+      batch(1n, [
+        { type: "put", key: 1, value: [10, 20] },
+        { type: "put", key: 2, value: [30, 40] },
+      ]),
+    );
+    await kv.close();
+
+    // A clean reopen still round-trips: seal and open pass the right key.
+    const clean = await indexedDbKv(factory, name, { lock: lock.port, cipher: aead });
+    expect(sortedHex(await clean.load())).toStrictEqual(["1=10.20", "2=30.40"]);
+    await clean.close();
+
+    // Swap the stored values behind the driver's back: each row key now
+    // points at a value sealed for the other key. getAll/getAllKeys share
+    // key order, so index 0 is key 1 and index 1 is key 2.
+    const values = await rawValues(name);
+    expect(values).toHaveLength(2);
+    await rawPut(name, Uint8Array.of(1), values[1]);
+    await rawPut(name, Uint8Array.of(2), values[0]);
+
+    const again = await indexedDbKv(factory, name, { lock: lock.port, cipher: aead });
+    const outcome = await capture(again.load());
+    expect(kindOf(outcome)).toBe("undecryptable_row");
     await again.close();
   });
 

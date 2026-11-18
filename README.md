@@ -18,7 +18,7 @@ mk-core -> mk-bridge -> mk-wasm -> @qntx/marmot-wasm
 
 - `packages/marmot` — platform-neutral TypeScript: `core` registries and
   result vocabulary, `backend` (`Engine`, wire codecs), `storage`
-  (`indexedDbKv` with injected cipher + Web Locks), `testing` (`memoryKv`,
+  (`indexedDbKv` with an injected row-key-bound cipher + Web Locks), `testing` (`memoryKv`,
   `manualClock`, `fakeRelay`, `runFlow`).
 - `packages/marmot-wasm` — `@qntx/marmot-wasm`: the loader around the
   release wasm artifact (raw 5,305,909 B, 2,744,694 B gzipped).

@@ -55,28 +55,35 @@ function b64decode(text: string): Uint8Array {
   return out;
 }
 
-/** Test cipher: AES-GCM with a fresh 96-bit IV per value; stored as IV ‖ ciphertext. */
+/**
+ * Test cipher: AES-GCM with a fresh 96-bit IV per value, the row key as `additionalData`; stored as
+ * IV ‖ ciphertext.
+ */
 function aesGcmCipher(keyBytes: Uint8Array): Cipher {
   const key = crypto.subtle.importKey("raw", new Uint8Array(keyBytes), { name: "AES-GCM" }, false, [
     "encrypt",
     "decrypt",
   ]);
   return {
-    seal: async (plain) => {
+    seal: async (rowKey, plain) => {
       const iv = crypto.getRandomValues(new Uint8Array(12));
       const sealed = new Uint8Array(
-        await crypto.subtle.encrypt({ name: "AES-GCM", iv }, await key, new Uint8Array(plain)),
+        await crypto.subtle.encrypt(
+          { name: "AES-GCM", iv, additionalData: new Uint8Array(rowKey) },
+          await key,
+          new Uint8Array(plain),
+        ),
       );
       const out = new Uint8Array(iv.length + sealed.length);
       out.set(iv);
       out.set(sealed, iv.length);
       return out;
     },
-    open: async (sealed) => {
+    open: async (rowKey, sealed) => {
       const iv = new Uint8Array(sealed.subarray(0, 12));
       return new Uint8Array(
         await crypto.subtle.decrypt(
-          { name: "AES-GCM", iv },
+          { name: "AES-GCM", iv, additionalData: new Uint8Array(rowKey) },
           await key,
           new Uint8Array(sealed.subarray(12)),
         ),
@@ -382,7 +389,7 @@ const api: Harness = {
     const rows: Array<{ key: string; value: string }> = [];
     for (let i = 0; i < keys.length; i += 1) {
       // oxlint-disable-next-line no-await-in-loop
-      const plain = await cipher.open(toBytes(values[i]));
+      const plain = await cipher.open(toBytes(keys[i]), toBytes(values[i]));
       rows.push({ key: b64encode(toBytes(keys[i])), value: b64encode(plain) });
     }
     return rows;

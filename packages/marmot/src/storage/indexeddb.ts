@@ -158,9 +158,9 @@ class IndexedDbKv implements KvDriver {
       return [rowKey, rowValue] as const;
     });
     const plains = await Promise.all(
-      pairs.map(async ([, value]) => {
+      pairs.map(async ([rowKey, value]) => {
         try {
-          return await this.cipher.open(value);
+          return await this.cipher.open(rowKey, value);
         } catch {
           throw new StorageError("undecryptable_row");
         }
@@ -214,7 +214,9 @@ class IndexedDbKv implements KvDriver {
   private async apply(batch: Uint8Array): Promise<void> {
     const decoded = decodeKvBatch(batch);
     const sealed = await Promise.all(
-      decoded.ops.map(async (op) => (op.type === "put" ? this.cipher.seal(op.value) : undefined)),
+      decoded.ops.map(async (op) =>
+        op.type === "put" ? this.cipher.seal(op.key, op.value) : undefined,
+      ),
     );
     const txn = this.db.transaction(STORE, "readwrite", { durability: "strict" });
     const store = txn.objectStore(STORE);
