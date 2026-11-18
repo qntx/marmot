@@ -116,6 +116,13 @@ pub struct HostState {
     pub last_served: Vec<u8>,
 }
 
+/// The durable-row view a host must expose for the publish loop's
+/// durability invariant: the row values a crash could not lose.
+pub trait DurableValues {
+    /// Every `Put` value durable at `watermark`.
+    fn durable_values(&self, watermark: u64) -> Vec<Vec<u8>>;
+}
+
 /// An in-memory host: records batches in commit order and rebuilds the
 /// durable row set from them on `load`. A commit failure poisons the
 /// bridge, matching an unrecoverable storage error.
@@ -149,11 +156,12 @@ impl MemHost {
     pub fn truncate(&self, n: usize) {
         self.state.lock().unwrap().history.truncate(n);
     }
+}
 
-    /// Durable row values behind the invariant check: every `Put` value
-    /// of committed batches up to `watermark`, plus the row set this
-    /// incarnation loaded at `open`.
-    pub fn durable_values(&self, watermark: u64) -> Vec<Vec<u8>> {
+impl DurableValues for MemHost {
+    /// Every `Put` value of committed batches up to `watermark`, plus the
+    /// row set this incarnation loaded at `open`.
+    fn durable_values(&self, watermark: u64) -> Vec<Vec<u8>> {
         let state = self.state.lock().unwrap();
         let mut values: Vec<Vec<u8>> = state
             .history
@@ -198,6 +206,56 @@ impl Host for MemHost {
         }
         let batch = KvBatch::decode(batch).map_err(|_| HostError::new())?;
         state.history.push(batch);
+        Ok(())
+    }
+}
+
+/// An in-memory host that keeps only the compacted current row set — no
+/// batch history — so process memory reflects the durable store, not the
+/// driver's journal.
+#[derive(Clone, Default)]
+pub struct CompactHost {
+    rows: Arc<Mutex<BTreeMap<Vec<u8>, Vec<u8>>>>,
+}
+
+impl CompactHost {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// A snapshot of the current row set.
+    pub fn rows(&self) -> Vec<Row> {
+        self.rows
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect()
+    }
+}
+
+impl DurableValues for CompactHost {
+    /// Every row is committed by construction; the watermark is advisory.
+    fn durable_values(&self, _watermark: u64) -> Vec<Vec<u8>> {
+        self.rows.lock().unwrap().values().cloned().collect()
+    }
+}
+
+impl Host for CompactHost {
+    fn load(&mut self) -> Result<Vec<u8>, HostError> {
+        let rows: Vec<Row> = self
+            .rows
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect();
+        Ok(encode_rows(&rows))
+    }
+
+    fn commit(&mut self, batch: &[u8]) -> Result<(), HostError> {
+        let batch = KvBatch::decode(batch).map_err(|_| HostError::new())?;
+        apply(&mut self.rows.lock().unwrap(), &batch);
         Ok(())
     }
 }
@@ -320,9 +378,9 @@ pub fn hex_to_32(text: &str) -> [u8; 32] {
 }
 
 /// One account-device bridge under test.
-pub struct Member {
-    pub bridge: Bridge<MemHost>,
-    pub host: MemHost,
+pub struct Member<H: Host = MemHost> {
+    pub bridge: Bridge<H>,
+    pub host: H,
     pub signer: LocalSigner,
     pub unix_ms: u64,
     pub mono_ms: u64,
@@ -333,10 +391,19 @@ pub struct Member {
     pub acked: u64,
 }
 
-impl Member {
+impl Member<MemHost> {
     /// A fresh bridge over empty storage.
     pub fn new() -> Self {
-        let host = MemHost::new();
+        Self::with_host(MemHost::new())
+    }
+}
+
+impl<H> Member<H>
+where
+    H: Host + DurableValues + Clone,
+{
+    /// A fresh bridge over `host`.
+    pub fn with_host(host: H) -> Self {
         Self {
             bridge: Bridge::new(host.clone()),
             host,
