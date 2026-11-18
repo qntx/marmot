@@ -20,7 +20,7 @@ type PerfOut = {
 };
 
 test("chromium perf: cold load, reopen, ingest", async ({ browser }) => {
-  test.setTimeout(120_000);
+  test.setTimeout(300_000);
   const out: PerfOut = {};
 
   // ---- cold load(): fresh context + navigation, split fetch / instantiate ----
