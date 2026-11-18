@@ -7,9 +7,15 @@
   project's own copy under `crates/interop`, `crates/conformance`, `fuzz/`).
 - `cargo-deny` — supply-chain check (`cargo install cargo-deny`).
 - `cargo-hack` — per-feature check (`cargo install cargo-hack`).
-- **Android NDK** — only for the `aarch64-linux-android` check
-  (`secp256k1-sys` compiles C); point `CC_aarch64_linux_android` at the NDK
-  clang.
+- **Android NDK `27.1.12297006`** — for the `aarch64-linux-android` check
+  (`secp256k1-sys` compiles C) and for `build:native --android`; point
+  `CC_aarch64_linux_android` at the NDK clang, or set `ANDROID_NDK_HOME` /
+  install under `~/Library/Android/sdk/ndk/`.
+- **Xcode** — only for `build:native --ios` (the xcframework step uses
+  `xcodebuild` and the iOS SDK clang).
+- **rustup targets** — only for `build:native`:
+  `rustup target add aarch64-apple-ios aarch64-apple-ios-sim
+  aarch64-linux-android x86_64-linux-android`
 - **Rust nightly + cargo-fuzz 0.13** — only for fuzzing
   (`cargo install cargo-fuzz`).
 - **wasm-bindgen-cli** — only for `build:wasm`; the version must equal
@@ -43,6 +49,11 @@ packages/marmot-wasm/ @qntx/marmot-wasm — loader around the mk-wasm
 crates/mk-core/       pure-Rust core: KV storage provider + Session API
 crates/mk-bridge/     byte-oriented JSON host protocol over mk-core
 crates/mk-wasm/       wasm-bindgen shell over mk-bridge
+crates/mk-ffi/        C ABI over mk-bridge (marmot_ffi.h); one engine
+                      thread per handle, the only crate with `unsafe`
+packages/marmot-native/ @qntx/marmot-native — React Native Backend:
+                      C++ Nitro HybridObjects over the mk-ffi prebuilts
+                      (ios/MarmotFfi.xcframework, android jniLibs)
 crates/interop/       standalone project — wn/wnd scenario tests against
                       the public Session API (excluded from the workspace)
 crates/conformance/   standalone project — recorded MDK vectors replayed
@@ -154,6 +165,34 @@ cargo +nightly fuzz run <target> -- -max_total_time=60
 
 CI (`ci-rust-fuzz`) runs every target for 60 s starting from an empty
 corpus — no seeds needed there.
+
+## Native build (`packages/marmot-native`)
+
+`bun run build:native [--ios] [--android] [--host]` (no flag = `--ios
+--android`) builds the `mk-ffi` staticlib with `--profile native`
+(panic=unwind — the FFI boundary's `catch_unwind` needs it; `release` is
+panic=abort) and relinks each shared artifact itself:
+
+- `--ios` (macOS + Xcode): `aarch64-apple-ios` and `aarch64-apple-ios-sim`
+  only → two dynamic `MarmotFfi.framework`s (install name
+  `@rpath/MarmotFfi.framework/MarmotFfi`, min iOS 15.1) →
+  `xcodebuild -create-xcframework` →
+  `packages/marmot-native/ios/MarmotFfi.xcframework`.
+- `--android` (NDK `27.1.12297006`): `arm64-v8a` and `x86_64` →
+  `libmarmot_ffi.so` under `android/src/main/jniLibs/<abi>/`, linked with
+  `-z max-page-size=16384` and `-soname,libmarmot_ffi.so`, then
+  `llvm-strip --strip-unneeded`. The script fails unless SONAME is set and
+  every LOAD segment is ≥ 16 KB aligned (`llvm-readelf -lW`).
+- `--host`: the host shared library under `target/native/` — the CI export
+  gate (`.github/workflows/ci.yml` `native` job runs it on Ubuntu).
+
+The final link is ours (not rustc's): rustc's cdylib link unions its own
+export list — every `#[no_mangle]` item in the dep graph — with any list we
+add, so secp256k1-sys symbols would leak into the dynamic table. Relinking
+the staticlib with `-force_load`/`--whole-archive` plus a generated
+`-exported_symbols_list`/`--version-script` makes the dynamic table exactly
+the seven `mk_*` symbols; the script asserts that set per artifact (which
+also proves `mk_bridge_test_panic` never ships) and prints size + SHA-256.
 
 ## Commits
 
