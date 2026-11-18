@@ -37,7 +37,7 @@ jobs:
       deny: true
       doc: true
       each-feature: true
-      packages: mk-core mk-bridge mk-wasm
+      packages: mk-core mk-bridge mk-wasm mk-ffi
       # No package-check: every crate here is `publish = false`.
 
   rust-minimal:
@@ -45,7 +45,7 @@ jobs:
     permissions:
       contents: read
     with:
-      packages: mk-core mk-bridge mk-wasm
+      packages: mk-core mk-bridge mk-wasm mk-ffi
       features: --no-default-features
 
   # secp256k1-sys compiles C on every target; ci-rust-cross supplies the wasm
@@ -60,6 +60,19 @@ jobs:
       targets: wasm32-unknown-unknown aarch64-apple-ios aarch64-linux-android
       packages: mk-core mk-bridge
       forbid-deps: rusqlite libsqlite3-sys
+
+  # mk-ffi is a separate portable job: it is not a wasm target (its
+  # `staticlib` crate-type cannot emit for wasm32-unknown-unknown, so it
+  # cannot share the `portable` package list). The reusable workflow
+  # covers every triple below: *apple-ios* builds on macos-latest and
+  # *android* goes through cargo-ndk.
+  portable-ffi:
+    uses: qntx/workflows/.github/workflows/ci-rust-cross.yml@v2
+    permissions:
+      contents: read
+    with:
+      targets: aarch64-apple-ios aarch64-apple-ios-sim aarch64-linux-android x86_64-linux-android
+      packages: mk-ffi
 
   # crates/interop is a standalone project (own workspace/lockfile/deny.toml);
   # it compiles and lints here and runs its non-ignored tests. The wn/wnd
