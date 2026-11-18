@@ -97,6 +97,26 @@ impl QueueSigner {
     }
 }
 
+/// A `sign_event` reply: a refusal survives as [`SignerError::Refused`];
+/// a `failed` reply or a mismatched result kind is a generic failure.
+fn sign_reply(result: SignerResult) -> Result<Event, SignerError> {
+    match result {
+        SignerResult::Signed { event } => Ok(event.into()),
+        SignerResult::Refused => Err(SignerError::Refused),
+        _ => Err(SignerError::Failed("host signer reply".to_owned())),
+    }
+}
+
+/// A `nip44_*` reply: a refusal survives as [`SignerError::Refused`]; a
+/// `failed` reply or a mismatched result kind is a generic failure.
+fn text_reply(result: SignerResult) -> Result<String, SignerError> {
+    match result {
+        SignerResult::Text { text } => Ok(text),
+        SignerResult::Refused => Err(SignerError::Refused),
+        _ => Err(SignerError::Failed("host signer reply".to_owned())),
+    }
+}
+
 impl AccountSigner for QueueSigner {
     fn account(&self) -> AccountId {
         self.account
@@ -107,10 +127,7 @@ impl AccountSigner for QueueSigner {
             SignerOp::SignEvent {
                 unsigned: unsigned.into(),
             },
-            |result| match result {
-                SignerResult::Signed { event } => Ok(event.into()),
-                _ => Err(SignerError::Failed("host signer reply".to_owned())),
-            },
+            sign_reply,
         )
     }
 
@@ -124,10 +141,7 @@ impl AccountSigner for QueueSigner {
                 peer: peer.0,
                 plaintext: plaintext.to_owned(),
             },
-            |result| match result {
-                SignerResult::Text { text } => Ok(text),
-                _ => Err(SignerError::Failed("host signer reply".to_owned())),
-            },
+            text_reply,
         )
     }
 
@@ -141,10 +155,7 @@ impl AccountSigner for QueueSigner {
                 peer: peer.0,
                 ciphertext: ciphertext.to_owned(),
             },
-            |result| match result {
-                SignerResult::Text { text } => Ok(text),
-                _ => Err(SignerError::Failed("host signer reply".to_owned())),
-            },
+            text_reply,
         )
     }
 }

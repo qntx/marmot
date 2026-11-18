@@ -718,6 +718,19 @@ pub fn error_kind(response: &Response) -> String {
     }
 }
 
+/// The fixed reason label of an error response, unwrapped.
+pub fn error_reason(response: &Response) -> String {
+    match response {
+        Response::Error { error } => serde_json::to_value(error)
+            .expect("error encodes")
+            .get("reason")
+            .and_then(Value::as_str)
+            .expect("error has reason")
+            .to_owned(),
+        other => panic!("expected error: {other:?}"),
+    }
+}
+
 /// The error kind of an open error response, unwrapped.
 pub fn open_error_kind(response: &OpenResponse) -> String {
     match response {

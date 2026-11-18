@@ -769,6 +769,136 @@ async fn durability_gate() {
     );
 }
 
+/// A host `refused`/`failed` signer reply surfaces as a `signer` error
+/// carrying the matching reason; the bridge settles back to Ready and the
+/// refused operation releases nothing. On the welcome path the same refusal
+/// fails the gift-wrap unwrap inside the engine, which is indistinguishable
+/// from a corrupted wrap: the event is rejected, not errored.
+#[tokio::test(flavor = "current_thread")]
+async fn signer_refusal() {
+    let mut relay = FakeRelay::new();
+
+    for (result, reason) in [
+        (SignerResult::Refused, "refused"),
+        (SignerResult::Failed, "failed"),
+    ] {
+        let mut a = Member::new();
+        a.open().await;
+        let response = a.call_once(Request::PublishKeyPackage(PublishKeyPackageRequest {
+            relays: vec![RELAY.to_owned()],
+        }));
+        let Response::SignerPending { requests } = response else {
+            panic!("publish_key_package suspends: {response:?}")
+        };
+        let replies = requests
+            .iter()
+            .map(|request| SignerReply {
+                id: request.id,
+                result: result.clone(),
+            })
+            .collect();
+        let response = a.call_once(Request::SignerReply(SignerReplyRequest { replies }));
+        assert_eq!(error_kind(&response), "signer");
+        assert_eq!(error_reason(&response), reason);
+
+        // Settled back to Ready; ack what the op committed and nothing of
+        // it is released.
+        let response = a.call(Request::Groups(NoArgs {})).await;
+        assert!(
+            matches!(response, Response::Ok { .. }),
+            "ready: {response:?}"
+        );
+        let last = a
+            .host
+            .state
+            .lock()
+            .unwrap()
+            .history
+            .last()
+            .map(|batch| batch.seq.get())
+            .unwrap_or(0);
+        let response = a
+            .call(Request::AckDurable(AckDurableRequest { seq: last }))
+            .await;
+        assert!(matches!(response, Response::Ok { .. }), "ack: {response:?}");
+        let Response::Ok { result: taken } = a.call(Request::TakeOutbound(NoArgs {})).await else {
+            panic!()
+        };
+        let OpResult::Outbound(OutboundResult { items }) = *taken else {
+            panic!()
+        };
+        assert!(items.is_empty(), "a {reason} reply releases no outbound");
+    }
+
+    // nip44: B's welcome ingest decrypts through the signer.
+    let mut a = Member::new();
+    let mut b = Member::new();
+    a.open().await;
+    b.open().await;
+    a.publish_identity(&mut relay).await;
+    b.publish_identity(&mut relay).await;
+    let response = a
+        .call(Request::CreateGroup(CreateGroupRequest {
+            name: "g".to_owned(),
+            description: String::new(),
+            relays: vec![RELAY.to_owned()],
+            invitees: vec![Invitee {
+                key_package: key_package_of(&relay, &b.account_hex()),
+                inbox_relays: vec![RELAY.to_owned()],
+            }],
+            admins: Vec::new(),
+            components: Vec::new(),
+        }))
+        .await;
+    assert!(
+        matches!(response, Response::Ok { .. }),
+        "create: {response:?}"
+    );
+    a.publish(&mut relay).await;
+    let welcomes = welcomes_for(&relay, &b.account_hex());
+    assert_ne!(welcomes.len(), 0, "welcome published");
+    let response = b.call_once(Request::Ingest(IngestRequest { events: welcomes }));
+    let Response::SignerPending { requests } = response else {
+        panic!("welcome ingest suspends on nip44: {response:?}")
+    };
+    assert!(
+        requests
+            .iter()
+            .any(|request| matches!(&request.op, SignerOp::Nip44Decrypt { .. })),
+        "welcome unwrap asks nip44_decrypt: {requests:?}"
+    );
+    let replies = requests
+        .iter()
+        .map(|request| SignerReply {
+            id: request.id,
+            result: SignerResult::Refused,
+        })
+        .collect();
+    let response = b.call_once(Request::SignerReply(SignerReplyRequest { replies }));
+    let Response::Ok { result } = response else {
+        panic!("refused welcome rejects, not errors: {response:?}")
+    };
+    let OpResult::Ingested(IngestedResult { reports }) = *result else {
+        panic!()
+    };
+    assert!(
+        reports
+            .iter()
+            .all(|report| matches!(report.outcome, InputOutcome::Rejected { .. })),
+        "refused welcome rejected: {reports:?}"
+    );
+
+    // The bridge settles back to Ready and B never joined the group.
+    let response = b.call(Request::Groups(NoArgs {})).await;
+    let Response::Ok { result } = response else {
+        panic!("b ready: {response:?}")
+    };
+    let OpResult::Groups(GroupsResult { groups }) = *result else {
+        panic!()
+    };
+    assert!(groups.is_empty(), "a refused welcome leaves no group");
+}
+
 /// Ingest order invariance: the same backlog delivered ascending,
 /// descending and deterministically shuffled converges to identical
 /// snapshots and message sets.
