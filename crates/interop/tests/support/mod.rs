@@ -39,6 +39,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use mk_bridge as _;
 use mk_core::testing::{LocalSigner, RecordingHost};
 use mk_core::{
     AccountId, AccountSigner, Clock, DestinationPolicy, Event, GroupId, KvHost, Opened, Outbound,

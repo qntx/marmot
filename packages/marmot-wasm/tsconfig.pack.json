@@ -1,0 +1,9 @@
+{
+  // Pack resolves `@qntx/marmot` through the built package's exports. Pointing `paths` at
+  // marmot's sources (as tsconfig.json does for tests/typecheck) makes tsgo emit `.d.ts`
+  // files beside those sources.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "paths": {}
+  }
+}

@@ -1,8 +1,10 @@
 /**
  * @qntx/marmot — public facade.
  *
- * Only the `core` leaf exists today; prefer the `@qntx/marmot/core` subpath
- * for tree-shaking once further layers land.
+ * Prefer the `@qntx/marmot/backend` / `/storage` / `/core` subpaths for
+ * tree-shaking; `testing` is only exported as a subpath.
  */
 
 export * from "./core/index.ts";
+export * from "./backend/index.ts";
+export * from "./storage/index.ts";

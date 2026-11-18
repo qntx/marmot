@@ -1,0 +1,82 @@
+{
+  "name": "@qntx/marmot-wasm",
+  "version": "0.0.0",
+  "description": "WASM build of the marmot bridge: the mk-bridge byte protocol for JavaScript hosts",
+  "keywords": [
+    "marmot",
+    "mls",
+    "nostr",
+    "sdk",
+    "typescript",
+    "wasm"
+  ],
+  "homepage": "https://github.com/qntx/marmot#readme",
+  "bugs": {
+    "url": "https://github.com/qntx/marmot/issues"
+  },
+  "license": "MIT OR Apache-2.0",
+  "author": "QuantX <x@qntx.org>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/qntx/marmot.git",
+    "directory": "packages/marmot-wasm"
+  },
+  "files": [
+    "dist",
+    "LICENSE-MIT",
+    "LICENSE-APACHE"
+  ],
+  "type": "module",
+  "sideEffects": [
+    "**/*.wasm"
+  ],
+  "types": "./dist/index.d.mts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.mts",
+      "import": "./dist/index.mjs",
+      "default": "./dist/index.mjs"
+    },
+    "./package.json": "./package.json"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "vp pack",
+    "dev": "vp pack --watch",
+    "build:wasm": "bun ../../scripts/build-wasm.ts && vp pack && cp src/generated/marmot_wasm_bg.wasm dist/marmot_wasm_bg.wasm",
+    "test": "vp test tests/unit",
+    "test:wasm": "vp test tests/wasm && bun test tests/bun",
+    "check:size": "bun ../../scripts/check-wasm-size.ts",
+    "check:generated": "bun ../../scripts/check-generated.ts",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.src.json",
+    "check:pkg": "vp pack && publint && attw --pack . --profile esm-only",
+    "test:browser": "bun e2e/build.ts && playwright test flow.spec.ts locks.spec.ts kill.spec.ts perf.spec.ts",
+    "test:browser:memory": "bun e2e/build.ts && playwright test memory.spec.ts"
+  },
+  "dependencies": {
+    "@qntx/marmot": "^0.0.0"
+  },
+  "devDependencies": {
+    "@arethetypeswrong/cli": "0.18.5",
+    "@playwright/test": "1.65.0",
+    "@qntx/tsconfig": "1.0.1",
+    "@types/node": "26.6.5",
+    "binaryen": "132.0.0",
+    "nostr-tools": "2.26.0",
+    "publint": "0.3.25",
+    "typescript": "7.0.2",
+    "vite-plus": "1.4.0"
+  },
+  "devEngines": {
+    "packageManager": {
+      "name": "bun",
+      "version": "1.4.0",
+      "onFail": "ignore"
+    }
+  },
+  "engines": {
+    "node": ">=20.19.0"
+  }
+}

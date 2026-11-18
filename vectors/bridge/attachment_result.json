@@ -1,0 +1,24 @@
+{
+  "ok": {
+    "reference": {
+      "ciphertext_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "dim": "10x10",
+      "filename": "a.png",
+      "locators": [
+        {
+          "kind": "https",
+          "value": "https://blob.example/aa"
+        }
+      ],
+      "media_type": "image/png",
+      "nonce": "010101010101010101010101",
+      "plaintext_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "thumbhash": "AA=="
+    },
+    "type": "ok"
+  },
+  "rejected": {
+    "reason": "duplicate_field",
+    "type": "rejected"
+  }
+}

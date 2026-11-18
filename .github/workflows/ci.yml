@@ -37,7 +37,7 @@ jobs:
       deny: true
       doc: true
       each-feature: true
-      packages: mk-core
+      packages: mk-core mk-bridge mk-wasm
       # No package-check: every crate here is `publish = false`.
 
   rust-minimal:
@@ -45,7 +45,7 @@ jobs:
     permissions:
       contents: read
     with:
-      packages: mk-core
+      packages: mk-core mk-bridge mk-wasm
       features: --no-default-features
 
   # secp256k1-sys compiles C on every target; ci-rust-cross supplies the wasm
@@ -58,7 +58,7 @@ jobs:
       contents: read
     with:
       targets: wasm32-unknown-unknown aarch64-apple-ios aarch64-linux-android
-      packages: mk-core
+      packages: mk-core mk-bridge
       forbid-deps: rusqlite libsqlite3-sys
 
   # crates/interop is a standalone project (own workspace/lockfile/deny.toml);
@@ -121,6 +121,7 @@ jobs:
 
   # cargo fuzz starts from an empty corpus when fuzz/corpus/<target> is
   # absent (it is gitignored; seeds regenerate via fuzz's gen_corpus bin).
+  # The fuzz job discovers every fuzz_targets/*.rs stem automatically.
   fuzz:
     uses: qntx/workflows/.github/workflows/ci-rust-fuzz.yml@v2
     permissions:
@@ -128,3 +129,75 @@ jobs:
     with:
       fuzz-directory: fuzz
       max-total-time: 60
+
+  # Release wasm (opt-level z + wasm-opt -Oz): gzip gate (<= 3,000,000 B),
+  # committed wasm-bindgen glue is current, Node 22 + Bun flow suites.
+  # setup-wasm installs Rust from rust-toolchain.toml, the wasm32 C
+  # toolchain secp256k1-sys needs, and wasm-bindgen-cli at the Cargo.lock
+  # version.
+  wasm:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: packages/marmot-wasm
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: qntx/workflows/actions/setup-wasm@v2
+        with:
+          package-directory: packages/marmot-wasm
+          dist-export: .
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: "1.4"
+      - run: bun install --frozen-lockfile
+        working-directory: .
+      - run: bun run build:wasm
+      - uses: qntx/workflows/actions/setup-wasm@v2
+        with:
+          toolchain: false
+          dist-check: true
+          package-directory: packages/marmot-wasm
+          dist-export: .
+      - run: bun run check:size
+      - run: bun run check:generated
+      - run: node --version && bun run test:wasm
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: marmot-wasm-dist
+          path: packages/marmot-wasm/dist
+          retention-days: 1
+
+  # Chromium (Playwright): flow over IndexedDB, kill-during-write, two-tab
+  # Web Locks, perf budget — against the artifact the wasm job built.
+  browser:
+    needs: wasm
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: packages/marmot-wasm
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: "1.4"
+      - run: bun install --frozen-lockfile
+        working-directory: .
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: marmot-wasm-dist
+          path: packages/marmot-wasm/dist
+      - run: bunx playwright install --with-deps chromium
+      - run: bun run test:browser

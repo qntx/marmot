@@ -1,0 +1,32 @@
+[package]
+name                   = "mk-wasm"
+description            = "Marmot kit wasm shell: wasm-bindgen bindings that surface the mk-bridge byte protocol to JavaScript hosts."
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+repository.workspace   = true
+authors.workspace      = true
+keywords.workspace     = true
+categories             = ["cryptography", "wasm"]
+publish                = false
+
+[lib]
+name       = "marmot_wasm"
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = []
+# Test-only `triggerPanic` export; never enabled in shipped builds and the
+# size check asserts its absence from the release artifact.
+test-panic = []
+
+[dependencies]
+js-sys         = "0.3"
+mk-bridge      = { path = "../mk-bridge", version = "=0.0.0" }
+universal-time = "0.3"
+wasm-bindgen   = "=0.2.130"
+web-time       = "1"
+
+[lints]
+workspace = true

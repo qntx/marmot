@@ -1,0 +1,9 @@
+{
+  "now": {
+    "unix_ms": "1700000000000",
+    "monotonic_ms": "42000"
+  },
+  "request": {
+    "type": "tick"
+  }
+}

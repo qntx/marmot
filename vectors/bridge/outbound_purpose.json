@@ -1,0 +1,9 @@
+{
+  "application_message": "application_message",
+  "commit": "commit",
+  "inbox_relays": "inbox_relays",
+  "key_package": "key_package",
+  "proposal": "proposal",
+  "unmapped": "unmapped",
+  "welcome": "welcome"
+}

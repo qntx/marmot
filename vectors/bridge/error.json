@@ -1,0 +1,145 @@
+{
+  "admin_depletion": {
+    "kind": "admin_depletion"
+  },
+  "already_open": {
+    "kind": "already_open"
+  },
+  "attachment_limit": {
+    "kind": "attachment_limit"
+  },
+  "awaiting_proof": {
+    "kind": "awaiting_proof"
+  },
+  "busy": {
+    "kind": "busy"
+  },
+  "clock_regressed": {
+    "kind": "clock_regressed"
+  },
+  "closed": {
+    "kind": "closed"
+  },
+  "confirm_conflict": {
+    "kind": "confirm_conflict"
+  },
+  "engine": {
+    "detail": "engine_error",
+    "kind": "engine"
+  },
+  "group_busy": {
+    "kind": "group_busy"
+  },
+  "host_failed": {
+    "kind": "host_failed"
+  },
+  "host_rows_invalid": {
+    "kind": "host_rows_invalid"
+  },
+  "internal": {
+    "kind": "internal",
+    "site": "site"
+  },
+  "invalid_input": {
+    "field": "field",
+    "kind": "invalid_input"
+  },
+  "invalid_relay_url": {
+    "kind": "invalid_relay_url"
+  },
+  "invalid_request": {
+    "kind": "invalid_request",
+    "reason": "hex"
+  },
+  "invalid_transport_event": {
+    "kind": "invalid_transport_event"
+  },
+  "leave_already_requested": {
+    "kind": "leave_already_requested"
+  },
+  "media": {
+    "kind": "media",
+    "reason": "media_error"
+  },
+  "media_epoch_stale": {
+    "kind": "media_epoch_stale"
+  },
+  "media_epoch_unsettled": {
+    "kind": "media_epoch_unsettled"
+  },
+  "media_not_enabled": {
+    "kind": "media_not_enabled"
+  },
+  "media_secret_unavailable": {
+    "kind": "media_secret_unavailable"
+  },
+  "missing_required_capabilities": {
+    "kind": "missing_required_capabilities"
+  },
+  "no_pending_signer": {
+    "kind": "no_pending_signer"
+  },
+  "not_a_member": {
+    "kind": "not_a_member"
+  },
+  "not_group_admin": {
+    "kind": "not_group_admin"
+  },
+  "not_open": {
+    "kind": "not_open"
+  },
+  "open_failed": {
+    "detail": "storage_error",
+    "kind": "open_failed",
+    "reason": "storage"
+  },
+  "poisoned": {
+    "kind": "poisoned"
+  },
+  "proof_rejected": {
+    "kind": "proof_rejected",
+    "reason": "wrong_account"
+  },
+  "protocol_version_mismatch": {
+    "expected": 1,
+    "got": 2,
+    "kind": "protocol_version_mismatch"
+  },
+  "reserved_app_event": {
+    "kind": "reserved_app_event"
+  },
+  "signer": {
+    "kind": "signer",
+    "reason": "refused"
+  },
+  "storage": {
+    "kind": "storage"
+  },
+  "too_large": {
+    "kind": "too_large",
+    "limit": "67108864"
+  },
+  "unknown_attachment": {
+    "kind": "unknown_attachment"
+  },
+  "unknown_group": {
+    "kind": "unknown_group"
+  },
+  "unknown_outbound": {
+    "kind": "unknown_outbound"
+  },
+  "unknown_seq": {
+    "kind": "unknown_seq"
+  },
+  "unknown_signer_request": {
+    "kind": "unknown_signer_request"
+  },
+  "unsupported": {
+    "kind": "unsupported"
+  },
+  "unsupported_ciphersuite": {
+    "got": 1,
+    "kind": "unsupported_ciphersuite",
+    "required": 2
+  }
+}

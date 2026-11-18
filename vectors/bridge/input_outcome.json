@@ -1,0 +1,31 @@
+{
+  "accepted": {
+    "type": "accepted"
+  },
+  "deferred": {
+    "category": "missing_history",
+    "type": "deferred"
+  },
+  "local": {
+    "state": "removed",
+    "type": "local"
+  },
+  "recovery_offered": {
+    "type": "recovery_offered"
+  },
+  "rejected": {
+    "category": "invalid_signature",
+    "type": "rejected"
+  },
+  "stale": {
+    "category": "stale_epoch",
+    "type": "stale"
+  },
+  "unavailable": {
+    "category": "transport_deferred",
+    "type": "unavailable"
+  },
+  "unmapped": {
+    "type": "unmapped"
+  }
+}

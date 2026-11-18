@@ -12,6 +12,15 @@
   clang.
 - **Rust nightly + cargo-fuzz 0.13** — only for fuzzing
   (`cargo install cargo-fuzz`).
+- **wasm-bindgen-cli** — only for `build:wasm`; the version must equal
+  `Cargo.lock`'s `wasm-bindgen` (currently 0.2.130). Install it beside the
+  worktree as `cargo install wasm-bindgen-cli --version <locked> --locked
+  --root <worktree>/target/wasm-bindgen-cli`; the build script finds it
+  there or on `PATH` and fails clearly on a mismatch.
+- **binaryen** — installed by `bun install` (`binaryen` devDependency);
+  `build:wasm` runs its `wasm-opt -Oz` on the release artifact.
+- **Playwright Chromium** — only for `test:browser`
+  (`bunx playwright install --with-deps chromium`).
 - **Odin `dev-2026-10`, rev `84bc3fc`** — only for `crates/conformance`
   (its simulator dep compiles `marmot-markdown`) and for building `wn`/`wnd`
   for interop. Install with MDK's checksum-pinned installer:
@@ -27,9 +36,13 @@
 
 ```text
 packages/marmot/      @qntx/marmot — platform-neutral TypeScript SDK
-                      (today: src/core registries + result vocabulary)
+                      (src/{core,backend,storage,testing})
+packages/marmot-wasm/ @qntx/marmot-wasm — loader around the mk-wasm
+                      artifact (committed wasm-bindgen glue, gitignored
+                      .wasm)
 crates/mk-core/       pure-Rust core: KV storage provider + Session API
-                      (publish = false, no bindings yet)
+crates/mk-bridge/     byte-oriented JSON host protocol over mk-core
+crates/mk-wasm/       wasm-bindgen shell over mk-bridge
 crates/interop/       standalone project — wn/wnd scenario tests against
                       the public Session API (excluded from the workspace)
 crates/conformance/   standalone project — recorded MDK vectors replayed
@@ -120,12 +133,16 @@ Each run uses a fresh temporary `WN_HOME` (`WN_SECRET_STORE=file`,
 Blossom server binds loopback), removed when the `Wnd` guard drops; `wnd`
 logs land under `crates/interop/target/wn-logs/`. Per-scenario
 `SCENARIO-N PASS|REFUSED <evidence> <seconds>` lines print to stderr.
+Scenarios 1–6 drive the public `Session` API; scenario 7
+(`tests/bridge.rs`) replays the wn-invites-us flow with every local
+action driven through `mk-bridge` request/response bytes — the same
+surface wasm and C hosts use.
 
 ## Fuzzing (`fuzz/`)
 
-Seven libFuzzer targets cover every decoder mk-core owns (kv batch, kv rows,
+Nine libFuzzer targets cover every decoder we own (kv batch, kv rows,
 event JSON, account proof, key-package event, imeta parse, agent-stream
-tags). The seed corpus is generated
+tags, plus the mk-bridge request and config decoders). The seed corpus is generated
 from real session artifacts and is gitignored — regenerate it when the row
 formats change:
 

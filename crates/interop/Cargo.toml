@@ -17,6 +17,7 @@ workspace = true
 
 [dev-dependencies]
 mk-core    = { path = "../mk-core", version = "=0.0.0", features = ["testing"] }
+mk-bridge  = { path = "../mk-bridge", version = "=0.0.0" }
 nostr      = { git = "https://github.com/erskingardner/rust-nostr", rev = "e93cc06b5624f06c21ecd8111a124176eb0c7589", version = "=0.45.5" }
 nostr-sdk  = { git = "https://github.com/erskingardner/rust-nostr", rev = "e93cc06b5624f06c21ecd8111a124176eb0c7589", version = "=0.45.4", features = ["local-relay"] }
 axum       = "0.7"
