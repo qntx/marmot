@@ -1,0 +1,19 @@
+{
+  "$schema": "https://nitro.margelo.com/nitro.schema.json",
+  "cxxNamespace": ["marmotnative"],
+  "ios": {
+    "iosModuleName": "MarmotNative"
+  },
+  "android": {
+    "androidNamespace": ["marmotnative"],
+    "androidCxxLibName": "MarmotNative"
+  },
+  "autolinking": {
+    "MarmotNative": {
+      "all": {
+        "language": "c++",
+        "implementationClassName": "HybridMarmotNative"
+      }
+    }
+  }
+}
