@@ -730,6 +730,23 @@ mod indexed_queries {
         out
     }
 
+    /// The latest Processed application-classified row, located through
+    /// the index key alone (state byte 2, class byte 3).
+    fn last_processed_application_row_key(rows: &[(Vec<u8>, Vec<u8>)]) -> Option<Vec<u8>> {
+        let mut target = None;
+        for (key, _) in rows {
+            let segs = segments(key);
+            if key.first() == Some(&TABLE_MESSAGE_STATE)
+                && segs.len() == 7
+                && segs[1] == [STATE_PROCESSED]
+                && segs[5] == [CLASS_APPLICATION]
+            {
+                target = Some(row_key(TABLE_MESSAGE, &[segs[0], segs[3], segs[4]]));
+            }
+        }
+        target
+    }
+
     #[tokio::test]
     async fn queries_skip_undecodable_unreturned_rows() {
         let mut a = open_member().await;
@@ -762,31 +779,16 @@ mod indexed_queries {
         sync_member(&mut b, &relay, RELAY, &gid).await;
 
         let rows = b.host.durable_rows();
-        // The latest Processed application-classified row, located through
-        // the index key alone (state byte 2, class byte 3).
-        let mut target = None;
-        for (key, _) in &rows {
-            if key.first() != Some(&TABLE_MESSAGE_STATE) {
-                continue;
-            }
-            let segs = segments(key);
-            if segs.len() != 7 || segs[1] != [STATE_PROCESSED] || segs[5] != [CLASS_APPLICATION] {
-                continue;
-            }
-            target = Some(row_key(TABLE_MESSAGE, &[segs[0], segs[3], segs[4]]));
-        }
-        let target = target.expect("a processed application row exists");
+        let target =
+            last_processed_application_row_key(&rows).expect("a processed application row exists");
         assert_eq!(mk_core::testing::check_message_index(&rows), Ok(()));
 
         let mut damaged = rows;
-        let mut rewritten = false;
-        for (key, value) in &mut damaged {
-            if *key == target {
-                *value = vec![0xFF, 0xFE];
-                rewritten = true;
-            }
-        }
-        assert!(rewritten, "corruption landed on the target row");
+        let idx = damaged
+            .iter()
+            .position(|(key, _)| *key == target)
+            .expect("target row present");
+        damaged[idx].1 = vec![0xFF, 0xFE];
         let provider =
             KvStorageProvider::open(damaged, TestHost::new()).expect("reopen over damaged rows");
         let engine_gid = EngineGroupId::new(gid.0.clone());
@@ -811,11 +813,12 @@ mod indexed_queries {
                 .has_messages_in_states(&engine_gid, &[], EpochId(0))
                 .expect("empty states answer false")
         );
-        assert!(
+        assert_eq!(
             provider
                 .list_messages_in_states(&engine_gid, &[MessageState::Created], EpochId(0))
                 .expect("other states list cleanly")
-                .is_empty()
+                .len(),
+            0
         );
         let kept = provider
             .list_openmls_messages_in_states(

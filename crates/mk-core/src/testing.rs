@@ -360,11 +360,11 @@ impl ProofRequest {
     }
 }
 
-/// Rebuild the expected `MessageState` and `MessageIndex` rows from the
-/// stored `Message` rows and require exact equality with what is stored —
-/// no missing keys, no extra keys, identical values, `MessageState` values
-/// empty. Every durable prefix a test hands in is checked the same way.
+/// Require the stored index rows to match what the `Message` rows imply.
 ///
+/// Rebuilds the expected `MessageState`/`MessageIndex` rows with the same
+/// key functions: no missing keys, no extra keys, identical values,
+/// `MessageState` values empty.
 /// # Errors
 /// A fixed-string drift report naming the table and both row counts.
 pub fn check_message_index(rows: &[(Vec<u8>, Vec<u8>)]) -> Result<(), String> {
@@ -379,7 +379,7 @@ pub fn check_message_index(rows: &[(Vec<u8>, Vec<u8>)]) -> Result<(), String> {
                     .and_then(|segments| segments.try_into().ok())
                     .ok_or_else(|| "malformed message row key".to_owned())?;
                 let record: MessageRecord =
-                    ser::de(value).map_err(|_| "undecodable message row".to_owned())?;
+                    ser::de_message(value).map_err(|_| "undecodable message row".to_owned())?;
                 if record.id.as_slice() != mid || record.group_id.as_slice() != gid {
                     return Err("message row key drifted from its record".to_owned());
                 }

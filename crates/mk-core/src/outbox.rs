@@ -157,7 +157,7 @@ impl KvStorageProvider {
         &self,
         publication: &SessionPublication,
     ) -> Result<(), StorageError> {
-        let value = serde_json::to_vec(publication).map_err(|_| storage_err(PUB_ENCODE))?;
+        let value = crate::ser::ser(publication).map_err(|_| storage_err(PUB_ENCODE))?;
         let id = hex::decode(&publication.id).map_err(|_| storage_err(PUB_DECODE))?;
         self.store()
             .put(keys::key(Table::SessionOutbox, &[&id]), value)
@@ -168,7 +168,7 @@ impl KvStorageProvider {
         let mut out = Vec::new();
         for (_key, value) in self.store().scan(&keys::key(Table::SessionOutbox, &[]))? {
             let publication: SessionPublication =
-                serde_json::from_slice(&value).map_err(|_| storage_err(PUB_DECODE))?;
+                crate::ser::de(&value).map_err(|_| storage_err(PUB_DECODE))?;
             out.push(publication);
         }
         Ok(out)
@@ -182,7 +182,7 @@ impl KvStorageProvider {
         self.store()
             .get(&keys::key(Table::SessionOutbox, &[&id.0]))?
             .map_or(Ok(None), |value| {
-                serde_json::from_slice(&value)
+                crate::ser::de(&value)
                     .map(Some)
                     .map_err(|_| storage_err(PUB_DECODE))
             })
@@ -201,7 +201,7 @@ impl KvStorageProvider {
         account: &AccountId,
         relays: &[String],
     ) -> Result<(), StorageError> {
-        let value = serde_json::to_vec(relays).map_err(|_| storage_err(INBOX_ENCODE))?;
+        let value = crate::ser::ser(relays).map_err(|_| storage_err(INBOX_ENCODE))?;
         self.store()
             .put(keys::key(Table::SessionInbox, &[&account.0]), value)
     }
@@ -214,7 +214,7 @@ impl KvStorageProvider {
         self.store()
             .get(&keys::key(Table::SessionInbox, &[&account.0]))?
             .map_or(Ok(None), |value| {
-                serde_json::from_slice(&value)
+                crate::ser::de(&value)
                     .map(Some)
                     .map_err(|_| storage_err(INBOX_DECODE))
             })

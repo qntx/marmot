@@ -70,3 +70,10 @@ trusted publishing / OIDC).
   (`OpenError::UnsupportedSchemaVersion`); `mk_core::testing` gains
   `check_message_index`, which verifies the index tables match the stored
   message rows exactly.
+- `crates/mk-core` row encoding: `serde_json` stays the one codec for
+  every row value and key, but mk-core-owned row structs — the stored
+  message row (a `MessageRecord` mirror) and the snapshot blob's byte
+  fields — now carry `Vec<u8>` fields as standard base64 strings instead
+  of decimal arrays, roughly halving stored row sizes; outbox
+  publication and inbox-relay row values route through the shared
+  encode/decode helpers.

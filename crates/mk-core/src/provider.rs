@@ -351,7 +351,7 @@ impl KvStorageProvider {
             Some(row_key) => self
                 .store
                 .get(&row_key)?
-                .map_or(Ok(None), |value| ser::de(&value).map(Some)),
+                .map_or(Ok(None), |value| ser::de_message(&value).map(Some)),
             None => Ok(None),
         }
     }
@@ -364,7 +364,7 @@ impl KvStorageProvider {
         let gid = gid_seg(&record.group_id);
         self.store.put(
             keys::key(Table::Message, &[gid, &keys::u64_seg(seq), mid]),
-            ser::ser(record)?,
+            ser::ser_message(record)?,
         )?;
         let (class, openmls_epoch) = Self::openmls_content_columns(&record.payload);
         let state_key = keys::message_state_key(
@@ -482,7 +482,7 @@ impl KvStorageProvider {
             let Some(value) = self.store.get(&row_key)? else {
                 continue;
             };
-            out.push(ser::de(&value)?);
+            out.push(ser::de_message(&value)?);
         }
         Ok(out)
     }
@@ -1298,9 +1298,9 @@ impl MessageStorage for KvStorageProvider {
             let parsed = keys::parse_message_state_key(&state_key).ok_or_else(malformed_row)?;
             let row_key = message_row_key_of(&state_key)?;
             let value = self.store.get(&row_key)?.ok_or(StorageError::NotFound)?;
-            let mut record: MessageRecord = ser::de(&value)?;
+            let mut record: MessageRecord = ser::de_message(&value)?;
             record.state = new_state;
-            self.store.put(row_key, ser::ser(&record)?)?;
+            self.store.put(row_key, ser::ser_message(&record)?)?;
             self.store.delete(&state_key)?;
             let new_state_key = keys::message_state_key(
                 &parsed.group_id,
@@ -1428,7 +1428,7 @@ impl MessageStorage for KvStorageProvider {
             let Some(value) = self.store.get(&row_key)? else {
                 continue;
             };
-            if !visitor(ser::de(&value)?) {
+            if !visitor(ser::de_message(&value)?) {
                 break;
             }
         }

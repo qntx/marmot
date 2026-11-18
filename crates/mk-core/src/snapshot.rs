@@ -43,9 +43,12 @@ const BLOB_V1: u8 = 1;
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct GroupStateImage {
     /// The serialized `cgka_groups` row bytes.
+    #[serde(with = "crate::ser::blob")]
     pub(crate) group: Vec<u8>,
+    #[serde(with = "crate::ser::opt_blob")]
     pub(crate) validated_tree_marker: Option<Vec<u8>>,
     /// `(row_key, value)` pairs, sorted by row key.
+    #[serde(with = "crate::ser::blob_pairs")]
     pub(crate) openmls: Vec<(Vec<u8>, Vec<u8>)>,
 }
 
@@ -54,10 +57,13 @@ struct SnapshotBlob {
     /// `true` — a full snapshot that captured ledger and queue.
     full: bool,
     state: GroupStateImage,
+    #[serde(with = "crate::ser::opt_blob")]
     convergence_policy: Option<Vec<u8>>,
     /// `(insert_order, serialized MessageRecord)` in order; full only.
+    #[serde(with = "crate::ser::opt_u64_pairs")]
     messages: Option<Vec<(u64, Vec<u8>)>>,
     /// `(insert_order, serialized QueuedOutboundIntent)` in order; full only.
+    #[serde(with = "crate::ser::opt_u64_pairs")]
     queued_outbound: Option<Vec<(u64, Vec<u8>)>>,
 }
 
@@ -319,7 +325,7 @@ fn restore_messages(
     }
     provider.delete_group_message_rows(group_id)?;
     for (seq, bytes) in messages {
-        let record: cgka_traits::message::MessageRecord = ser::de(bytes)?;
+        let record: cgka_traits::message::MessageRecord = ser::de_message(bytes)?;
         if provider.message_row_key(&record.id)?.is_some() || survivor_orders.contains(seq) {
             return Err(StorageError::Backend(
                 "kv snapshot restore message conflict".into(),
