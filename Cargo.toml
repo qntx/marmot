@@ -1,5 +1,5 @@
 [workspace]
-members  = ["crates/mk-core", "crates/mk-bridge", "crates/mk-wasm"]
+members  = ["crates/mk-core", "crates/mk-bridge", "crates/mk-wasm", "crates/mk-ffi"]
 exclude  = ["spike", "crates/interop", "crates/conformance", "fuzz"]
 resolver = "3"
 
@@ -66,6 +66,17 @@ opt-level = 1
 lto       = false
 panic     = "abort"
 debug     = false
+
+# The shipped mk-ffi artifacts (libmarmot_ffi.a/.so/.dylib for iOS and
+# Android): `panic = "unwind"` because `catch_unwind` is the panic
+# containment the ABI contract relies on — `release`'s `panic = "abort"`
+# would turn every engine job panic into a process abort.
+[profile.native]
+inherits      = "release"
+panic         = "unwind"
+lto           = "fat"
+codegen-units = 1
+strip         = true
 
 [profile.dev]
 debug     = true
