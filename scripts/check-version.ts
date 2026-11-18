@@ -32,7 +32,7 @@ export function excludedCrates(cargoToml: unknown): Set<string> {
  * checks (which read `packages/` only) or in `sync-versions`. Register every `apps/` project here
  * so the exclusion is a deliberate list, not an accident of directory layout.
  */
-export const STANDALONE_APPS = new Set(["native-smoke"]);
+export const STANDALONE_APPS = new Set<string>(["native-smoke"]);
 
 /**
  * Assert every `apps/` project is registered in `STANDALONE_APPS` and marked private — an
