@@ -140,7 +140,7 @@ fn encode_row(group_key: Option<&[u8]>, encoded: &[u8]) -> Vec<u8> {
     out
 }
 
-fn decode_row(row: &[u8]) -> StorageResult<(Option<Vec<u8>>, Vec<u8>)> {
+pub(crate) fn decode_row(row: &[u8]) -> StorageResult<(Option<Vec<u8>>, Vec<u8>)> {
     let mut tuple = Tuple::new(row);
     let group_key = ser::take_opt_field(&mut tuple)?.map(<[u8]>::to_vec);
     let encoded = tuple.field()?.to_vec();

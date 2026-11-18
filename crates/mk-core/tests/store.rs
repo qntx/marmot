@@ -848,3 +848,44 @@ mod indexed_queries {
         assert_eq!(visited, 1);
     }
 }
+
+/// `stored_key_package_bundles` hands out the bare entity bytes —
+/// exactly what cgka-engine feeds `serde_json::from_slice::<KeyPackageBundle>`.
+#[cfg(feature = "testing")]
+mod key_package_bundles {
+    use cgka_traits::storage::KeyPackageBundleStorage;
+    use mk_core::KvStorageProvider;
+
+    use super::TestHost;
+    use super::support::*;
+
+    const RELAY: &str = "ws://127.0.0.1:7777";
+
+    #[tokio::test]
+    async fn bundles_are_bare_entity_bytes_and_deletable() {
+        let mut member = open_member().await;
+        let relay = FakeRelay::new();
+        publish_identity(&mut member, &relay, RELAY).await;
+
+        let rows = member.host.durable_rows();
+        let provider = KvStorageProvider::open(rows, TestHost::new()).expect("reopen");
+        let bundles = provider
+            .stored_key_package_bundles()
+            .expect("bundle listing");
+        assert!(!bundles.is_empty(), "publish_key_package stored bundles");
+        for bundle in &bundles {
+            serde_json::from_slice::<openmls::prelude::KeyPackageBundle>(&bundle.value)
+                .expect("bundle value parses as a KeyPackageBundle");
+        }
+
+        let target = bundles[0].storage_key.clone();
+        provider
+            .delete_stored_key_package_bundle(&target)
+            .expect("delete stored bundle");
+        let remaining = provider
+            .stored_key_package_bundles()
+            .expect("bundle listing after delete");
+        assert_eq!(remaining.len(), bundles.len() - 1);
+        assert!(remaining.iter().all(|bundle| bundle.storage_key != target));
+    }
+}

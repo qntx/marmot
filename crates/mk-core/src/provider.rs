@@ -2304,9 +2304,9 @@ impl DeviceGroupWelcomeStorage for KvStorageProvider {
 // KeyPackageBundleStorage ---------------------------------------------------
 
 impl KeyPackageBundleStorage for KvStorageProvider {
-    /// `WHERE label = 'KeyPackage' ORDER BY storage_key` — the raw row value
-    /// is the bundle bytes the engine decodes (`StoredKeyPackageBundle::value`
-    /// stays JSON).
+    /// `WHERE label = 'KeyPackage' ORDER BY storage_key` — the bundle
+    /// `value` is the bare entity bytes the engine decodes (sqlite's
+    /// `value` column), not the framed `[group_key][entity]` row.
     fn stored_key_package_bundles(&self) -> StorageResult<Vec<StoredKeyPackageBundle>> {
         let mut bundles = Vec::new();
         for (row_key, value) in
@@ -2316,9 +2316,11 @@ impl KeyPackageBundleStorage for KvStorageProvider {
                 .and_then(|segments| segments.last().copied())
                 .ok_or_else(malformed_row)?
                 .to_vec();
+            let value = Zeroizing::new(value);
+            let (_, encoded) = crate::mls::decode_row(&value)?;
             bundles.push(StoredKeyPackageBundle {
                 storage_key,
-                value: Zeroizing::new(value),
+                value: Zeroizing::new(encoded),
             });
         }
         bundles.sort_by(|a, b| a.storage_key.cmp(&b.storage_key));

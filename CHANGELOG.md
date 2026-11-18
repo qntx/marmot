@@ -77,3 +77,11 @@ trusted publishing / OIDC).
   of decimal arrays, roughly halving stored row sizes; outbox
   publication and inbox-relay row values route through the shared
   encode/decode helpers.
+
+### Fixed
+
+- `crates/mk-core`: `stored_key_package_bundles` now returns the bare
+  entity bytes in `StoredKeyPackageBundle::value` — matching sqlite and
+  what `cgka-engine` parses with
+  `serde_json::from_slice::<KeyPackageBundle>` — instead of the framed
+  `[group_key][entity]` row, which no consumer could decode.
