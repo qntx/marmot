@@ -13,8 +13,14 @@ const PAGE = `<!doctype html>
 <html><head><meta charset="utf-8"><title>marmot e2e</title></head>
 <body><script type="module" src="/harness.js"></script></body></html>`;
 
+const CLIENT_PAGE = `<!doctype html>
+<html><head><meta charset="utf-8"><title>marmot client e2e</title></head>
+<body><script type="module" src="/client-harness.js"></script></body></html>`;
+
 const paths: Record<string, { file: string; type: string }> = {
   "/harness.js": { file: `${root}dist/harness.js`, type: "text/javascript" },
+  "/client-harness.js": { file: `${root}dist/client-harness.js`, type: "text/javascript" },
+  "/client-harness.js.map": { file: `${root}dist/client-harness.js.map`, type: "application/json" },
   "/harness.js.map": { file: `${root}dist/harness.js.map`, type: "application/json" },
   "/marmot.mjs": { file: `${root}dist/marmot.mjs`, type: "text/javascript" },
   "/marmot_wasm_bg.wasm": {
@@ -29,6 +35,11 @@ Bun.serve({
     const url = new URL(request.url);
     if (url.pathname === "/") {
       return new Response(PAGE, {
+        headers: { "content-type": "text/html", ...ISOLATION },
+      });
+    }
+    if (url.pathname === "/client") {
+      return new Response(CLIENT_PAGE, {
         headers: { "content-type": "text/html", ...ISOLATION },
       });
     }
