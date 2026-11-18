@@ -3,6 +3,7 @@
  * and the Web Locks `LockPort` adapter.
  */
 
+export * from "./cursors.ts";
 export * from "./driver.ts";
 export * from "./indexeddb.ts";
 export * from "./weblocks.ts";

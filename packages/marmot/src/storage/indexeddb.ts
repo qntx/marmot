@@ -10,28 +10,32 @@ import { StorageError } from "./driver.ts";
 import type { Cipher, KvDriver, LockPort } from "./driver.ts";
 
 /* Minimal structural IndexedDB types — declared locally so `src` needs no
- * DOM lib; real `IDB*` objects satisfy these shapes. */
+ * DOM lib; real `IDB*` objects satisfy these shapes. Shared with cursors.ts. */
 
-type IdbRequestLike<T, E extends string = "success" | "error"> = {
+export type IdbRequestLike<T, E extends string = "success" | "error"> = {
   readonly result: T;
   addEventListener: (type: E, listener: () => void) => void;
 };
 
-type IdbOpenRequestLike = IdbRequestLike<IdbDatabaseLike, "success" | "error" | "upgradeneeded">;
+export type IdbOpenRequestLike = IdbRequestLike<
+  IdbDatabaseLike,
+  "success" | "error" | "upgradeneeded"
+>;
 
-type IdbTransactionLike = {
+export type IdbTransactionLike = {
   objectStore: (name: string) => IdbObjectStoreLike;
   addEventListener: (type: "complete" | "error" | "abort", listener: () => void) => void;
 };
 
-type IdbObjectStoreLike = {
+export type IdbObjectStoreLike = {
   getAll: () => IdbRequestLike<unknown[]>;
   getAllKeys: () => IdbRequestLike<unknown[]>;
+  get: (key: unknown) => IdbRequestLike<unknown>;
   put: (value: unknown, key: unknown) => IdbRequestLike<unknown>;
   delete: (key: unknown) => IdbRequestLike<unknown>;
 };
 
-type IdbDatabaseLike = {
+export type IdbDatabaseLike = {
   transaction: (
     store: string,
     mode: "readonly" | "readwrite",
@@ -55,7 +59,7 @@ export type IndexedDbKvOptions = {
 
 const STORE = "rows";
 
-async function requestOnce<T>(request: IdbRequestLike<T>): Promise<T> {
+export async function requestOnce<T>(request: IdbRequestLike<T>): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     request.addEventListener("success", () => {
       resolve(request.result);
@@ -85,7 +89,7 @@ function idbKey(key: Uint8Array): Uint8Array {
   return key;
 }
 
-function toBytes(value: unknown): Uint8Array | undefined {
+export function toBytes(value: unknown): Uint8Array | undefined {
   if (value instanceof Uint8Array) {
     return value;
   }
@@ -95,7 +99,7 @@ function toBytes(value: unknown): Uint8Array | undefined {
   return undefined;
 }
 
-async function txnDone(txn: IdbTransactionLike): Promise<void> {
+export async function txnDone(txn: IdbTransactionLike): Promise<void> {
   return new Promise((resolve, reject) => {
     txn.addEventListener("complete", resolve);
     txn.addEventListener("error", () => {
