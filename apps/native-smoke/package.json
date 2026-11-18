@@ -1,0 +1,39 @@
+{
+  "name": "native-smoke",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Native smoke app for @qntx/marmot-native: end-to-end proof on iOS/Android",
+  "main": "index.ts",
+  "scripts": {
+    "prebuild": "expo prebuild",
+    "smoke:ios": "bun scripts/ios.ts",
+    "smoke:android": "bun scripts/android.ts",
+    "collector": "bun scripts/collector.ts",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "@noble/ciphers": "2.1.1",
+    "@op-engineering/op-sqlite": "19.0.5",
+    "@qntx/marmot": "file:../../packages/marmot",
+    "@qntx/marmot-native": "file:../../packages/marmot-native",
+    "expo": "58.0.23",
+    "expo-build-properties": "58.0.12",
+    "expo-crypto": "58.0.8",
+    "expo-dev-client": "58.0.19",
+    "expo-file-system": "58.0.13",
+    "nostr-tools": "2.26.0",
+    "react": "19.3.0",
+    "react-native": "0.88.1",
+    "react-native-nitro-modules": "0.37.1"
+  },
+  "devDependencies": {
+    "@types/react": "19.3.0",
+    "babel-preset-expo": "58.0.24",
+    "typescript": "7.0.2",
+    "@types/node": "26.6.5",
+    "bun-types": "1.4.4"
+  },
+  "overrides": {
+    "@qntx/marmot": "file:../../packages/marmot"
+  }
+}
