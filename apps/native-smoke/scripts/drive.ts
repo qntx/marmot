@@ -157,7 +157,7 @@ const PERF_DEFAULTS: Record<string, Record<string, string>> = {
   kp: { reps: "21" },
   ingest500: { messages: "500", reps: "3" },
   add50: { members: "50", reps: "3" },
-  send: { messages: "2002", windows: "10,500,2000" },
+  send: { messages: "2003", windows: "10,500,2000" },
   memgen: { members: "200", messages: "10000" },
   memrecv: {},
 };
