@@ -107,7 +107,7 @@ fn row_accounting(host: &CompactHost) -> (usize, u64, BTreeMap<u8, (usize, u64)>
 /// group inviting B, B joins via the Welcome, both sync.
 async fn setup_pair<H>(host_a: H, host_b: H) -> (FakeRelay, Member<H>, Member<H>, Vec<u8>)
 where
-    H: Host + DurableValues + Clone,
+    H: Host + DurableKeys + Clone,
 {
     let mut relay = FakeRelay::new();
     let mut a = Member::with_host(host_a);
@@ -146,7 +146,7 @@ where
 /// the publish half of the send runs untimed afterwards.
 async fn timed_send<H>(a: &mut Member<H>, relay: &mut FakeRelay, group: &[u8], i: usize) -> f64
 where
-    H: Host + DurableValues + Clone,
+    H: Host + DurableKeys + Clone,
 {
     a.advance(1_000);
     let start = Instant::now();

@@ -117,10 +117,10 @@ pub struct HostState {
 }
 
 /// The durable-row view a host must expose for the publish loop's
-/// durability invariant: the row values a crash could not lose.
-pub trait DurableValues {
-    /// Every `Put` value durable at `watermark`.
-    fn durable_values(&self, watermark: u64) -> Vec<Vec<u8>>;
+/// durability invariant: the row keys a crash could not lose.
+pub trait DurableKeys {
+    /// Every `Put` key durable at `watermark`.
+    fn durable_keys(&self, watermark: u64) -> Vec<Vec<u8>>;
 }
 
 /// An in-memory host: records batches in commit order and rebuilds the
@@ -158,25 +158,25 @@ impl MemHost {
     }
 }
 
-impl DurableValues for MemHost {
-    /// Every `Put` value of committed batches up to `watermark`, plus the
+impl DurableKeys for MemHost {
+    /// Every `Put` key of committed batches up to `watermark`, plus the
     /// row set this incarnation loaded at `open`.
-    fn durable_values(&self, watermark: u64) -> Vec<Vec<u8>> {
+    fn durable_keys(&self, watermark: u64) -> Vec<Vec<u8>> {
         let state = self.state.lock().unwrap();
-        let mut values: Vec<Vec<u8>> = state
+        let mut keys: Vec<Vec<u8>> = state
             .history
             .iter()
             .filter(|batch| batch.seq.get() <= watermark)
             .flat_map(|batch| batch.ops.iter())
             .filter_map(|op| match op {
-                KvOp::Put { value, .. } => Some(value.clone()),
+                KvOp::Put { key, .. } => Some(key.clone()),
                 KvOp::Delete { .. } => None,
             })
             .collect();
         if let Ok(rows) = mk_bridge::decode_rows(&state.last_served) {
-            values.extend(rows.into_iter().map(|(_, value)| value));
+            keys.extend(rows.into_iter().map(|(key, _)| key));
         }
-        values
+        keys
     }
 }
 
@@ -234,10 +234,10 @@ impl CompactHost {
     }
 }
 
-impl DurableValues for CompactHost {
+impl DurableKeys for CompactHost {
     /// Every row is committed by construction; the watermark is advisory.
-    fn durable_values(&self, _watermark: u64) -> Vec<Vec<u8>> {
-        self.rows.lock().unwrap().values().cloned().collect()
+    fn durable_keys(&self, _watermark: u64) -> Vec<Vec<u8>> {
+        self.rows.lock().unwrap().keys().cloned().collect()
     }
 }
 
@@ -340,16 +340,15 @@ pub fn group_events(relay: &FakeRelay, route_hex: &str) -> Vec<Event> {
 }
 
 /// The durability invariant: a published event's id must already sit
-/// inside a durable value — a committed batch at or below the acked
+/// inside a durable row key — a committed batch at or below the acked
 /// watermark, or the rows this incarnation loaded at open (a batch
 /// committed before a restart is durable even though its in-session ack
-/// died). Row values are host-defined bytes — the fanout codec stores
-/// the id raw, JSON rows store it hex — so accept either encoding.
+/// died). Keys are host-defined bytes carrying the id raw (the
+/// `SessionOutbox` key segment is the event id), so a raw window match
+/// suffices; the hex form is accepted too.
 pub fn assert_durable(durable: &[Vec<u8>], item: &Outbound) {
     assert!(
-        durable
-            .iter()
-            .any(|value| contains_id(value, &item.event.id)),
+        durable.iter().any(|key| contains_id(key, &item.event.id)),
         "published event escaped its gating batch: {}",
         hex::encode(item.event.id)
     );
@@ -400,7 +399,7 @@ impl Member<MemHost> {
 
 impl<H> Member<H>
 where
-    H: Host + DurableValues + Clone,
+    H: Host + DurableKeys + Clone,
 {
     /// A fresh bridge over `host`.
     pub fn with_host(host: H) -> Self {
@@ -634,7 +633,7 @@ where
             if items.is_empty() {
                 break;
             }
-            let durable = self.host.durable_values(self.acked);
+            let durable = self.host.durable_keys(self.acked);
             for item in items {
                 assert_durable(&durable, &item);
                 let results = relay.publish(&item, self.acked);
