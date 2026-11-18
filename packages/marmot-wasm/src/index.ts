@@ -1,6 +1,7 @@
 /**
  * `@qntx/marmot-wasm` — the `mk-wasm` artifact behind a `Backend`. `load()` instantiates the module
- * once and hands out a synchronous byte `Backend` for `Engine`.
+ * once and hands out a byte `Backend` for `Engine`: the synchronous wasm glue is wrapped in
+ * promises to satisfy the async port.
  */
 
 import { utf8Encode } from "@qntx/marmot/backend";
@@ -24,9 +25,10 @@ export type BridgeClass = new (
 };
 
 /**
- * Wrap an instantiated bridge class as a `Backend`. A throw out of any wasm call poisons the
- * backend: every later `open`/`call`/`drain` on every handle answers the encoded `poisoned`
- * envelope, matching the Rust-side flag checked after a trap.
+ * Wrap an instantiated bridge class as a `Backend`. `create` takes the `host.load` snapshot up
+ * front and feeds it to the bridge once. A throw out of any wasm call poisons the backend: every
+ * later `open`/`call`/`drain` on every handle resolves the encoded `poisoned` envelope, matching
+ * the Rust-side flag checked after a trap.
  */
 export function createBackend(Bridge: BridgeClass): Backend {
   let poisoned = false;
@@ -44,17 +46,35 @@ export function createBackend(Bridge: BridgeClass): Backend {
   return {
     name: "marmot-wasm",
     create: (host: BridgeHost): BridgeHandle => {
+      let snapshot: Uint8Array | undefined = host.load();
       const inner = new Bridge(
-        () => host.load(),
+        () => {
+          const rows = snapshot;
+          snapshot = undefined;
+          if (rows === undefined) {
+            throw new Error("host.load called twice");
+          }
+          return rows;
+        },
         (batch) => {
           host.commit(batch);
         },
       );
       return {
-        open: (config) => guard(() => inner.open(config)),
-        call: (request) => guard(() => inner.call(request)),
-        drain: () => guard(() => inner.drain()),
-        close: () => {
+        open: async (config) => {
+          await Promise.resolve();
+          return guard(() => inner.open(config));
+        },
+        call: async (request) => {
+          await Promise.resolve();
+          return guard(() => inner.call(request));
+        },
+        drain: async () => {
+          await Promise.resolve();
+          return guard(() => inner.drain());
+        },
+        close: async () => {
+          await Promise.resolve();
           if (poisoned) {
             return;
           }
