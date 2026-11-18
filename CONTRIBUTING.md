@@ -194,6 +194,55 @@ the staticlib with `-force_load`/`--whole-archive` plus a generated
 the seven `mk_*` symbols; the script asserts that set per artifact (which
 also proves `mk_bridge_test_panic` never ships) and prints size + SHA-256.
 
+## Native smoke (`apps/native-smoke`)
+
+`apps/native-smoke` is a standalone Expo dev-client app (private, own
+`bun.lock`, excluded from version lockstep via `STANDALONE_APPS` in
+`scripts/check-version.ts`) that proves the native stack end to end:
+`@qntx/marmot-native` (Nitro C++ HybridObject → mk-ffi engine thread) +
+`sqliteKv` over `@op-engineering/op-sqlite`, bundled to Hermes bytecode in a
+Release build. The app runs one mode per launch from
+`marmotsmoke://run?mode=…` (iOS passes `Documents/run.json` instead —
+`simctl openurl` needs a consent dialog) and reports to a host collector on
+`127.0.0.1:8100`:
+
+- `flow` — the shared `runFlow` scenario (create, join, 500 messages,
+  close/reopen, add, remove, failed-publish retry) through the public
+  `Engine` API.
+- `kill`/`verify` — the kill-during-write loop from `marmot-wasm`'s
+  `e2e/kill.spec.ts`: journal batches/acks/publishes out of process, kill
+  mid-write (`kill -9` of the app process on iOS, `am force-stop` on
+  Android), relaunch, dump the decrypted durable rows, and check the
+  prefix/ack/publish invariants.
+
+Prerequisites: the mk-ffi prebuilts (`bun run build:native --ios
+--android`), Xcode + an iOS runtime for the simulator, and for Android the
+SDK with the 16 KB-page image
+`system-images;android-37.0;google_apis_playstore_ps16k;arm64-v8a` plus
+Android Studio's JBR as `JAVA_HOME`.
+
+```sh
+cd apps/native-smoke
+bun install
+bun run smoke:ios        # Release build, flow + kill loop on a private simulator
+bun run smoke:android    # Release APK, flow + kill loop on a private 16 KB emulator
+```
+
+Driver flags: `--flow` (flow only), `--kill` (kill loop only),
+`--iterations=N` (default 30), `--seed=N` (default 20260209, the browser
+suite's seed). Results land under `apps/native-smoke/target/`:
+`flow-<platform>.json`, `kill-<platform>.json`, `kill-<platform>-<i>.json`.
+Local packages are synced into `node_modules` by `scripts/sync-local.ts`
+(file copies — Expo autolinking does not follow the repo symlinks); rerun
+it after changing `packages/marmot` or `packages/marmot-native`.
+
+Shared-machine discipline: the iOS driver takes a simulator slot under
+`~/Desktop/qntx/meowl.social/.cache/sim-slots/` (max 3, 40-minute hold,
+released on exit) on its own `marmot-m4` device; Android uses a private
+`marmot_m4` AVD on console port 5600 (`emulator-5600`) and only ever
+addresses `-s emulator-5600`. The collector port is shared — run one driver
+at a time.
+
 ## Commits
 
 English Conventional Commits: `type(scope): subject` (`feat`, `fix`, `docs`,
