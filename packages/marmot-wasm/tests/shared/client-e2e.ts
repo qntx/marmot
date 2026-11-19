@@ -339,20 +339,35 @@ export async function assertConverged(
   group: string,
   expected?: Set<string>,
 ): Promise<GroupSnapshot> {
-  const snapshots: GroupSnapshot[] = [];
-  for (const handle of handles) {
-    // oxlint-disable-next-line no-await-in-loop -- snapshots are read sequentially
-    const snapshot = await handle.client.group(group);
-    if (snapshot === undefined) {
-      throw new Error(`${handle.name}: group ${group} missing`);
+  const read = async (): Promise<GroupSnapshot[]> => {
+    const snapshots: GroupSnapshot[] = [];
+    for (const handle of handles) {
+      // oxlint-disable-next-line no-await-in-loop -- snapshots are read sequentially
+      const snapshot = await handle.client.group(group);
+      if (snapshot === undefined) {
+        throw new Error(`${handle.name}: group ${group} missing`);
+      }
+      snapshots.push(snapshot);
     }
-    snapshots.push(snapshot);
+    return snapshots;
+  };
+  let snapshots = await read();
+  if (snapshots[0] === undefined) {
+    throw new Error("assertConverged needs at least one handle");
   }
+  await waitFor(async () => {
+    snapshots = await read();
+    const [head] = snapshots;
+    return (
+      head !== undefined &&
+      snapshots.every((snapshot) => snapshotShape(snapshot) === snapshotShape(head))
+    );
+  }, "group snapshots converge");
+
   const [first] = snapshots;
   if (first === undefined) {
     throw new Error("assertConverged needs at least one handle");
   }
-
   for (const snapshot of snapshots.slice(1)) {
     if (snapshotShape(snapshot) !== snapshotShape(first)) {
       throw new Error(`snapshots diverged:\n${snapshotShape(first)}\n${snapshotShape(snapshot)}`);
