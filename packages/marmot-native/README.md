@@ -48,8 +48,9 @@ Any native-side rejection poisons the whole backend (mirroring
 
 - `ios/MarmotFfi.xcframework` — dynamic `MarmotFfi.framework` slices for arm64
   device and arm64 simulator (vendored by `MarmotNative.podspec`).
-- `android/src/main/jniLibs/<abi>/libmarmot_ffi.so` — `arm64-v8a` and `x86_64`
-  (IMPORTED by `android/CMakeLists.txt`, 16 KB page aligned).
+- `android/src/main/jniLibs/<abi>/libmarmot_ffi.so` — `arm64-v8a`,
+  `armeabi-v7a` and `x86_64` (IMPORTED by `android/CMakeLists.txt`, 16 KB
+  page aligned).
 
 Both are gitignored build products. Rebuild them from the repository root —
 see `CONTRIBUTING.md` for prerequisites (Xcode, Android NDK 27.1.12297006,

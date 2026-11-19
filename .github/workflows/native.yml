@@ -1,0 +1,122 @@
+name: Native
+
+# The prebuilt mk-ffi libraries @qntx/marmot-native ships: the iOS
+# MarmotFfi.xcframework (arm64 device + arm64 simulator) on macOS and the
+# Android libmarmot_ffi.so jniLibs (arm64-v8a, armeabi-v7a, x86_64) on Linux
+# with the pinned NDK. `bun run build:native` asserts that every artifact
+# exports exactly the seven mk_* symbols and writes sizes and SHA-256 to the
+# job summary.
+
+on:
+  # publish-npm.yml calls this for release builds and packs the artifacts.
+  workflow_call:
+    inputs:
+      release:
+        description: >-
+          Release build for a publish run: no rust or bun cache is restored
+          (other runs populate them, so they could smuggle code into
+          published binaries).
+        required: false
+        type: boolean
+        default: false
+  pull_request:
+    paths:
+      - "crates/mk-core/**"
+      - "crates/mk-bridge/**"
+      - "crates/mk-ffi/**"
+      - "packages/marmot-native/**"
+      - "scripts/build-native.ts"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - ".github/workflows/native.yml"
+  push:
+    branches: [main]
+    paths:
+      - "crates/mk-core/**"
+      - "crates/mk-bridge/**"
+      - "crates/mk-ffi/**"
+      - "packages/marmot-native/**"
+      - "scripts/build-native.ts"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - ".github/workflows/native.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  # Inside a workflow_call github.workflow is the caller's name; a group keyed
+  # on it would share the caller's group and deadlock, so calls get a group
+  # of their own run.
+  group: ${{ github.workflow == 'Native' && format('native-{0}', github.ref) || format('native-call-{0}', github.run_id) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  ios:
+    runs-on: macos-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: "1.4"
+          no-cache: ${{ inputs.release == true }}
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: "1.99.1"
+          targets: aarch64-apple-ios, aarch64-apple-ios-sim
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        if: ${{ !inputs.release }}
+      - run: bun install --frozen-lockfile
+      - run: bun run build:native --ios
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: MarmotFfi.xcframework
+          path: packages/marmot-native/ios/MarmotFfi.xcframework
+          retention-days: 1
+          if-no-files-found: error
+
+  android:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: "1.4"
+          no-cache: ${{ inputs.release == true }}
+      # r27b is 27.1.12297006, the NDK packages/marmot-native/android pins.
+      - uses: nttld/setup-ndk@ed92fe6cadad69be94a966a7ee3271275e62f779 # v1.6.0
+        id: ndk
+        with:
+          ndk-version: r27b
+          add-to-path: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: "1.99.1"
+          targets: aarch64-linux-android, armv7-linux-androideabi, x86_64-linux-android
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        if: ${{ !inputs.release }}
+      - run: bun install --frozen-lockfile
+      - run: bun run build:native --android
+        env:
+          ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
+      # Package-relative layout: the jniLibs plus the marmot_ffi.h copy.
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: marmot-native-jniLibs
+          path: |
+            packages/marmot-native/android/src/main/jniLibs
+            packages/marmot-native/include
+          retention-days: 1
+          if-no-files-found: error
