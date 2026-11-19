@@ -671,6 +671,96 @@ mod flow_tests {
         );
     }
 
+    /// The held-attempt rule across a restart (mdk#2332): the same
+    /// all-`Rejected` report that rolls a commit back inside one
+    /// incarnation cannot after one. A `report_publish` on a fanout loaded
+    /// from storage sees no attempt marks, so every result counts the
+    /// interrupted attempt as possible exposure and the pending commit
+    /// stays `Pending` — it never rolls back on a verdict for an attempt
+    /// whose bytes may already have left. A later accepted report confirms
+    /// that same commit, so the epoch still advances exactly once.
+    #[tokio::test(flavor = "current_thread")]
+    async fn rejected_after_restart_counts_as_exposed() {
+        let relay = FakeRelay::new();
+        let mut a = open_member().await;
+        let mut b = open_member().await;
+        publish_identity(&mut a, &relay, RELAY).await;
+        publish_identity(&mut b, &relay, RELAY).await;
+        let gid = group_with(&mut a, &relay, &[&b], "restart-reject").await;
+        join_via_welcome(&mut b, &relay).await;
+        sync_member(&mut a, &relay, RELAY, &gid).await;
+        sync_member(&mut b, &relay, RELAY, &gid).await;
+        let epoch_before = snapshot(&a, &gid).epoch;
+
+        a.session.self_update(&gid).await.expect("self update");
+        if let Some(seq) = a.session.awaiting_durability() {
+            a.session.acknowledge_durable(seq);
+        }
+        // Hand the commit out, then crash before any verdict is recorded:
+        // its attempts stay `Attempting` in the durable record.
+        let staged: Vec<_> = a
+            .session
+            .take_outbound()
+            .expect("take_outbound")
+            .into_iter()
+            .map(|item| item.id)
+            .collect();
+        assert!(!staged.is_empty(), "the commit staged an outbound");
+
+        // Restart: only durable rows survive — the attempt marks do not.
+        let mut a = reopen_member(&a).await;
+        let reports: Vec<_> = a
+            .session
+            .take_outbound()
+            .expect("take_outbound")
+            .into_iter()
+            .map(|item| {
+                let results: Vec<_> = item
+                    .relays
+                    .iter()
+                    .map(|relay_url| mk_core::RelayResult {
+                        relay: relay_url.clone(),
+                        status: RelayStatus::Rejected,
+                    })
+                    .collect();
+                (item.id, results)
+            })
+            .collect();
+        assert_eq!(
+            reports.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+            staged,
+            "the durable obligations are exactly the interrupted ones"
+        );
+        let mut resolutions = Vec::new();
+        for (id, results) in &reports {
+            resolutions.push(a.session.report_publish(id, results).await.expect("report"));
+        }
+        assert!(
+            !resolutions.contains(&PublishResolution::RolledBack),
+            "a verdict on an interrupted attempt never rolls back: {resolutions:?}"
+        );
+        assert!(
+            resolutions.contains(&PublishResolution::Pending),
+            "the rejected-but-possibly-exposed commit stays pending: {resolutions:?}"
+        );
+
+        // The next publish pass lands the same commit: a relay accept
+        // confirms it without re-deriving the intent.
+        let resolution = publish_one(&mut a, &relay, mk_core::OutboundPurpose::Commit).await;
+        assert!(
+            matches!(
+                resolution,
+                PublishResolution::Confirmed | PublishResolution::Complete
+            ),
+            "the surviving commit confirms on the retry pass: {resolution:?}"
+        );
+        assert_eq!(
+            snapshot(&a, &gid).epoch,
+            epoch_before + 1,
+            "exactly one epoch applied"
+        );
+    }
+
     /// Duplicate delivery: re-ingesting events yields `Rejected { Duplicate }`
     /// both within one batch and across calls, and never re-delivers a
     /// message.

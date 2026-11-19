@@ -25,6 +25,14 @@
   there or on `PATH` and fails clearly on a mismatch.
 - **binaryen** — installed by `bun install` (`binaryen` devDependency);
   `build:wasm` runs its `wasm-opt -Oz` on the release artifact.
+- **Homebrew LLVM** — only on macOS, only for `build:wasm` from scratch:
+  Apple `ar` silently produces an empty archive for wasm objects, so
+  `secp256k1-sys` links with no symbols. Set
+  `CC_wasm32_unknown_unknown=/opt/homebrew/opt/llvm/bin/clang
+  AR_wasm32_unknown_unknown=/opt/homebrew/opt/llvm/bin/llvm-ar
+  RANLIB_wasm32_unknown_unknown=/opt/homebrew/opt/llvm/bin/llvm-ranlib`
+  and `cargo clean -p secp256k1-sys --target wasm32-unknown-unknown`
+  before the first build. CI uses GNU `ar` and is unaffected.
 - **Playwright Chromium** — only for `test:browser`
   (`bunx playwright install --with-deps chromium`).
 - **Odin `dev-2026-10`, rev `84bc3fc`** — only for `crates/conformance`
@@ -123,11 +131,11 @@ Build `wn`/`wnd` from the pinned MDK rev (`upstream.json` → `mdk.tag`/`rev`;
 ```sh
 ODIN=<path-to-odin> cargo install --locked \
   --git https://github.com/marmot-protocol/mdk \
-  --rev a2e0558a634bbd20607cdd5afb93abc6220ee58d \
+  --rev 4df811aea99269b437a6023be9446a5141e93cbe \
   --root spike/target/wn wn-cli
 ```
 
-`cargo install` takes ~12 min cold; `wn --version` must report `wn 0.16.0`
+`cargo install` takes ~12 min cold; `wn --version` must report `wn 0.17.0`
 (the test asserts it against `upstream.json` `mdk.tag`).
 
 ```sh

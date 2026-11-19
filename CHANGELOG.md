@@ -21,8 +21,8 @@ trusted publishing / OIDC).
   event kinds, ALPN identifiers, exporter labels; input categories,
   dispositions, named outcomes), tested against byte-for-byte recorded spec
   copies under `vectors/spec/foundation/`.
-- `upstream.json` pins (`spec` marmot-protocol/marmot `f825024`, `mdk` v0.16.0
-  `a2e0558`) and `bun run check:pins`, which verifies local `3rdparty/`
+- `upstream.json` pins (`spec` marmot-protocol/marmot `f825024`, `mdk` v0.17.0
+  `4df811a`) and `bun run check:pins`, which verifies local `3rdparty/`
   checkouts and the recorded spec copies.
 - `crates/mk-core`: a persistent key-value `cgka_traits::StorageProvider`
   for the pinned MDK engine (one key encoder, serde_json values,
@@ -55,3 +55,33 @@ trusted publishing / OIDC).
   vectors, and an engine-level reproduction test for an upstream MDK
   defect (`AlreadyExists` on re-confirm of a deterministic own commit
   after convergence rewind — handled as typed `ConfirmConflict`).
+
+### Changed
+
+- MDK pin `v0.16.0` (`a2e0558`) → `v0.17.0` (`4df811a`); the spec pin is
+  unchanged at `f825024`.
+- `crates/mk-core` store schema version 2: the `MessageState` index now
+  keys `[group, state, epoch, seq, message-id, content-class, epoch]` with
+  empty values and `MessageIndex` maps message-id to that key, so every
+  message listing, existence probe, content-filtered listing, early-exit
+  visit, deferred-metadata scan, group delete and full-snapshot capture
+  answers from index keys and decodes only the rows it returns. Stores
+  written by schema version 1 refuse to open
+  (`OpenError::UnsupportedSchemaVersion`); `mk_core::testing` gains
+  `check_message_index`, which verifies the index tables match the stored
+  message rows exactly.
+- `crates/mk-core` row encoding: `serde_json` stays the one codec for
+  every row value and key, but mk-core-owned row structs — the stored
+  message row (a `MessageRecord` mirror) and the snapshot blob's byte
+  fields — now carry `Vec<u8>` fields as standard base64 strings instead
+  of decimal arrays, roughly halving stored row sizes; outbox
+  publication and inbox-relay row values route through the shared
+  encode/decode helpers.
+
+### Fixed
+
+- `crates/mk-core`: `stored_key_package_bundles` now returns the bare
+  entity bytes in `StoredKeyPackageBundle::value` — matching sqlite and
+  what `cgka-engine` parses with
+  `serde_json::from_slice::<KeyPackageBundle>` — instead of the framed
+  `[group_key][entity]` row, which no consumer could decode.

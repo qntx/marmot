@@ -10,11 +10,11 @@ chacha20poly1305 = "0.11"
 getrandom        = "0.4"
 hex              = "0.4"
 hkdf             = "0.13"
-# MDK at the pinned tag v0.16.0 (upstream.json "mdk").
-cgka-traits            = { git = "https://github.com/marmot-protocol/mdk", rev = "a2e0558a634bbd20607cdd5afb93abc6220ee58d", version = "=0.16.0" }
-cgka-engine            = { git = "https://github.com/marmot-protocol/mdk", rev = "a2e0558a634bbd20607cdd5afb93abc6220ee58d", version = "=0.16.0" }
-storage-sqlite         = { git = "https://github.com/marmot-protocol/mdk", rev = "a2e0558a634bbd20607cdd5afb93abc6220ee58d", version = "=0.16.0", features = ["test-support"] }
-transport-nostr-peeler = { git = "https://github.com/marmot-protocol/mdk", rev = "a2e0558a634bbd20607cdd5afb93abc6220ee58d", version = "=0.16.0" }
+# MDK at the pinned tag v0.17.0 (upstream.json "mdk").
+cgka-traits            = { git = "https://github.com/marmot-protocol/mdk", rev = "4df811aea99269b437a6023be9446a5141e93cbe", version = "=0.17.0" }
+cgka-engine            = { git = "https://github.com/marmot-protocol/mdk", rev = "4df811aea99269b437a6023be9446a5141e93cbe", version = "=0.17.0" }
+storage-sqlite         = { git = "https://github.com/marmot-protocol/mdk", rev = "4df811aea99269b437a6023be9446a5141e93cbe", version = "=0.17.0", features = ["test-support"] }
+transport-nostr-peeler = { git = "https://github.com/marmot-protocol/mdk", rev = "4df811aea99269b437a6023be9446a5141e93cbe", version = "=0.17.0" }
 # Same exact sources as MDK's workspace so the OpenMLS types unify.
 openmls             = { git = "https://github.com/openmls/openmls.git", rev = "6100df3fb1d8c3eeab53e349fcbd621f98c44fe2", version = "=0.9.0", features = ["extensions-draft"] }
 openmls_rust_crypto = { git = "https://github.com/openmls/openmls.git", rev = "6100df3fb1d8c3eeab53e349fcbd621f98c44fe2", version = "=0.6.0", features = ["extensions-draft"] }

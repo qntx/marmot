@@ -962,6 +962,12 @@ fn checkpoint_image(host: &harness::TestHost) -> serde_json::Value {
 }
 
 fn json_bytes(value: &serde_json::Value) -> Vec<u8> {
+    if let Some(text) = value.as_str() {
+        use base64::Engine as _;
+        return base64::engine::general_purpose::STANDARD
+            .decode(text)
+            .expect("base64 byte field");
+    }
     value
         .as_array()
         .expect("byte array")
