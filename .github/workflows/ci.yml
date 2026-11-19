@@ -257,7 +257,9 @@ jobs:
           INTEROP_RELAY: bare
           RUNS: "20"
         run: |
-          set -uo pipefail
+          # Runs fail by design here: count them instead of stopping (the
+          # step shell is bash -e).
+          set +e -uo pipefail
           runs_dir="$RUNNER_TEMP/known-upstream"
           mkdir -p "$runs_dir"
           lost=0
