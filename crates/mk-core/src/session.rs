@@ -36,7 +36,7 @@
     )
 )]
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use cgka_engine::account_identity_proof::{
@@ -334,6 +334,7 @@ impl PendingProof {
             acked: CommitSeq::from_raw(0),
             gate: BTreeMap::new(),
             handed: HashSet::new(),
+            held: HashMap::new(),
             resolutions: Vec::new(),
         };
         open_session(session).map_err(|kind| ProofRejected {
@@ -792,6 +793,15 @@ pub struct Session {
     gate: BTreeMap<OutboundId, CommitSeq>,
     /// Items handed out this incarnation and not yet reported.
     handed: HashSet<OutboundId>,
+    /// The in-memory fanout that marked each in-flight fanout's current
+    /// attempts (mdk#2332). Only it can report those attempts as unexposed:
+    /// a fanout value loaded from storage holds no attempt marks, so results
+    /// recorded on it always count as possible exposure. Kept only while it
+    /// equals the stored record (its `PartialEq` ignores the marks); dropped
+    /// when the fanout leaves storage or the stored record moves ahead of it
+    /// (for example after a restart, where every interrupted attempt counts
+    /// as exposed — the intended semantics).
+    held: HashMap<OutboundId, OutboundFanout>,
     /// Publish resolutions produced since the last `drain_events`.
     resolutions: Vec<SessionEvent>,
 }
@@ -866,6 +876,7 @@ impl Session {
                 acked: CommitSeq::from_raw(0),
                 gate: BTreeMap::new(),
                 handed: HashSet::new(),
+                held: HashMap::new(),
                 resolutions: Vec::new(),
             })
             .map(|session| Opened::Ready(Box::new(session)))
@@ -929,15 +940,33 @@ impl Session {
             .engine
             .outbound_fanouts()
             .map_err(session_engine_error)?;
-        for mut fanout in fanouts {
-            let id = outbound_id_of(fanout.message_id())?;
+        // Drop held values whose fanout left storage or was overwritten by
+        // a path that did not carry this session's marks — the equality
+        // check below would never select them again.
+        let live: HashSet<OutboundId> = fanouts
+            .iter()
+            .filter_map(|fanout| outbound_id_of(fanout.message_id()).ok())
+            .collect();
+        self.held.retain(|id, _| live.contains(id));
+        for stored in fanouts {
+            let id = outbound_id_of(stored.message_id())?;
             if self.handed.contains(&id) || !self.releasable(&id) {
                 continue;
             }
+            // Re-mark on the held value, not the fresh storage load: only
+            // the value that marked an attempt can report it unexposed, and
+            // the load holds no marks (mdk#2332). A diverged held value is
+            // stale — the stored record then already counts those attempts
+            // as exposed.
+            let mut fanout = match self.held.get(&id) {
+                Some(held) if *held == stored => held.clone(),
+                _ => stored,
+            };
             if self.rearm_retryable(&mut fanout)? {
                 self.engine
                     .put_outbound_fanout(&fanout)
                     .map_err(session_engine_error)?;
+                self.held.insert(id, fanout.clone());
             }
             let Some(outbound) = fanout_outbound(&fanout, id) else {
                 continue;
@@ -1069,7 +1098,7 @@ impl Session {
             });
             return Ok(resolution);
         }
-        let fanout = self
+        let stored = self
             .engine
             .outbound_fanouts()
             .map_err(session_engine_error)?
@@ -1078,6 +1107,13 @@ impl Session {
                 outbound_id_of(fanout.message_id()).is_ok_and(|fanout_id| fanout_id == *id)
             })
             .ok_or(SessionError::UnknownOutbound)?;
+        // Record results on the value that marked the attempts while it
+        // still matches the stored record (`PartialEq` ignores the attempt
+        // marks): only that value can report them unexposed (mdk#2332).
+        let fanout = match self.held.get(id) {
+            Some(held) if *held == stored => held.clone(),
+            _ => stored,
+        };
         let resolution = self.report_fanout(fanout, results).await?;
         self.resolutions.push(SessionEvent::PublishResolved {
             outbound: *id,
@@ -1161,6 +1197,11 @@ impl Session {
                                 kind: endpoint_failure_kind(status),
                                 rejection_category: None,
                                 size_class: None,
+                                // A relay-reported failure can never prove
+                                // nothing left: `Unavailable` covers
+                                // timeouts and silent drops, where a frame
+                                // may have reached the relay.
+                                pre_send: false,
                             },
                         )
                         .map_err(|_| SessionError::Internal("fanout failure"))?;
@@ -1233,6 +1274,7 @@ impl Session {
                 .delete_outbound_fanout(fanout.message_id())
                 .map_err(session_engine_error)?;
             self.gate.remove(&id);
+            self.held.remove(&id);
             if resolution == PublishResolution::Pending {
                 resolution = PublishResolution::Complete;
             }
@@ -1240,6 +1282,10 @@ impl Session {
             self.engine
                 .put_outbound_fanout(&fanout)
                 .map_err(session_engine_error)?;
+            // The in-flight fanout stays outstanding: keep the held value —
+            // which still marks every unreported current attempt — current
+            // with what was persisted (mdk#2332).
+            self.held.insert(id, fanout.clone());
         }
         Ok(resolution)
     }
@@ -1264,6 +1310,9 @@ impl Session {
                 self.engine
                     .put_outbound_fanout(fanout)
                     .map_err(session_engine_error)?;
+                if let Ok(id) = outbound_id_of(fanout.message_id()) {
+                    self.held.insert(id, fanout.clone());
+                }
                 Err(SessionError::ConfirmConflict)
             }
             Err(error) => Err(session_engine_error(error)),
@@ -2112,6 +2161,9 @@ impl Session {
                             kind: TransportEndpointFailureKind::TerminalRejected,
                             rejection_category: None,
                             size_class: None,
+                            // The session refuses the relay itself: no
+                            // frame ever leaves for it.
+                            pre_send: true,
                         },
                     )
                     .map_err(|_| SessionError::Internal("fanout failure"))?;
@@ -2141,6 +2193,10 @@ impl Session {
         if let Some(seq) = self.provider.last_seq() {
             self.gate.insert(id, seq);
         }
+        // Keep the value that marked these attempts: results recorded on it
+        // can prove an attempt never left (mdk#2332); a later storage load
+        // cannot.
+        self.held.insert(id, fanout.clone());
         Ok(id)
     }
 
@@ -2671,7 +2727,7 @@ const fn endpoint_failure_kind(status: RelayStatus) -> TransportEndpointFailureK
 mod proof_tests {
     //! Account-identity-proof flow tests. The deferred-build discriminator
     //! test is the one sanctioned pin seam: it asserts the exact
-    //! `EngineError` variant MDK v0.16.0 returns when the proof signer
+    //! `EngineError` variant MDK v0.17.0 returns when the proof signer
     //! defers, because our open path classifies `NeedsAccountProof` on the
     //! captured request alone (no string matching).
 
@@ -2694,7 +2750,7 @@ mod proof_tests {
         }
     }
 
-    /// MDK v0.16.0 maps a deferring `AccountIdentityProofSigner` error
+    /// MDK v0.17.0 maps a deferring `AccountIdentityProofSigner` error
     /// through `EngineError::Other` at engine.rs `Identity::load_or_generate`.
     /// This test is the canary: if a pin bump ever changes that variant, the
     /// capture-based classification stays correct but this test must be

@@ -934,6 +934,10 @@ mod crash {
         }
 
         let mut observed = runner.observe();
+        for member in &runner.world.members {
+            mk_core::testing::check_message_index(&member.host.durable_rows())
+                .expect("message index consistent at run end");
+        }
         observed.batches = runner.world.members[measure]
             .host
             .batches()

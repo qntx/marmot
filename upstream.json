@@ -6,8 +6,8 @@
   },
   "mdk": {
     "repository": "https://github.com/marmot-protocol/mdk",
-    "tag": "v0.16.0",
-    "rev": "a2e0558a634bbd20607cdd5afb93abc6220ee58d",
+    "tag": "v0.17.0",
+    "rev": "4df811aea99269b437a6023be9446a5141e93cbe",
     "checkout": "3rdparty/mdk"
   }
 }

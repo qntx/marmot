@@ -72,7 +72,7 @@ pub fn wnd_bin() -> PathBuf {
     PathBuf::from(std::env::var("WND_BIN").expect("WND_BIN must point at the wnd binary"))
 }
 
-/// The MDK tag pinned in `upstream.json` (`mdk.tag`, e.g. `v0.16.0`).
+/// The MDK tag pinned in `upstream.json` (`mdk.tag`, e.g. `v0.17.0`).
 pub fn pinned_mdk_tag() -> String {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../upstream.json")
