@@ -17,15 +17,18 @@ use crate::error::{BridgeError, open_error, proof_error, session_error};
 use crate::host::{Host, QueueHost, lock};
 use crate::protocol::{
     AcknowledgeMessagesRequest, AttachmentData, AwaitingDurabilityResult, CallEnvelope, Config,
-    ConfigProbe, CreateGroupRequest, DiscardAttachmentRequest, DrainResponse, GroupCreatedResult,
-    GroupResult, GroupsResult, InboxRelaysResult, IngestRequest, IngestedResult, InviteRequest,
-    KeyPackageResult, LeaveRequest, MAX_REQUEST_BYTES, MediaAttachmentRef, OpResult,
+    ConfigProbe, CreateGroupRequest, DisbandRequest, DiscardAttachmentRequest, DrainResponse,
+    EnableDisbandingRequest, ForgetGroupRequest, GroupCreatedResult, GroupResult, GroupsResult,
+    InboxRelaysResult, IngestRequest, IngestedResult, InviteRequest, KeyPackageResult,
+    LeaveRequest, MAX_REQUEST_BYTES, MediaAttachmentRef, MessageSentResult, OpResult,
     OpenAttachmentRequest, OpenResponse, OutboundResult, PROTOCOL_VERSION,
     PublishInboxRelaysRequest, PublishKeyPackageRequest, PublishResolutionResult, REQUEST_TYPES,
     ReadyResult, RemoveMembersRequest, ReportPublishRequest, Request, Response,
-    SealAttachmentRequest, SealedAttachmentResult, SelfUpdateRequest, SendMediaRequest,
-    SendMessageRequest, SendOutcomeResult, SignerReply, SignerRequest, SignerResult, TickedResult,
-    UpdateAppComponentsRequest, UpdateGroupProfileRequest, decode, encode, invalid, reason_label,
+    SealAttachmentRequest, SealedAttachmentResult, SelfUpdateRequest, SendIntentRequest,
+    SendMediaRequest, SendMessageRequest, SendOutcomeResult, SetAdminRequest,
+    SetGroupAvatarRequest, SetRetentionRequest, SignerReply, SignerRequest, SignerResult,
+    TickedResult, UpdateAppComponentsRequest, UpdateGroupProfileRequest, decode, encode, invalid,
+    reason_label,
 };
 use crate::rows::decode_rows;
 use crate::signer::{QueueSigner, SignerState};
@@ -333,6 +336,13 @@ impl<H: Host> Bridge<H> {
                 self.run(op_update_app_components(args), Vec::new())
             }
             Request::SendMessage(args) => self.run(op_send_message(args), Vec::new()),
+            Request::SendIntent(args) => self.run(op_send_intent(args), Vec::new()),
+            Request::SetAdmin(args) => self.run(op_set_admin(args), Vec::new()),
+            Request::SetGroupAvatar(args) => self.run(op_set_group_avatar(args), Vec::new()),
+            Request::SetRetention(args) => self.run(op_set_retention(args), Vec::new()),
+            Request::Disband(args) => self.run(op_disband(args), Vec::new()),
+            Request::EnableDisbanding(args) => self.run(op_enable_disbanding(args), Vec::new()),
+            Request::ForgetGroup(args) => self.forget_group(args),
             Request::Ingest(args) => self.run(op_ingest(args), Vec::new()),
             Request::Tick(_) => self.run(op_tick(), Vec::new()),
         }
@@ -482,16 +492,20 @@ impl<H: Host> Bridge<H> {
         };
         let group = core::GroupId(args.group);
         self.run(
-            op_send(move |session| {
-                Box::pin(async move {
-                    session
-                        .send_media(&group, message)
-                        .await
-                        .map(|sent| sent.outcome)
-                })
+            op_sent(move |session| {
+                Box::pin(async move { session.send_media(&group, message).await })
             }),
             handles,
         )
+    }
+
+    /// `forget_group`: drop the group's local rows, keep the tombstone.
+    fn forget_group(&mut self, args: ForgetGroupRequest) -> Response {
+        let group = core::GroupId(args.group);
+        self.sync_op(|session| {
+            session.forget_group(&group)?;
+            Ok(OpResult::Done)
+        })
     }
 
     /// `discard_attachment`: drop one sealed handle.
@@ -887,6 +901,31 @@ fn op_send(
     }
 }
 
+/// Wrap a `SentMessage`-returning session method as an operation future,
+/// answering `message_sent` (the same borrow discipline as [`op_send`]).
+fn op_sent(
+    call: impl for<'a> FnOnce(
+        &'a mut Session,
+    ) -> Pin<
+        Box<dyn Future<Output = Result<core::SentMessage, SessionError>> + 'a>,
+    > + 'static,
+) -> impl FnOnce(Box<Session>) -> OpFuture {
+    move |mut session| {
+        Box::pin(async move {
+            let sent = call(&mut session).await;
+            (
+                session,
+                sent.map(|sent| {
+                    OpResult::MessageSent(MessageSentResult {
+                        outcome: sent.outcome.into(),
+                        message: sent.message.into(),
+                    })
+                }),
+            )
+        })
+    }
+}
+
 /// Whether a reply's result kind fits the pending operation's kind.
 const fn reply_fits(op: &crate::protocol::SignerOp, result: &SignerResult) -> bool {
     match result {
@@ -955,14 +994,48 @@ fn op_update_app_components(
 fn op_send_message(args: SendMessageRequest) -> impl FnOnce(Box<Session>) -> OpFuture {
     let group = core::GroupId(args.group);
     let message: core::AppMessage = args.message.into();
-    op_send(move |session| {
-        Box::pin(async move {
-            session
-                .send_message(&group, message)
-                .await
-                .map(|sent| sent.outcome)
-        })
-    })
+    op_sent(move |session| Box::pin(async move { session.send_message(&group, message).await }))
+}
+
+/// `send_intent` as an operation future.
+fn op_send_intent(args: SendIntentRequest) -> impl FnOnce(Box<Session>) -> OpFuture {
+    let group = core::GroupId(args.group);
+    let intent: core::MessageIntent = args.intent.into();
+    op_sent(move |session| Box::pin(async move { session.send_intent(&group, intent).await }))
+}
+
+/// `set_admin` as an operation future.
+fn op_set_admin(args: SetAdminRequest) -> impl FnOnce(Box<Session>) -> OpFuture {
+    let group = core::GroupId(args.group);
+    let account = core::AccountId(args.account);
+    let admin = args.admin;
+    op_send(move |session| Box::pin(async move { session.set_admin(&group, account, admin).await }))
+}
+
+/// `set_group_avatar` as an operation future.
+fn op_set_group_avatar(args: SetGroupAvatarRequest) -> impl FnOnce(Box<Session>) -> OpFuture {
+    let group = core::GroupId(args.group);
+    let avatar = args.avatar.map(core::GroupAvatar::from);
+    op_send(move |session| Box::pin(async move { session.set_group_avatar(&group, avatar).await }))
+}
+
+/// `set_retention` as an operation future.
+fn op_set_retention(args: SetRetentionRequest) -> impl FnOnce(Box<Session>) -> OpFuture {
+    let group = core::GroupId(args.group);
+    let seconds = args.seconds;
+    op_send(move |session| Box::pin(async move { session.set_retention(&group, seconds).await }))
+}
+
+/// `disband` as an operation future.
+fn op_disband(args: DisbandRequest) -> impl FnOnce(Box<Session>) -> OpFuture {
+    let group = core::GroupId(args.group);
+    op_send(move |session| Box::pin(async move { session.disband(&group).await }))
+}
+
+/// `enable_disbanding` as an operation future.
+fn op_enable_disbanding(args: EnableDisbandingRequest) -> impl FnOnce(Box<Session>) -> OpFuture {
+    let group = core::GroupId(args.group);
+    op_send(move |session| Box::pin(async move { session.enable_disbanding(&group).await }))
 }
 
 /// Validate one signer reply against the pending set.

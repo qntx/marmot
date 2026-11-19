@@ -14,17 +14,20 @@ pub(crate) mod ser;
 mod types;
 
 pub use request::{
-    AckDurableRequest, AcknowledgeMessagesRequest, CreateGroupRequest, DiscardAttachmentRequest,
-    GroupRequest, IngestRequest, InviteRequest, LeaveRequest, NoArgs, OpenAttachmentRequest,
+    AckDurableRequest, AcknowledgeMessagesRequest, CreateGroupRequest, DisbandRequest,
+    DiscardAttachmentRequest, EnableDisbandingRequest, ForgetGroupRequest, GroupRequest,
+    IngestRequest, InviteRequest, LeaveRequest, NoArgs, OpenAttachmentRequest,
     PublishInboxRelaysRequest, PublishKeyPackageRequest, RemoveMembersRequest,
-    ReportPublishRequest, Request, SealAttachmentRequest, SelfUpdateRequest, SendMediaRequest,
-    SendMessageRequest, SignerReplyRequest, SubmitProofRequest, UpdateAppComponentsRequest,
+    ReportPublishRequest, Request, SealAttachmentRequest, SelfUpdateRequest, SendIntentRequest,
+    SendMediaRequest, SendMessageRequest, SetAdminRequest, SetGroupAvatarRequest,
+    SetRetentionRequest, SignerReplyRequest, SubmitProofRequest, UpdateAppComponentsRequest,
     UpdateGroupProfileRequest,
 };
 pub use result::{
     AttachmentData, AwaitingDurabilityResult, GroupCreatedResult, GroupResult, GroupsResult,
-    InboxRelaysResult, IngestedResult, KeyPackageResult, OpResult, OutboundResult,
-    PublishResolutionResult, ReadyResult, SealedAttachmentResult, SendOutcomeResult, TickedResult,
+    InboxRelaysResult, IngestedResult, KeyPackageResult, MessageSentResult, OpResult,
+    OutboundResult, PublishResolutionResult, ReadyResult, SealedAttachmentResult,
+    SendOutcomeResult, TickedResult,
 };
 pub use types::*;
 
@@ -33,7 +36,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::{BridgeError, invalid_reason};
 
 /// Wire protocol version. Bumped on any breaking schema change.
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;
 
 /// Maximum accepted request/config byte length.
 pub const MAX_REQUEST_BYTES: usize = 64 * 1024 * 1024;
@@ -46,7 +49,10 @@ pub const REQUEST_TYPES: &[&str] = &[
     "acknowledge_messages",
     "awaiting_durability",
     "create_group",
+    "disband",
     "discard_attachment",
+    "enable_disbanding",
+    "forget_group",
     "group",
     "groups",
     "ingest",
@@ -59,8 +65,12 @@ pub const REQUEST_TYPES: &[&str] = &[
     "report_publish",
     "seal_attachment",
     "self_update",
+    "send_intent",
     "send_media",
     "send_message",
+    "set_admin",
+    "set_group_avatar",
+    "set_retention",
     "signer_reply",
     "submit_proof",
     "take_outbound",
