@@ -69,6 +69,11 @@ pub enum RelayStatus {
     /// as possible exposure, so a pending MLS commit is not rolled back
     /// after it (mdk#2332).
     Unavailable,
+    /// The event was not transmitted to this relay (the dial failed or the
+    /// publish never left). The target stays retryable and records no
+    /// exposure, so a later definite refusal can still roll a pending
+    /// commit back.
+    NotSent,
     /// The outcome is ambiguous (connection died mid-write, unknown response
     /// shape). The event may have been exposed: the fanout records possible
     /// exposure so a pending MLS commit is never rolled back.
@@ -140,11 +145,35 @@ pub(crate) enum SessionPubPurpose {
     InboxRelays,
 }
 
+/// Publish-retry pacing for one outstanding outbound item: how many
+/// consecutive all-retryable reports it absorbed and when it may be handed
+/// out again. Serialized as JSON into `Table::OutboundRetry`; the row is
+/// deleted when the item completes, rolls back, or any target accepts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct OutboundRetry {
+    /// Consecutive reports that left the item outstanding on retryable
+    /// verdicts only.
+    pub failures: u32,
+    /// Do not hand the item out before this wall-clock millisecond.
+    pub not_before_ms: u64,
+}
+
+/// Longest backoff between re-offers.
+pub(crate) const RETRY_BACKOFF_CAP_MS: u64 = 60_000;
+
+/// The backoff after `failures` consecutive retryable reports:
+/// `1s << (failures - 1)`, capped — 1, 2, 4, 8, 16, 32, 60, 60, … seconds.
+pub(crate) fn retry_backoff_ms(failures: u32) -> u64 {
+    (1_000_u64 << failures.saturating_sub(1).min(6)).min(RETRY_BACKOFF_CAP_MS)
+}
+
 const PUB_DECODE: &str = "kv decode: session publication";
 const PUB_ENCODE: &str = "kv encode: session publication";
 const INBOX_DECODE: &str = "kv decode: session inbox";
 const INBOX_ENCODE: &str = "kv encode: session inbox";
 const META_DECODE: &str = "kv decode: session meta";
+const RETRY_DECODE: &str = "kv decode: outbound retry";
+const RETRY_ENCODE: &str = "kv encode: outbound retry";
 
 fn storage_err(message: &'static str) -> StorageError {
     StorageError::Backend(message.to_owned())
@@ -192,6 +221,76 @@ impl KvStorageProvider {
     pub(crate) fn delete_session_publication(&self, id: &OutboundId) -> Result<(), StorageError> {
         self.store()
             .delete(&keys::key(Table::SessionOutbox, &[&id.0]))
+    }
+
+    /// Persist an item's retry pacing inside the caller's storage unit.
+    pub(crate) fn put_outbound_retry(
+        &self,
+        id: &OutboundId,
+        retry: &OutboundRetry,
+    ) -> Result<(), StorageError> {
+        let value = crate::ser::ser(retry).map_err(|_| storage_err(RETRY_ENCODE))?;
+        self.store()
+            .put(keys::key(Table::OutboundRetry, &[&id.0]), value)
+    }
+
+    /// One item's retry pacing, if recorded.
+    pub(crate) fn outbound_retry(
+        &self,
+        id: &OutboundId,
+    ) -> Result<Option<OutboundRetry>, StorageError> {
+        self.store()
+            .get(&keys::key(Table::OutboundRetry, &[&id.0]))?
+            .map_or(Ok(None), |value| {
+                crate::ser::de(&value)
+                    .map(Some)
+                    .map_err(|_| storage_err(RETRY_DECODE))
+            })
+    }
+
+    /// Every retry-pacing row, keyed by outbound id — for listing, pacing
+    /// and the live-set GC in `take_outbound`.
+    pub(crate) fn outbound_retries(
+        &self,
+    ) -> Result<Vec<(OutboundId, OutboundRetry)>, StorageError> {
+        let mut out = Vec::new();
+        for (key, value) in self.store().scan(&keys::key(Table::OutboundRetry, &[]))? {
+            let retry: OutboundRetry =
+                crate::ser::de(&value).map_err(|_| storage_err(RETRY_DECODE))?;
+            let id = keys::segments(&key)
+                .and_then(|segments| <[&[u8]; 1]>::try_from(segments.as_slice()).ok())
+                .and_then(|[segment]| <[u8; 32]>::try_from(segment).ok())
+                .map(OutboundId)
+                .ok_or_else(|| storage_err(RETRY_DECODE))?;
+            out.push((id, retry));
+        }
+        Ok(out)
+    }
+
+    /// Drop an item's retry row after completion, rollback, or an accepted
+    /// target.
+    pub(crate) fn delete_outbound_retry(&self, id: &OutboundId) -> Result<(), StorageError> {
+        self.store()
+            .delete(&keys::key(Table::OutboundRetry, &[&id.0]))
+    }
+
+    /// Record one all-retryable report inside the caller's storage unit:
+    /// `failures += 1`, `not_before_ms = now_ms + backoff(failures)`.
+    pub(crate) fn record_outbound_failure(
+        &self,
+        id: &OutboundId,
+        now_ms: u64,
+    ) -> Result<(), StorageError> {
+        let failures = self
+            .outbound_retry(id)?
+            .map_or(1, |retry| retry.failures.saturating_add(1));
+        self.put_outbound_retry(
+            id,
+            &OutboundRetry {
+                failures,
+                not_before_ms: now_ms.saturating_add(retry_backoff_ms(failures)),
+            },
+        )
     }
 
     /// Record a recipient's inbox relays (invite/create time) so later

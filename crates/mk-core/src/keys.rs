@@ -104,6 +104,10 @@ pub(crate) enum Table {
     /// `cgka_committed_roster_revision`: one row — the account-wide roster
     /// revision counter. Never reset, never deleted, not group-scoped.
     CommittedRosterRevision = 38,
+    /// Session-owned publish-retry pacing: one row per outstanding outbound
+    /// item carrying `{ failures, not_before_ms }` — the session's
+    /// exponential-backoff deadline for re-offering it to the host.
+    OutboundRetry = 39,
 }
 
 /// Meta row keys inside [`Table::Meta`].
@@ -115,7 +119,7 @@ pub(crate) const META_PENDING_HIGH_WATER: &[u8] = b"pending-ref-high-water";
 
 /// Current store schema version. Bumped when the row format or layout changes;
 /// older or newer stores refuse to open (no migration code by design).
-pub(crate) const SCHEMA_VERSION: u32 = 2;
+pub(crate) const SCHEMA_VERSION: u32 = 3;
 
 /// Encode a row key or scan prefix. `segments` must be nonempty content for a
 /// row key; prefixes use fewer segments of the same layout.

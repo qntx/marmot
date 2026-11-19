@@ -1349,4 +1349,655 @@ mod flow_tests {
         );
     }
 
+    /// Session retry pacing: an all-`unavailable` report arms a durable
+    /// backoff deadline; the item is not re-offered before it, is offered
+    /// exactly at it, and every later retryable report doubles the delay
+    /// up to the 60-second cap.
+    #[tokio::test(flavor = "current_thread")]
+    async fn unavailable_publication_backoff_paces_reoffer() {
+        let mut a = open_member().await;
+        a.session
+            .publish_key_package(&[RELAY.to_owned()])
+            .await
+            .expect("key package");
+        if let Some(seq) = a.session.awaiting_durability() {
+            a.session.acknowledge_durable(seq);
+        }
+        let unavailable = |item: &Outbound| -> Vec<RelayResult> {
+            item.relays
+                .iter()
+                .map(|relay| RelayResult {
+                    relay: relay.clone(),
+                    status: RelayStatus::Unavailable,
+                })
+                .collect()
+        };
+        let take_key_package = |member: &mut Member| -> Option<Outbound> {
+            member
+                .session
+                .take_outbound()
+                .expect("take_outbound")
+                .into_iter()
+                .find(|item| item.purpose == mk_core::OutboundPurpose::KeyPackage)
+        };
+
+        let item = take_key_package(&mut a).expect("first offer");
+        a.session
+            .report_publish(&item.id, &unavailable(&item))
+            .await
+            .expect("report");
+        // Before the 1-second deadline: nothing.
+        assert!(take_key_package(&mut a).is_none(), "not re-offered early");
+        a.clock.advance(999);
+        assert!(take_key_package(&mut a).is_none(), "still inside backoff");
+        a.clock.advance(1);
+        let retried = take_key_package(&mut a).expect("re-offered at the deadline");
+        a.session
+            .report_publish(&retried.id, &unavailable(&retried))
+            .await
+            .expect("report");
+
+        // Backoff doubles per consecutive retryable report, capped at 60s.
+        for expected in [2_000, 4_000, 8_000, 16_000, 32_000, 60_000, 60_000] {
+            a.clock.advance(expected - 1);
+            assert!(
+                take_key_package(&mut a).is_none(),
+                "inside the {expected}ms backoff"
+            );
+            a.clock.advance(1);
+            let again = take_key_package(&mut a).expect("re-offered at deadline");
+            a.session
+                .report_publish(&again.id, &unavailable(&again))
+                .await
+                .expect("report");
+        }
+    }
+
+    /// An accepted target resets the backoff: after the reset the
+    /// still-outstanding item re-offers immediately.
+    #[tokio::test(flavor = "current_thread")]
+    async fn accepted_target_resets_retry_backoff() {
+        let mut a = open_member().await;
+        a.session
+            .publish_key_package(&[RELAY.to_owned(), RELAY2.to_owned()])
+            .await
+            .expect("key package");
+        if let Some(seq) = a.session.awaiting_durability() {
+            a.session.acknowledge_durable(seq);
+        }
+        let unavailable_all = |item: &Outbound| -> Vec<RelayResult> {
+            item.relays
+                .iter()
+                .map(|relay| RelayResult {
+                    relay: relay.clone(),
+                    status: RelayStatus::Unavailable,
+                })
+                .collect()
+        };
+        let item = a
+            .session
+            .take_outbound()
+            .expect("take")
+            .into_iter()
+            .find(|item| item.purpose == mk_core::OutboundPurpose::KeyPackage)
+            .expect("key package offered");
+        let resolution = a
+            .session
+            .report_publish(&item.id, &unavailable_all(&item))
+            .await
+            .expect("report");
+        assert_eq!(resolution, PublishResolution::Pending);
+
+        a.clock.advance(1_000);
+        let retried = a
+            .session
+            .take_outbound()
+            .expect("take")
+            .into_iter()
+            .find(|outbound| outbound.purpose == mk_core::OutboundPurpose::KeyPackage)
+            .expect("re-offered");
+        let results: Vec<RelayResult> = retried
+            .relays
+            .iter()
+            .enumerate()
+            .map(|(index, relay)| RelayResult {
+                relay: relay.clone(),
+                status: if index == 0 {
+                    RelayStatus::Accepted
+                } else {
+                    RelayStatus::Unavailable
+                },
+            })
+            .collect();
+        let resolved = a
+            .session
+            .report_publish(&retried.id, &results)
+            .await
+            .expect("report");
+        assert_eq!(resolved, PublishResolution::Pending);
+        // Backoff reset: the surviving target re-offers with no wait.
+        let again = a
+            .session
+            .take_outbound()
+            .expect("take")
+            .into_iter()
+            .find(|outbound| outbound.purpose == mk_core::OutboundPurpose::KeyPackage)
+            .expect("re-offered immediately after an accept");
+        assert_eq!(again.relays.len(), 1, "only the retryable target remains");
+    }
+
+    /// Retry state is durable: after a restart the deadline still paces
+    /// the item.
+    #[tokio::test(flavor = "current_thread")]
+    async fn retry_deadline_survives_restart() {
+        let mut a = open_member().await;
+        a.session
+            .publish_key_package(&[RELAY.to_owned()])
+            .await
+            .expect("key package");
+        if let Some(seq) = a.session.awaiting_durability() {
+            a.session.acknowledge_durable(seq);
+        }
+        let item = a
+            .session
+            .take_outbound()
+            .expect("take")
+            .into_iter()
+            .find(|item| item.purpose == mk_core::OutboundPurpose::KeyPackage)
+            .expect("offered");
+        let results: Vec<RelayResult> = item
+            .relays
+            .iter()
+            .map(|relay| RelayResult {
+                relay: relay.clone(),
+                status: RelayStatus::Unavailable,
+            })
+            .collect();
+        a.session
+            .report_publish(&item.id, &results)
+            .await
+            .expect("report");
+
+        let mut a = reopen_member(&a).await;
+        let offered = |member: &mut Member| -> bool {
+            member
+                .session
+                .take_outbound()
+                .expect("take")
+                .iter()
+                .any(|outbound| outbound.purpose == mk_core::OutboundPurpose::KeyPackage)
+        };
+        assert!(!offered(&mut a), "the deadline survives the restart");
+        a.clock.advance(1_000);
+        assert!(offered(&mut a), "offered once the deadline passes");
+    }
+
+    /// `tick().next_wake_ms` folds the earliest live retry deadline into
+    /// the schedule.
+    #[tokio::test(flavor = "current_thread")]
+    async fn next_wake_tracks_earliest_retry_deadline() {
+        let mut a = open_member().await;
+        a.session
+            .publish_key_package(&[RELAY.to_owned()])
+            .await
+            .expect("key package");
+        a.session
+            .publish_inbox_relays(&[RELAY.to_owned()])
+            .await
+            .expect("inbox relays");
+        if let Some(seq) = a.session.awaiting_durability() {
+            a.session.acknowledge_durable(seq);
+        }
+        let items = a.session.take_outbound().expect("take");
+        assert_eq!(items.len(), 2, "both publications offered");
+        // First failure on the key package only: deadline now+1s.
+        let key_package = items
+            .iter()
+            .find(|item| item.purpose == mk_core::OutboundPurpose::KeyPackage)
+            .expect("key package");
+        a.session
+            .report_publish(
+                &key_package.id,
+                &[RelayResult {
+                    relay: RELAY.to_owned(),
+                    status: RelayStatus::Unavailable,
+                }],
+            )
+            .await
+            .expect("report");
+        a.clock.advance(500);
+        // A later failure on the inbox relays: deadline now+1s (=1.5s).
+        let inbox = items
+            .iter()
+            .find(|item| item.purpose == mk_core::OutboundPurpose::InboxRelays)
+            .expect("inbox relays");
+        a.session
+            .report_publish(
+                &inbox.id,
+                &[RelayResult {
+                    relay: RELAY.to_owned(),
+                    status: RelayStatus::Unavailable,
+                }],
+            )
+            .await
+            .expect("report");
+        let report = a.session.tick().await.expect("tick");
+        assert_eq!(
+            report.next_wake_ms,
+            Some(500),
+            "the wake is the earliest live deadline"
+        );
+    }
+
+    /// The full backoff shape over 600 simulated seconds against an
+    /// always-unavailable relay: takes at t = 0,1,3,7,15,31,63,123,…,543 s
+    /// — exactly 15 publish attempts.
+    #[tokio::test(flavor = "current_thread")]
+    async fn retry_backoff_soak_counts_attempts() {
+        let mut a = open_member().await;
+        a.session
+            .publish_key_package(&[RELAY.to_owned()])
+            .await
+            .expect("key package");
+        if let Some(seq) = a.session.awaiting_durability() {
+            a.session.acknowledge_durable(seq);
+        }
+        let start_ms = a.clock.now().unix_ms;
+        let mut attempts = 0u32;
+        loop {
+            for item in a.session.take_outbound().expect("take") {
+                assert_eq!(item.purpose, mk_core::OutboundPurpose::KeyPackage);
+                let results: Vec<RelayResult> = item
+                    .relays
+                    .iter()
+                    .map(|relay| RelayResult {
+                        relay: relay.clone(),
+                        status: RelayStatus::Unavailable,
+                    })
+                    .collect();
+                let resolution = a
+                    .session
+                    .report_publish(&item.id, &results)
+                    .await
+                    .expect("report");
+                assert_eq!(resolution, PublishResolution::Pending);
+                attempts += 1;
+            }
+            let report = a.session.tick().await.expect("tick");
+            let Some(wake) = report.next_wake_ms else {
+                break;
+            };
+            if a.clock.now().unix_ms - start_ms + wake > 600_000 {
+                break;
+            }
+            a.clock.advance(wake);
+        }
+        assert_eq!(attempts, 15, "600s of backoff yields 15 attempts");
+    }
+
+    /// `not_sent` records no exposure: an all-`not_sent` report holds the
+    /// commit `Pending` and paces a re-offer, and a later all-`rejected`
+    /// round still rolls the commit back, leaving the group usable for a
+    /// new staged commit.
+    #[tokio::test(flavor = "current_thread")]
+    async fn not_sent_holds_commit_then_rejected_rolls_back() {
+        let relay = FakeRelay::new();
+        let mut a = open_member().await;
+        let mut b = open_member().await;
+        publish_identity(&mut a, &relay, RELAY).await;
+        publish_identity(&mut b, &relay, RELAY).await;
+        let gid = group_with(&mut a, &relay, &[&b], "not-sent-hold").await;
+        join_via_welcome(&mut b, &relay).await;
+        sync_member(&mut a, &relay, RELAY, &gid).await;
+        sync_member(&mut b, &relay, RELAY, &gid).await;
+        let epoch_before = snapshot(&a, &gid).epoch;
+
+        a.session.self_update(&gid).await.expect("self update");
+        if let Some(seq) = a.session.awaiting_durability() {
+            a.session.acknowledge_durable(seq);
+        }
+        let item = a
+            .session
+            .take_outbound()
+            .expect("take")
+            .into_iter()
+            .find(|item| item.purpose == mk_core::OutboundPurpose::Commit)
+            .expect("commit staged");
+        let verdicts = |outbound: &Outbound, status| -> Vec<RelayResult> {
+            outbound
+                .relays
+                .iter()
+                .map(|target| RelayResult {
+                    relay: target.clone(),
+                    status,
+                })
+                .collect()
+        };
+        let resolution = a
+            .session
+            .report_publish(&item.id, &verdicts(&item, RelayStatus::NotSent))
+            .await
+            .expect("report");
+        assert_eq!(
+            resolution,
+            PublishResolution::Pending,
+            "not_sent holds the commit for retry"
+        );
+        // Backoff applies to not_sent too: no immediate re-offer.
+        assert!(
+            !a.session
+                .take_outbound()
+                .expect("take")
+                .iter()
+                .any(|outbound| outbound.purpose == mk_core::OutboundPurpose::Commit),
+            "the held commit is not re-offered inside backoff"
+        );
+        a.clock.advance(1_000);
+        let retried = a
+            .session
+            .take_outbound()
+            .expect("take")
+            .into_iter()
+            .find(|outbound| outbound.purpose == mk_core::OutboundPurpose::Commit)
+            .expect("re-offered after the backoff");
+        let resolved = a
+            .session
+            .report_publish(&retried.id, &verdicts(&retried, RelayStatus::Rejected))
+            .await
+            .expect("report");
+        assert_eq!(
+            resolved,
+            PublishResolution::RolledBack,
+            "definite refusals after not_sent still roll the commit back"
+        );
+        a.session.tick().await.expect("tick");
+        assert_eq!(
+            snapshot(&a, &gid).epoch,
+            epoch_before,
+            "rolled back to the prior epoch"
+        );
+
+        // The group stays usable: a fresh commit stages and confirms.
+        a.session.self_update(&gid).await.expect("retry intent");
+        let confirmed = publish_one(&mut a, &relay, mk_core::OutboundPurpose::Commit).await;
+        assert_eq!(
+            confirmed,
+            PublishResolution::Confirmed,
+            "a new commit on the rolled-back group confirms"
+        );
+        assert_eq!(snapshot(&a, &gid).epoch, epoch_before + 1);
+    }
+
+    /// Control: `unavailable` records possible exposure, so a later
+    /// all-`rejected` round cannot roll the commit back.
+    #[tokio::test(flavor = "current_thread")]
+    async fn unavailable_then_rejected_stays_pending() {
+        let relay = FakeRelay::new();
+        let mut a = open_member().await;
+        let mut b = open_member().await;
+        publish_identity(&mut a, &relay, RELAY).await;
+        publish_identity(&mut b, &relay, RELAY).await;
+        let gid = group_with(&mut a, &relay, &[&b], "unavail-hold").await;
+        join_via_welcome(&mut b, &relay).await;
+        sync_member(&mut a, &relay, RELAY, &gid).await;
+        let epoch_before = snapshot(&a, &gid).epoch;
+
+        a.session.self_update(&gid).await.expect("self update");
+        if let Some(seq) = a.session.awaiting_durability() {
+            a.session.acknowledge_durable(seq);
+        }
+        let verdicts = |item: &Outbound, status| -> Vec<RelayResult> {
+            item.relays
+                .iter()
+                .map(|target| RelayResult {
+                    relay: target.clone(),
+                    status,
+                })
+                .collect()
+        };
+        for status in [RelayStatus::Unavailable, RelayStatus::Rejected] {
+            let item = a
+                .session
+                .take_outbound()
+                .expect("take")
+                .into_iter()
+                .find(|item| item.purpose == mk_core::OutboundPurpose::Commit)
+                .expect("commit offered");
+            let resolution = a
+                .session
+                .report_publish(&item.id, &verdicts(&item, status))
+                .await
+                .expect("report");
+            assert_eq!(
+                resolution,
+                PublishResolution::Pending,
+                "possibly-exposed commit stays pending on {status:?}"
+            );
+            a.clock.advance(1_000);
+        }
+        a.session.tick().await.expect("tick");
+        assert_eq!(
+            snapshot(&a, &gid).epoch,
+            epoch_before,
+            "no rollback, no advance"
+        );
+    }
+
+    /// One `unavailable` among `not_sent` results still records possible
+    /// exposure: the later all-`rejected` round does not roll back.
+    #[tokio::test(flavor = "current_thread")]
+    async fn mixed_not_sent_unavailable_then_rejected_stays_pending() {
+        let relay = FakeRelay::new();
+        let mut a = open_member().await;
+        let mut b = open_member().await;
+        publish_identity(&mut a, &relay, RELAY).await;
+        publish_identity(&mut b, &relay, RELAY).await;
+        // Two routing relays so one report can mix verdicts.
+        let gid = a
+            .session
+            .create_group(CreateGroup {
+                name: "mixed-hold".to_owned(),
+                description: String::new(),
+                relays: vec![RELAY.to_owned(), RELAY2.to_owned()],
+                invitees: vec![Invitee {
+                    key_package: key_package_of(&relay, RELAY, &b.account_hex()),
+                    inbox_relays: inbox_relays_of(&relay, RELAY, &b.account_hex()),
+                }],
+                admins: Vec::new(),
+                components: Vec::new(),
+            })
+            .await
+            .expect("create");
+        flush(&mut a, &relay).await;
+        join_via_welcome(&mut b, &relay).await;
+        sync_member(&mut a, &relay, RELAY, &gid).await;
+
+        a.session.self_update(&gid).await.expect("self update");
+        if let Some(seq) = a.session.awaiting_durability() {
+            a.session.acknowledge_durable(seq);
+        }
+        let item = a
+            .session
+            .take_outbound()
+            .expect("take")
+            .into_iter()
+            .find(|item| item.purpose == mk_core::OutboundPurpose::Commit)
+            .expect("commit staged");
+        assert!(item.relays.len() > 1, "the commit fans out to both relays");
+        let results: Vec<RelayResult> = item
+            .relays
+            .iter()
+            .enumerate()
+            .map(|(index, target)| RelayResult {
+                relay: target.clone(),
+                status: if index == 0 {
+                    RelayStatus::NotSent
+                } else {
+                    RelayStatus::Unavailable
+                },
+            })
+            .collect();
+        let resolution = a
+            .session
+            .report_publish(&item.id, &results)
+            .await
+            .expect("report");
+        assert_eq!(resolution, PublishResolution::Pending);
+
+        a.clock.advance(1_000);
+        let retried = a
+            .session
+            .take_outbound()
+            .expect("take")
+            .into_iter()
+            .find(|outbound| outbound.purpose == mk_core::OutboundPurpose::Commit)
+            .expect("re-offered");
+        let refusals: Vec<RelayResult> = retried
+            .relays
+            .iter()
+            .map(|target| RelayResult {
+                relay: target.clone(),
+                status: RelayStatus::Rejected,
+            })
+            .collect();
+        let resolved = a
+            .session
+            .report_publish(&retried.id, &refusals)
+            .await
+            .expect("report");
+        assert_eq!(
+            resolved,
+            PublishResolution::Pending,
+            "one possibly-exposed target keeps the commit pending"
+        );
+    }
+
+    /// `not_sent` then `accepted` confirms the commit exactly as a clean
+    /// publish would.
+    #[tokio::test(flavor = "current_thread")]
+    async fn not_sent_then_accepted_confirms() {
+        let relay = FakeRelay::new();
+        let mut a = open_member().await;
+        let mut b = open_member().await;
+        publish_identity(&mut a, &relay, RELAY).await;
+        publish_identity(&mut b, &relay, RELAY).await;
+        let gid = group_with(&mut a, &relay, &[&b], "not-sent-ok").await;
+        join_via_welcome(&mut b, &relay).await;
+        sync_member(&mut a, &relay, RELAY, &gid).await;
+        let epoch_before = snapshot(&a, &gid).epoch;
+
+        a.session.self_update(&gid).await.expect("self update");
+        if let Some(seq) = a.session.awaiting_durability() {
+            a.session.acknowledge_durable(seq);
+        }
+        let verdicts = |item: &Outbound, status| -> Vec<RelayResult> {
+            item.relays
+                .iter()
+                .map(|target| RelayResult {
+                    relay: target.clone(),
+                    status,
+                })
+                .collect()
+        };
+        let item = a
+            .session
+            .take_outbound()
+            .expect("take")
+            .into_iter()
+            .find(|item| item.purpose == mk_core::OutboundPurpose::Commit)
+            .expect("commit staged");
+        let resolution = a
+            .session
+            .report_publish(&item.id, &verdicts(&item, RelayStatus::NotSent))
+            .await
+            .expect("report");
+        assert_eq!(resolution, PublishResolution::Pending);
+        a.clock.advance(1_000);
+        let retried = a
+            .session
+            .take_outbound()
+            .expect("take")
+            .into_iter()
+            .find(|outbound| outbound.purpose == mk_core::OutboundPurpose::Commit)
+            .expect("re-offered");
+        let resolved = a
+            .session
+            .report_publish(&retried.id, &relay.publish(&retried))
+            .await
+            .expect("report");
+        assert_eq!(
+            resolved,
+            PublishResolution::Confirmed,
+            "acceptance after not_sent confirms"
+        );
+        assert_eq!(snapshot(&a, &gid).epoch, epoch_before + 1);
+    }
+
+    /// An application message whose targets all report `not_sent` stays
+    /// outstanding — never dropped — and is re-offered after the backoff.
+    #[tokio::test(flavor = "current_thread")]
+    async fn not_sent_message_stays_outstanding() {
+        let relay = FakeRelay::new();
+        let mut a = open_member().await;
+        let mut b = open_member().await;
+        publish_identity(&mut a, &relay, RELAY).await;
+        publish_identity(&mut b, &relay, RELAY).await;
+        let gid = group_with(&mut a, &relay, &[&b], "not-sent-msg").await;
+        join_via_welcome(&mut b, &relay).await;
+        sync_member(&mut a, &relay, RELAY, &gid).await;
+
+        a.session
+            .send_message(
+                &gid,
+                mk_core::AppMessage {
+                    kind: 9,
+                    tags: Vec::new(),
+                    content: "held".to_owned(),
+                },
+            )
+            .await
+            .expect("send");
+        if let Some(seq) = a.session.awaiting_durability() {
+            a.session.acknowledge_durable(seq);
+        }
+        let item = a
+            .session
+            .take_outbound()
+            .expect("take")
+            .into_iter()
+            .find(|item| item.purpose == mk_core::OutboundPurpose::ApplicationMessage)
+            .expect("message staged");
+        let results: Vec<RelayResult> = item
+            .relays
+            .iter()
+            .map(|target| RelayResult {
+                relay: target.clone(),
+                status: RelayStatus::NotSent,
+            })
+            .collect();
+        let resolution = a
+            .session
+            .report_publish(&item.id, &results)
+            .await
+            .expect("report");
+        assert_eq!(
+            resolution,
+            PublishResolution::Pending,
+            "a not_sent message stays outstanding"
+        );
+        a.clock.advance(1_000);
+        let retried = a
+            .session
+            .take_outbound()
+            .expect("take")
+            .into_iter()
+            .find(|outbound| outbound.purpose == mk_core::OutboundPurpose::ApplicationMessage)
+            .expect("the message is re-offered, not dropped");
+        let resolved = a
+            .session
+            .report_publish(&retried.id, &relay.publish(&retried))
+            .await
+            .expect("report");
+        assert_eq!(resolved, PublishResolution::Complete);
+    }
 }
