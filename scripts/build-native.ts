@@ -52,6 +52,7 @@ const INSTALL_NAME = "@rpath/MarmotFfi.framework/MarmotFfi";
 
 const ANDROID_TARGETS = [
   ["aarch64-linux-android", "arm64-v8a", "aarch64-linux-android"],
+  ["armv7-linux-androideabi", "armeabi-v7a", "armv7a-linux-androideabi"],
   ["x86_64-linux-android", "x86_64", "x86_64-linux-android"],
 ] as const;
 
