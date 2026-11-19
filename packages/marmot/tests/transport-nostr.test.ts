@@ -111,7 +111,6 @@ describe("nostrRelayPort.publish", () => {
   });
 
   test("a refused dial maps to not_sent and connect answers false", async () => {
-    const network = createFakeRelayNetwork();
     const pool = new Pool({
       websocketImplementation: RefusedSocket,
       connectTimeoutMs: 100,
@@ -119,8 +118,6 @@ describe("nostrRelayPort.publish", () => {
     const port = nostrRelayPort(pool);
     await expect(port.connect(RELAY)).resolves.toBe(false);
     await expect(port.publish(RELAY, toWireEvent(signedEvent(1000)))).resolves.toBe("not_sent");
-    expect(network.relay(RELAY).events()).toStrictEqual([]);
-    network.close();
   });
 
   test("a relay that never answers OK maps to unavailable", async () => {
