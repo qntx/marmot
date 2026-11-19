@@ -1,4 +1,4 @@
-//! White Noise (`wn`/`wnd` at the pinned MDK rev) ↔ `mk-core` interop
+//! White Noise (`wn`/`wnd` at the upstream.json wn pin) ↔ `mk-core` interop
 //! scenarios, ported from `spike/js/run-interop.ts`: every claim the spike
 //! logged is an assert here. Each test owns its relay, daemon, `WN_HOME`
 //! and members; `wnd` is killed and reaped on drop.
@@ -263,7 +263,7 @@ async fn member_says(rig: &Arc<Rig>, member: &mut Member, gid: &GroupId, wn_gid:
 // ---- scenario 1: mk-core creates a group and invites wn -------------------
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "needs wn/wnd from the pinned MDK rev; see CONTRIBUTING"]
+#[ignore = "needs wn/wnd built from the upstream.json wn pin; see CONTRIBUTING"]
 async fn scenario1_mk_core_invites_wn() {
     let start = Instant::now();
     let rig = Arc::new(rig("s1").await);
@@ -283,7 +283,7 @@ async fn scenario1_mk_core_invites_wn() {
 // ---- scenario 2: wn creates a group and invites mk-core -------------------
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "needs wn/wnd from the pinned MDK rev; see CONTRIBUTING"]
+#[ignore = "needs wn/wnd built from the upstream.json wn pin; see CONTRIBUTING"]
 async fn scenario2_wn_invites_mk_core() {
     let start = Instant::now();
     let rig = Arc::new(rig("s2").await);
@@ -338,7 +338,7 @@ async fn scenario2_wn_invites_mk_core() {
 // ---- scenario 3: bulk flow + membership changes ---------------------------
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "needs wn/wnd from the pinned MDK rev; see CONTRIBUTING"]
+#[ignore = "needs wn/wnd built from the upstream.json wn pin; see CONTRIBUTING"]
 async fn scenario3_bulk_and_membership() {
     let start = Instant::now();
     let rig = Arc::new(rig("s3").await);
@@ -589,7 +589,7 @@ async fn scenario3_bulk_and_membership() {
 // ---- scenario 4: capability requirements ---------------------------------
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "needs wn/wnd from the pinned MDK rev; see CONTRIBUTING"]
+#[ignore = "needs wn/wnd built from the upstream.json wn pin; see CONTRIBUTING"]
 async fn scenario4_capability_requirements() {
     let start = Instant::now();
     let rig = Arc::new(rig("s4").await);
@@ -741,7 +741,7 @@ async fn scenario4_capability_requirements() {
 // ---- scenario 5: encrypted media round trip -------------------------------
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "needs wn/wnd from the pinned MDK rev; see CONTRIBUTING"]
+#[ignore = "needs wn/wnd built from the upstream.json wn pin; see CONTRIBUTING"]
 async fn scenario5_media_round_trip() {
     let start = Instant::now();
     let rig = Arc::new(rig("s5").await);
@@ -932,7 +932,7 @@ fn out_path_exists(path: &str) -> bool {
 // ---- scenario 6: agent text stream anchors --------------------------------
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "needs wn/wnd from the pinned MDK rev; see CONTRIBUTING"]
+#[ignore = "needs wn/wnd built from the upstream.json wn pin; see CONTRIBUTING"]
 async fn scenario6_stream_anchors() {
     let start = Instant::now();
     let rig = Arc::new(rig("s6").await);

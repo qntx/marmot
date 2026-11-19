@@ -28,8 +28,15 @@ const SPEC_FILES: Record<string, Uint8Array> = {
   "vectors/spec/foundation/errors.md": new TextEncoder().encode("errors"),
 };
 
-/** Fake probe: heads map checkout dirs to HEADs, files map paths to bytes. */
-function probe(heads: Record<string, string>, files: Record<string, Uint8Array>): PinProbe {
+/**
+ * Fake probe: heads map checkout dirs to HEADs, tags map checkout dirs to tag→commit, files map
+ * paths to bytes.
+ */
+function probe(
+  heads: Record<string, string>,
+  files: Record<string, Uint8Array>,
+  tags: Record<string, Record<string, string>> = {},
+): PinProbe {
   const dirs = new Map<string, string[]>();
   for (const path of Object.keys(files)) {
     const dir = path.slice(0, path.lastIndexOf("/"));
@@ -38,12 +45,19 @@ function probe(heads: Record<string, string>, files: Record<string, Uint8Array>)
   }
   return {
     checkoutHead: (checkout) => heads[checkout],
+    tagCommit: (checkout, tag) => tags[checkout]?.[tag],
     listFiles: (dir) => dirs.get(dir) ?? [],
     readBytes: (path) => files[path],
   };
 }
 
-const BOTH_AT_PIN = probe({ "3rdparty/marmot": REV_A, "3rdparty/mdk": REV_B }, SPEC_FILES);
+const MDK_TAGS = { "3rdparty/mdk": { "v0.16.0": REV_B } };
+
+const BOTH_AT_PIN = probe(
+  { "3rdparty/marmot": REV_A, "3rdparty/mdk": REV_B },
+  SPEC_FILES,
+  MDK_TAGS,
+);
 
 describe("checkPins", () => {
   test("accepts pins whose checkouts sit at the pinned revs", () => {
@@ -146,7 +160,7 @@ describe("checkPins", () => {
   test("compares recorded mdk vectors when the mdk checkout is at the pin", () => {
     const files = { ...SPEC_FILES, ...MDK_FILES };
     expect(
-      checkPins(PINS, probe({ "3rdparty/marmot": REV_A, "3rdparty/mdk": REV_B }, files)),
+      checkPins(PINS, probe({ "3rdparty/marmot": REV_A, "3rdparty/mdk": REV_B }, files, MDK_TAGS)),
     ).toStrictEqual({ errors: [], notes: [] });
   });
 
@@ -198,5 +212,42 @@ describe("checkPins", () => {
     expect(errors).toStrictEqual([
       "mdk: vectors/mdk/missing.v1.json has no source in 3rdparty/mdk/crates/cgka-conformance-simulator/vectors",
     ]);
+  });
+
+  test("rejects a tag that resolves to a different commit", () => {
+    const elsewhere = "9cf81ea674a8e6e63f9f899261ee7fe58b529681";
+    const { errors } = checkPins(
+      PINS,
+      probe({ "3rdparty/marmot": REV_A, "3rdparty/mdk": REV_B }, SPEC_FILES, {
+        "3rdparty/mdk": { "v0.16.0": elsewhere },
+      }),
+    );
+    expect(errors).toStrictEqual([
+      `mdk: v0.16.0 in 3rdparty/mdk is ${elsewhere}, pinned rev is ${REV_B}`,
+    ]);
+  });
+
+  test("notes a tag that is absent from the checkout", () => {
+    const { errors, notes } = checkPins(
+      PINS,
+      probe({ "3rdparty/marmot": REV_A, "3rdparty/mdk": REV_B }, SPEC_FILES),
+    );
+    expect(errors).toStrictEqual([]);
+    expect(notes).toStrictEqual([
+      "mdk: tag v0.16.0 not present in 3rdparty/mdk — tag not verified",
+    ]);
+  });
+
+  test("verifies two pins that share one checkout", () => {
+    const pins = {
+      mdk: PINS.mdk,
+      wn: { ...PINS.mdk },
+    };
+    const { errors, notes } = checkPins(
+      pins,
+      probe({ "3rdparty/mdk": REV_B }, SPEC_FILES, MDK_TAGS),
+    );
+    expect(errors).toStrictEqual([]);
+    expect(notes).toStrictEqual([]);
   });
 });

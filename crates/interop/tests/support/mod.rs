@@ -72,8 +72,8 @@ pub fn wnd_bin() -> PathBuf {
     PathBuf::from(std::env::var("WND_BIN").expect("WND_BIN must point at the wnd binary"))
 }
 
-/// The MDK tag pinned in `upstream.json` (`mdk.tag`, e.g. `v0.17.0`).
-pub fn pinned_mdk_tag() -> String {
+/// The White Noise tag pinned in `upstream.json` (`wn.tag`, e.g. `v0.17.0`).
+pub fn pinned_wn_tag() -> String {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../upstream.json")
         .canonicalize()
@@ -81,13 +81,13 @@ pub fn pinned_mdk_tag() -> String {
     let parsed: Value =
         serde_json::from_slice(&std::fs::read(path).expect("read upstream.json")).expect("json");
     parsed
-        .pointer("/mdk/tag")
+        .pointer("/wn/tag")
         .and_then(Value::as_str)
-        .expect("mdk.tag")
+        .expect("wn.tag")
         .to_owned()
 }
 
-/// Hard-fail unless `wn --version` reports the pinned MDK tag's version.
+/// Hard-fail unless `wn --version` reports the pinned wn tag's version.
 pub fn assert_wn_version() {
     let out = Command::new(wn_bin())
         .arg("--version")
@@ -101,8 +101,8 @@ pub fn assert_wn_version() {
         .expect("wn --version prints `wn <version>`");
     assert_eq!(
         format!("v{version}"),
-        pinned_mdk_tag(),
-        "wn build must match the pinned MDK tag"
+        pinned_wn_tag(),
+        "wn build must match the upstream.json wn pin"
     );
 }
 
