@@ -39,6 +39,7 @@ function checkedPort(port: RelayPort, check: (event: NostrEvent) => void): Relay
       check(event);
       return port.publish(relay, event);
     },
+    connect: async (relay) => port.connect(relay),
     subscribe: (relay, filters, handlers) => port.subscribe(relay, filters, handlers),
   };
 }

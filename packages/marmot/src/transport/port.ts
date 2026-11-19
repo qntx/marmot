@@ -6,8 +6,12 @@
 
 import type { NostrEvent } from "../backend/protocol.ts";
 
-/** Per-relay publish verdict, mapped onto the engine's `RelayStatus` vocabulary. */
-export type PublishStatus = "accepted" | "rejected" | "unavailable";
+/**
+ * Per-relay publish verdict, mapped onto the engine's `RelayStatus` vocabulary. `not_sent`: the
+ * event was not transmitted to this relay — a pre-send failure such as a refused dial, which
+ * records no possible exposure.
+ */
+export type PublishStatus = "accepted" | "rejected" | "unavailable" | "not_sent";
 
 /** A NIP-01 filter as the client composes it. */
 export type RelayFilter = {
@@ -32,6 +36,11 @@ export type SubscriptionHandlers = {
 export type RelayPort = {
   /** Publish `event` to one relay; resolves with that relay's verdict. */
   publish: (relay: string, event: NostrEvent) => Promise<PublishStatus>;
+  /**
+   * Establish a connection to `relay` when none is open; resolves `true` once a connection is
+   * established, `false` when the dial fails. Never rejects.
+   */
+  connect: (relay: string) => Promise<boolean>;
   /**
    * Open one subscription on `relay`; returns the close function. `closed` fires only for
    * relay-initiated ends — closing via the returned function must not produce a `closed` call.

@@ -64,6 +64,7 @@ describe("fetchEvents", () => {
     // A silent port: subscribes but never emits eose/closed.
     const silent = {
       publish: async () => Promise.resolve("accepted" as const),
+      connect: async () => Promise.resolve(false),
       subscribe: () => () => {},
     };
     const timer = manualTimer();
@@ -87,6 +88,7 @@ describe("fetchEvents", () => {
     const seen: RelayFilter[][] = [];
     const port = {
       publish: async () => Promise.resolve("accepted" as const),
+      connect: async () => Promise.resolve(false),
       subscribe: (_relay: string, filters: RelayFilter[], handlers: { eose: () => void }) => {
         seen.push(filters);
         handlers.eose();

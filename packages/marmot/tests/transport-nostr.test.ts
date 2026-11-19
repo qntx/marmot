@@ -13,6 +13,41 @@ const ROUTE = "bb".repeat(32);
 
 const keys = Keys.generate();
 
+/** A WebSocket implementation whose dial is refused: error and close, never open. */
+class RefusedSocket {
+  static readonly OPEN = 1;
+  static readonly CONNECTING = 0;
+  static readonly CLOSING = 2;
+  static readonly CLOSED = 3;
+  readonly readyState = 0;
+  private readonly listeners = new Map<string, Array<(ev: unknown) => void>>();
+
+  constructor(_url: string) {
+    queueMicrotask(() => {
+      for (const type of ["error", "close"]) {
+        for (const listener of this.listeners.get(type) ?? []) {
+          listener({});
+        }
+      }
+    });
+  }
+
+  send(): void {}
+  close(): void {}
+  addEventListener(type: string, listener: (ev: unknown) => void): void {
+    const list = this.listeners.get(type) ?? [];
+    list.push(listener);
+    this.listeners.set(type, list);
+  }
+
+  removeEventListener(type: string, listener: (ev: unknown) => void): void {
+    this.listeners.set(
+      type,
+      (this.listeners.get(type) ?? []).filter((entry) => entry !== listener),
+    );
+  }
+}
+
 /** A properly signed kind-445 event — the fake relay verifies signatures on EVENT writes. */
 function signedEvent(createdAt: number, content = "x"): Event {
   return finalizeEvent({ kind: 445, tags: [["h", ROUTE]], content, created_at: createdAt }, keys);
@@ -67,11 +102,38 @@ describe("nostrRelayPort.publish", () => {
     network.close();
   });
 
-  test("an insecure ws:// URL fails in the pool and maps to unavailable", async () => {
+  test("an insecure ws:// URL fails before transmission and maps to not_sent", async () => {
     const { network, port } = fixture();
     await expect(
       port.publish("ws://insecure.example", toWireEvent(signedEvent(1000))),
-    ).resolves.toBe("unavailable");
+    ).resolves.toBe("not_sent");
+    network.close();
+  });
+
+  test("a refused dial maps to not_sent and connect answers false", async () => {
+    const network = createFakeRelayNetwork();
+    const pool = new Pool({
+      websocketImplementation: RefusedSocket,
+      connectTimeoutMs: 100,
+    });
+    const port = nostrRelayPort(pool);
+    await expect(port.connect(RELAY)).resolves.toBe(false);
+    await expect(port.publish(RELAY, toWireEvent(signedEvent(1000)))).resolves.toBe("not_sent");
+    expect(network.relay(RELAY).events()).toStrictEqual([]);
+    network.close();
+  });
+
+  test("a relay that never answers OK maps to unavailable", async () => {
+    const network = createFakeRelayNetwork();
+    // The relay holds every reply well past the pool's publish timeout: the frame went out.
+    network.relay(RELAY, { latencyMs: 500 });
+    const pool = new Pool({
+      websocketImplementation: network.websocketImplementation,
+      publishTimeoutMs: 50,
+    });
+    const port = nostrRelayPort(pool);
+    await expect(port.connect(RELAY)).resolves.toBe(true);
+    await expect(port.publish(RELAY, toWireEvent(signedEvent(1000)))).resolves.toBe("unavailable");
     network.close();
   });
 });
