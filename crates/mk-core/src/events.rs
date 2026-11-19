@@ -1601,4 +1601,50 @@ mod tests {
         assert_eq!(mapped.secret_write, None);
         assert_eq!(mapped.secret_delete, Some((group_id, message_id)));
     }
+
+    /// `group_system_canonical_id` errors only for a `GroupDisbanded`
+    /// without an actor — the engine never emits it; if it ever did the
+    /// event is dropped rather than surfaced with a fabricated row id.
+    #[test]
+    fn disbanded_without_actor_is_dropped() {
+        let event = GroupEvent::GroupStateChanged {
+            group_id: gid(),
+            epoch: EpochId(3),
+            actor: None,
+            change: cgka_traits::engine::GroupStateChange::GroupDisbanded,
+            origin_commit_id: None,
+        };
+        assert!(session_event(event, 0).is_none());
+    }
+
+    /// A well-formed change carries the canonical system-row id: equal to
+    /// `group_system_canonical_id` of the exact group, epoch, actor and
+    /// engine change (including fields the mapped `GroupChange` drops).
+    #[test]
+    fn state_change_row_id_is_canonical() {
+        let actor = MemberId::new(vec![5; 32]);
+        let engine_change = cgka_traits::engine::GroupStateChange::GroupRenamed {
+            previous_name: Some("before".to_owned()),
+            name: "after".to_owned(),
+        };
+        let event = GroupEvent::GroupStateChanged {
+            group_id: gid(),
+            epoch: EpochId(7),
+            actor: Some(actor.clone()),
+            change: engine_change.clone(),
+            origin_commit_id: None,
+        };
+        let expected = cgka_traits::app_event::group_system_canonical_id(
+            &gid(),
+            7,
+            Some(&actor),
+            &engine_change,
+        )
+        .expect("canonical id");
+        let mapped = session_event(event, 0).expect("mapped");
+        let SessionEvent::GroupStateChanged { row_id, .. } = mapped.event else {
+            panic!("expected GroupStateChanged");
+        };
+        assert_eq!(row_id, expected);
+    }
 }
