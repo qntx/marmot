@@ -59,7 +59,9 @@ runs:
       run: |
         set -euo pipefail
         bash scripts/install-odin.sh "$RUNNER_TEMP/odin"
-        rustup toolchain install "$CHANNEL" --profile minimal
+        # No arguments: the toolchain file's channel and components
+        # (marmot-markdown's build needs llvm-tools-preview).
+        rustup toolchain install
         ODIN="$RUNNER_TEMP/odin/odin" CARGO_TARGET_DIR="$RUNNER_TEMP/wn-target" \
           cargo +"$CHANNEL" build --release --locked -p wn-cli --bins
         mkdir -p "$OUT"
