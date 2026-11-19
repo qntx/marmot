@@ -23,12 +23,18 @@
   "confirm_conflict": {
     "kind": "confirm_conflict"
   },
+  "disbanding_not_enabled": {
+    "kind": "disbanding_not_enabled"
+  },
   "engine": {
     "detail": "engine_error",
     "kind": "engine"
   },
   "group_busy": {
     "kind": "group_busy"
+  },
+  "group_disbanding": {
+    "kind": "group_disbanding"
   },
   "host_failed": {
     "kind": "host_failed"

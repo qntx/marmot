@@ -22,6 +22,9 @@ tagged `"type"` (the error enum uses `"kind"`), fieldless enums are plain
 | `signer_op.json` | `SignerOp` |
 | `signer_result.json` | `SignerResult` |
 | `send_outcome.json` | `SendOutcome` |
+| `message_intent.json` | `MessageIntent` |
+| `semantics.json` | `Semantics` |
+| `drop_reason.json` | `DropReason` |
 | `publish_resolution.json` | `PublishResolution` |
 | `input_outcome.json` | `InputOutcome` |
 | `availability_category.json` | `AvailabilityCategory` |

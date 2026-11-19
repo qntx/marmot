@@ -1,0 +1,21 @@
+{
+  "chat": {
+    "reply_to": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "type": "chat"
+  },
+  "other": {
+    "type": "other"
+  },
+  "reaction": {
+    "emoji": "\ud83d\udc4d",
+    "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "type": "reaction"
+  },
+  "removal": {
+    "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "type": "removal"
+  },
+  "unmapped": {
+    "type": "unmapped"
+  }
+}

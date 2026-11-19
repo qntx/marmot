@@ -1,4 +1,7 @@
 {
+  "disband_requested": {
+    "type": "disband_requested"
+  },
   "leave_requested": {
     "type": "leave_requested"
   },
