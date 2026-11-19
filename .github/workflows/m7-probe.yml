@@ -36,8 +36,9 @@ jobs:
           if [ "$FLAGS" = cleared ]; then export LIBSQLITE3_FLAGS=""; fi
           ulimit -l
           cargo test -p mk-core --all-features --no-run
-          cargo test -p mk-core --all-features >suite.out 2>suite.err
-          echo "exit $?"
+          status=0
+          cargo test -p mk-core --all-features >suite.out 2>suite.err || status=$?
+          echo "exit $status"
           echo "stdout bytes $(wc -c <suite.out) stderr bytes $(wc -c <suite.err) mlock-warn lines $(grep -c 'sqlcipher_mlock' suite.err)" | tee -a "$GITHUB_STEP_SUMMARY"
           grep -E '^test result|FAILED|panicked' suite.out | head -40
           gzip -9 suite.err
