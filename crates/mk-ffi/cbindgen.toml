@@ -1,0 +1,40 @@
+# cbindgen configuration for include/marmot_ffi.h.
+#
+# Regenerate the committed header:
+#   cbindgen --config crates/mk-ffi/cbindgen.toml --crate mk-ffi \
+#       --output crates/mk-ffi/include/marmot_ffi.h crates/mk-ffi
+# `cargo test -p mk-ffi --test header` regenerates it with the cbindgen
+# library and asserts byte equality, so the suite is the freshness check.
+
+language        = "C"
+pragma_once     = true
+cpp_compat      = true
+usize_is_size_t = true
+
+header = """
+/**
+ * marmot_ffi — C ABI over the mk-bridge byte protocol.
+ *
+ * Ownership and threading contract:
+ * - `mk_bridge_new` copies the vtable and spawns one dedicated engine
+ *   thread per handle. `open`/`call`/`drain` may run on any thread;
+ *   jobs serialize FIFO, so every commit a call produces is delivered
+ *   through the vtable before that call returns.
+ * - Host callbacks run synchronously on the engine thread and must not
+ *   reenter the API for the same handle.
+ * - Every response `MkBytes` is Rust-owned; release it exactly once
+ *   with `mk_bytes_free`. `out` may be NULL — the call still runs and
+ *   nothing is written.
+ * - `mk_bridge_close` blocks until the engine thread ran the bridge's
+ *   close and exited; `mk_bridge_free` never blocks — without a close
+ *   it enqueues shutdown and detaches the thread, which still runs
+ *   `release` exactly once. `free` runs at most once per handle; calls
+ *   already in flight finish on the detached engine's state.
+ * - A panicking job poisons only its handle: later calls answer an
+ *   encoded `poisoned` envelope and `release` still runs once.
+ */"""
+
+# `mk_bridge_test_panic` exists only under the test-only `test-panic`
+# feature; it is never part of the shipped surface.
+[export]
+exclude = ["mk_bridge_test_panic"]

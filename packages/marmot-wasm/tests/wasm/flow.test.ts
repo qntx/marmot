@@ -25,7 +25,7 @@ describe("panic (node)", () => {
       expect(body).toThrow(/unreachable|panic|trap/i);
     });
     await steps.step1();
-    steps.step2();
+    await steps.step2();
     steps.step3();
   });
 });

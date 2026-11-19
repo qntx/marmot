@@ -9,8 +9,8 @@ use cgka_traits::storage::{
     ConvergencePassStorage, ConvergencePolicyStorage, DeferredPeelGenerationStorage,
     DeviceGroupWelcomeStorage, DisbandCandidateStorage, DisbandRequestStorage,
     DisbandTombstoneStorage, GroupStorage, KeyPackageBundleStorage, LeaveRequestStorage,
-    MaintenanceStorage, MemberValidationCacheStorage, MessageStorage, OutboundFanoutStorage,
-    OutboundIntentStorage, StorageProvider, WelcomeStorage,
+    MaintenanceStorage, MemberValidationCacheStorage, MessageStorage, OpenMlsContentFilter,
+    OutboundFanoutStorage, OutboundIntentStorage, StorageProvider, WelcomeStorage,
 };
 use cgka_traits::{EpochId, GroupId, MemberId, MessageId};
 use libfuzzer_sys::fuzz_target;
@@ -71,6 +71,33 @@ fuzz_target!(|data: &[u8]| {
         &[MessageState::Sent, MessageState::Retryable],
         epoch,
     );
+    let _ = provider.list_openmls_messages_in_states(
+        &group_id,
+        &[MessageState::Processed],
+        epoch,
+        OpenMlsContentFilter::WithoutProcessedApplications,
+    );
+    let _ = provider.list_openmls_messages_in_states(
+        &group_id,
+        &[MessageState::Processed, MessageState::Sent],
+        epoch,
+        OpenMlsContentFilter::CommitsAndProposalsBetween {
+            from: epoch,
+            through: epoch,
+        },
+    );
+    let mut visited = false;
+    let _ = provider.visit_messages_in_states(
+        &group_id,
+        &[MessageState::Processed],
+        epoch,
+        &mut |_| {
+            let keep_going = !visited;
+            visited = true;
+            keep_going
+        },
+    );
+    let _ = provider.list_deferred_message_metadata(&group_id);
     let _ = provider.list_pending_application_events();
     let _ = provider.pending_application_authority_batch(Some(&message_id), 8);
     let _ = provider.has_ingress_dedup_marker(&message_id);

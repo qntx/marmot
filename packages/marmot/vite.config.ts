@@ -36,7 +36,8 @@ const config: UserConfig = defineConfig({
     },
   },
   test: {
-    include: ["tests/**/*.test.ts"],
+    // tests/bun runs under `bun test` (bun-only modules like bun:sqlite), not vp test.
+    include: ["tests/*.test.ts"],
   },
 });
 

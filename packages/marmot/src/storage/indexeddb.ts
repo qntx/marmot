@@ -6,6 +6,7 @@
 
 import { decodeKvBatch } from "../backend/kv.ts";
 import type { Rows } from "../backend/kv.ts";
+import { CommitChain } from "./commit-chain.ts";
 import { StorageError } from "./driver.ts";
 import type { Cipher, KvDriver, LockPort } from "./driver.ts";
 
@@ -135,9 +136,7 @@ class IndexedDbKv implements KvDriver {
   private readonly db: IdbDatabaseLike;
   private readonly cipher: Cipher;
   private readonly release: () => void;
-  private chain: Promise<void> = Promise.resolve();
-  private poisoned = false;
-  private closed = false;
+  private readonly chain = new CommitChain();
 
   constructor(db: IdbDatabaseLike, cipher: Cipher, release: () => void) {
     this.db = db;
@@ -146,7 +145,9 @@ class IndexedDbKv implements KvDriver {
   }
 
   async load(): Promise<Rows> {
-    this.requireOpen();
+    if (this.chain.isClosed) {
+      throw new StorageError("closed");
+    }
     const txn = this.db.transaction(STORE, "readonly");
     const store = txn.objectStore(STORE);
     const [keys, sealed] = await Promise.all([
@@ -182,33 +183,7 @@ class IndexedDbKv implements KvDriver {
   }
 
   async commit(batch: Uint8Array): Promise<void> {
-    if (this.closed) {
-      throw new StorageError("closed");
-    }
-    const prior = this.chain;
-    const run = (async () => {
-      await prior;
-      // Queued before close(): `close` waits on `chain`, so the batch still applies —
-      // unless an earlier commit failed. The host contract is terminal: a lost batch
-      // may be a dependency of every later one, so nothing applies after a failure.
-      if (this.poisoned) {
-        throw new StorageError("io");
-      }
-      try {
-        await this.apply(batch);
-      } catch (error) {
-        this.poisoned = true;
-        throw error instanceof StorageError ? error : new StorageError("io");
-      }
-    })();
-    this.chain = (async () => {
-      try {
-        await run;
-      } catch {
-        // The rejection is delivered to the caller; the chain moves on.
-      }
-    })();
-    return run;
+    return this.chain.commit(batch, async (bytes) => this.apply(bytes));
   }
 
   /**
@@ -236,18 +211,11 @@ class IndexedDbKv implements KvDriver {
   }
 
   async close(): Promise<void> {
-    if (this.closed) {
+    if (this.chain.isClosed) {
       return;
     }
-    this.closed = true;
-    await this.chain;
+    await this.chain.close();
     this.db.close();
     this.release();
-  }
-
-  private requireOpen(): void {
-    if (this.closed) {
-      throw new StorageError("closed");
-    }
   }
 }

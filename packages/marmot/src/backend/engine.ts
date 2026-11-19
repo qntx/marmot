@@ -103,6 +103,7 @@ export class Engine {
   private queue: Promise<void> = Promise.resolve();
   private readonly pendingCommits = new Set<Promise<void>>();
   private deferredAcks: bigint[] | undefined = undefined;
+  private lastCommitSeq = 0n;
 
   private constructor(options: EngineOptions) {
     this.backend = options.backend;
@@ -121,35 +122,47 @@ export class Engine {
 
   private async start(): Promise<void> {
     const rows = await this.kv.load();
-    const payload = encodeRows(rows);
+    let payload: Uint8Array | undefined = encodeRows(rows);
     const host: BridgeHost = {
-      load: () => payload,
+      load: () => {
+        const snapshot = payload;
+        payload = undefined;
+        if (snapshot === undefined) {
+          throw new BridgeError({ kind: "internal", site: "host_load" });
+        }
+        return snapshot;
+      },
       commit: (batch) => {
         this.onCommit(batch);
       },
     };
-    const handle = this.backend.create(host);
-    const response = decodeOpenResponse(
-      handle.open(
-        encodeConfig({
-          protocolVersion: PROTOCOL_VERSION,
-          account: this.signer.pubkey,
-          now: this.clock.now(),
-          allowLoopback: this.options.allowLoopback ?? false,
-          clientName: this.options.clientName,
-        }),
-      ),
-    );
-    if (response.type === "error") {
-      handle.close();
-      throw new BridgeError(response.error);
-    }
-    this.handle = handle;
-    // The bridge rejects `ack_durable` while `awaiting_proof`, but `open` already emitted
-    // durable batches: defer their acks and flush them once `submit_proof` makes it ready.
+    // Acks defer until the session is ready: the bridge rejects `ack_durable` while
+    // `awaiting_proof`, and with an async `open` an open-time commit's `kv.commit` can resolve
+    // before the open promise does — before the handle is even installed. The buffer therefore
+    // goes in before `create`, not after `open`.
     const deferred: bigint[] = [];
     this.deferredAcks = deferred;
+    let handle: BridgeHandle | undefined;
     try {
+      handle = this.backend.create(host);
+      const response = decodeOpenResponse(
+        await handle.open(
+          encodeConfig({
+            protocolVersion: PROTOCOL_VERSION,
+            account: this.signer.pubkey,
+            now: this.clock.now(),
+            allowLoopback: this.options.allowLoopback ?? false,
+            clientName: this.options.clientName,
+          }),
+        ),
+      );
+      if (response.type === "error") {
+        throw new BridgeError(response.error);
+      }
+      this.handle = handle;
+      if (this.failed !== undefined) {
+        throw this.failed;
+      }
       if (response.type === "needs_account_proof") {
         const signed = await this.signer.signEvent(response.unsigned);
         const result = await this.runOp({ type: "submit_proof", event: signed });
@@ -159,12 +172,18 @@ export class Engine {
       }
       this.deferredAcks = undefined;
       for (const seq of deferred) {
-        this.ack(seq);
+        const tracked = this.ack(seq);
+        this.pendingCommits.add(tracked);
+        void this.prune(tracked);
       }
     } catch (error) {
       if (this.handle === handle) {
         this.handle = undefined;
-        handle.close();
+      }
+      try {
+        await handle?.close();
+      } catch {
+        // The startup error takes precedence over a close failure.
       }
       throw error;
     } finally {
@@ -179,7 +198,15 @@ export class Engine {
     this.failed = new BridgeError({ kind: "host_failed" });
     const { handle } = this;
     this.handle = undefined;
-    handle?.close();
+    if (handle !== undefined) {
+      void (async () => {
+        try {
+          await handle.close();
+        } catch {
+          // The failure that marked the engine takes precedence over a close error.
+        }
+      })();
+    }
   }
 
   private onCommit(batch: Uint8Array): void {
@@ -190,10 +217,17 @@ export class Engine {
       this.markFailed();
       return;
     }
+    // Commits arrive strictly in `seq` order — a kv driver applies them in call order, so a
+    // reordered batch would corrupt the durable state rather than just arrive late.
+    if (seq <= this.lastCommitSeq) {
+      this.markFailed();
+      return;
+    }
+    this.lastCommitSeq = seq;
     const tracked = (async () => {
       try {
         await this.kv.commit(batch);
-        this.ack(seq);
+        await this.ack(seq);
       } catch {
         this.markFailed();
       }
@@ -210,9 +244,10 @@ export class Engine {
 
   /**
    * Send `ack_durable` outside the op queue: the bridge accepts it while an unrelated op is
-   * suspended on the signer. A non-`done` answer or a decode failure moves the engine to failed.
+   * suspended on the signer or still in flight. A non-`done` answer, a decode failure, or a
+   * rejection moves the engine to failed.
    */
-  private ack(seq: bigint): void {
+  private async ack(seq: bigint): Promise<void> {
     if (this.failed !== undefined) {
       return;
     }
@@ -226,7 +261,7 @@ export class Engine {
     }
     try {
       const response = decodeResponse(
-        handle.call(encodeCall(this.clock.now(), { type: "ack_durable", seq })),
+        await handle.call(encodeCall(this.clock.now(), { type: "ack_durable", seq })),
       );
       if (response.type !== "ok" || response.result.type !== "done") {
         this.markFailed();
@@ -266,7 +301,7 @@ export class Engine {
     if (handle === undefined) {
       throw this.failed ?? CLOSED;
     }
-    let response = decodeResponse(handle.call(encodeCall(this.clock.now(), request)));
+    let response = decodeResponse(await handle.call(encodeCall(this.clock.now(), request)));
     while (response.type === "signer_pending") {
       const replies: SignerReply[] = [];
       for (const pending of response.requests) {
@@ -278,7 +313,8 @@ export class Engine {
         }
       }
       response = decodeResponse(
-        handle.call(encodeCall(this.clock.now(), { type: "signer_reply", replies })),
+        // oxlint-disable-next-line no-await-in-loop
+        await handle.call(encodeCall(this.clock.now(), { type: "signer_reply", replies })),
       );
     }
     if (response.type === "error") {
@@ -487,12 +523,12 @@ export class Engine {
 
   /** Drain queued session events. */
   async drain(): Promise<SessionEvent[]> {
-    return this.serialized(() => {
+    return this.serialized(async () => {
       const { handle } = this;
       if (handle === undefined) {
         throw CLOSED;
       }
-      const response = decodeDrain(handle.drain());
+      const response = decodeDrain(await handle.drain());
       if (response.type === "error") {
         throw new BridgeError(response.error);
       }
@@ -543,7 +579,7 @@ export class Engine {
       await Promise.all(this.pendingCommits);
       const { handle } = this;
       this.handle = undefined;
-      handle?.close();
+      await handle?.close();
     })();
     this.queue = (async () => {
       try {

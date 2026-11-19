@@ -1,0 +1,14 @@
+{
+  // Pack dts generation resolves @qntx/marmot through node_modules to the built
+  // sibling (build runs @qntx/marmot#build first). Inheriting the dev `paths`
+  // mapping into ../marmot/src would make tsgo emit stray .d.ts files next to
+  // the sibling's sources. The react-native stub stays: the nitro types import
+  // HostComponent/ViewProps and react-native is not installed here.
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "paths": {
+      "react-native": ["./types/react-native.d.ts"]
+    }
+  },
+  "include": ["src"]
+}

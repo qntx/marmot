@@ -1,0 +1,88 @@
+{
+  "name": "@qntx/marmot-native",
+  "version": "0.0.0",
+  "description": "Native mk-ffi (Nitro) bridge backend for @qntx/marmot on React Native",
+  "keywords": [
+    "marmot",
+    "mls",
+    "nitro",
+    "nostr",
+    "react-native",
+    "sdk"
+  ],
+  "homepage": "https://github.com/qntx/marmot#readme",
+  "bugs": {
+    "url": "https://github.com/qntx/marmot/issues"
+  },
+  "license": "MIT OR Apache-2.0",
+  "author": "QuantX <x@qntx.org>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/qntx/marmot.git",
+    "directory": "packages/marmot-native"
+  },
+  "files": [
+    "dist",
+    "cpp",
+    "include",
+    "android/build.gradle",
+    "android/CMakeLists.txt",
+    "android/gradle.properties",
+    "android/src",
+    "ios/MarmotFfi.xcframework",
+    "nitrogen/generated",
+    "nitro.json",
+    "react-native.config.js",
+    "MarmotNative.podspec",
+    "LICENSE-MIT",
+    "LICENSE-APACHE"
+  ],
+  "type": "module",
+  "sideEffects": false,
+  "types": "./dist/index.d.mts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.mts",
+      "import": "./dist/index.mjs",
+      "default": "./dist/index.mjs"
+    },
+    "./package.json": "./package.json"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "vp run @qntx/marmot#build && vp pack",
+    "dev": "vp pack --watch",
+    "test": "vp test",
+    "codegen": "nitrogen",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.src.json",
+    "check:pkg": "vp run @qntx/marmot#build && vp pack && publint && attw --pack . --profile esm-only"
+  },
+  "devDependencies": {
+    "@arethetypeswrong/cli": "0.18.5",
+    "@qntx/marmot": "0.0.0",
+    "@qntx/tsconfig": "1.0.1",
+    "@types/node": "26.6.5",
+    "nitrogen": "0.37.1",
+    "publint": "0.3.25",
+    "react-native-nitro-modules": "0.37.1",
+    "typescript": "7.0.2",
+    "vite-plus": "1.4.0"
+  },
+  "peerDependencies": {
+    "@qntx/marmot": "^0.0.0",
+    "react-native": "*",
+    "react-native-nitro-modules": "^0.37.1"
+  },
+  "devEngines": {
+    "packageManager": {
+      "name": "bun",
+      "version": "1.4.0",
+      "onFail": "ignore"
+    }
+  },
+  "engines": {
+    "node": ">=20.19.0"
+  }
+}

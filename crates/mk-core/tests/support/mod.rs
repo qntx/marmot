@@ -218,11 +218,13 @@ pub async fn open_member() -> Member {
 
 /// Reopen the member from its durable rows (a restart).
 pub async fn reopen_member(member: &Member) -> Member {
+    let rows = member.host.durable_rows();
+    mk_core::testing::check_message_index(&rows).expect("message index consistent before reopen");
     let opened = Session::open(session_config(
         Arc::clone(&member.signer),
         Arc::clone(&member.clock),
         Arc::clone(&member.host),
-        member.host.durable_rows(),
+        rows,
     ))
     .expect("reopen");
     let session = match opened {

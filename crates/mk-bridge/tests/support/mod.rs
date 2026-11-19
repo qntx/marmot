@@ -36,7 +36,7 @@
     reason = "test code"
 )]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use mk_bridge::protocol::*;
@@ -114,6 +114,21 @@ pub struct HostState {
     /// The encoded rows the most recent `load` served — this
     /// incarnation's durable baseline.
     pub last_served: Vec<u8>,
+    /// `Put` keys made durable since the last `take_durable_delta` drain
+    /// (plus served keys after each `load`), for the incremental
+    /// durability index.
+    pub durable_delta: Vec<Vec<u8>>,
+}
+
+/// The durable-row view a host must expose for the publish loop's
+/// durability invariant: the row keys a crash could not lose.
+pub trait DurableKeys {
+    /// Every `Put` key durable at `watermark`.
+    fn durable_keys(&self, watermark: u64) -> Vec<Vec<u8>>;
+    /// `Put` keys made durable since the previous drain, plus the rows the
+    /// most recent `load` served. Lets the indexed publish loop extend its
+    /// id set without re-reading every durable key each round.
+    fn take_durable_delta(&self) -> Vec<Vec<u8>>;
 }
 
 /// An in-memory host: records batches in commit order and rebuilds the
@@ -149,26 +164,31 @@ impl MemHost {
     pub fn truncate(&self, n: usize) {
         self.state.lock().unwrap().history.truncate(n);
     }
+}
 
-    /// Durable row values behind the invariant check: every `Put` value
-    /// of committed batches up to `watermark`, plus the row set this
-    /// incarnation loaded at `open`.
-    pub fn durable_values(&self, watermark: u64) -> Vec<Vec<u8>> {
+impl DurableKeys for MemHost {
+    /// Every `Put` key of committed batches up to `watermark`, plus the
+    /// row set this incarnation loaded at `open`.
+    fn durable_keys(&self, watermark: u64) -> Vec<Vec<u8>> {
         let state = self.state.lock().unwrap();
-        let mut values: Vec<Vec<u8>> = state
+        let mut keys: Vec<Vec<u8>> = state
             .history
             .iter()
             .filter(|batch| batch.seq.get() <= watermark)
             .flat_map(|batch| batch.ops.iter())
             .filter_map(|op| match op {
-                KvOp::Put { value, .. } => Some(value.clone()),
+                KvOp::Put { key, .. } => Some(key.clone()),
                 KvOp::Delete { .. } => None,
             })
             .collect();
         if let Ok(rows) = mk_bridge::decode_rows(&state.last_served) {
-            values.extend(rows.into_iter().map(|(_, value)| value));
+            keys.extend(rows.into_iter().map(|(key, _)| key));
         }
-        values
+        keys
+    }
+
+    fn take_durable_delta(&self) -> Vec<Vec<u8>> {
+        std::mem::take(&mut self.state.lock().unwrap().durable_delta)
     }
 }
 
@@ -185,6 +205,9 @@ impl Host for MemHost {
         let rows: Vec<Row> = rows.into_iter().collect();
         let encoded = encode_rows(&rows);
         state.last_served.clone_from(&encoded);
+        state
+            .durable_delta
+            .extend(rows.iter().map(|(key, _)| key.clone()));
         Ok(encoded)
     }
 
@@ -197,7 +220,81 @@ impl Host for MemHost {
             return Err(HostError::new());
         }
         let batch = KvBatch::decode(batch).map_err(|_| HostError::new())?;
+        state
+            .durable_delta
+            .extend(batch.ops.iter().filter_map(|op| match op {
+                KvOp::Put { key, .. } => Some(key.clone()),
+                KvOp::Delete { .. } => None,
+            }));
         state.history.push(batch);
+        Ok(())
+    }
+}
+
+/// An in-memory host that keeps only the compacted current row set — no
+/// batch history — so process memory reflects the durable store, not the
+/// driver's journal.
+#[derive(Clone, Default)]
+pub struct CompactHost {
+    rows: Arc<Mutex<BTreeMap<Vec<u8>, Vec<u8>>>>,
+    /// `Put` keys since the last `take_durable_delta` drain, plus the
+    /// served keys of each `load`.
+    delta: Arc<Mutex<Vec<Vec<u8>>>>,
+}
+
+impl CompactHost {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// A snapshot of the current row set.
+    pub fn rows(&self) -> Vec<Row> {
+        self.rows
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect()
+    }
+}
+
+impl DurableKeys for CompactHost {
+    /// Every row is committed by construction; the watermark is advisory.
+    fn durable_keys(&self, _watermark: u64) -> Vec<Vec<u8>> {
+        self.rows.lock().unwrap().keys().cloned().collect()
+    }
+
+    fn take_durable_delta(&self) -> Vec<Vec<u8>> {
+        std::mem::take(&mut self.delta.lock().unwrap())
+    }
+}
+
+impl Host for CompactHost {
+    fn load(&mut self) -> Result<Vec<u8>, HostError> {
+        let rows: Vec<Row> = self
+            .rows
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect();
+        self.delta
+            .lock()
+            .unwrap()
+            .extend(rows.iter().map(|(key, _)| key.clone()));
+        Ok(encode_rows(&rows))
+    }
+
+    fn commit(&mut self, batch: &[u8]) -> Result<(), HostError> {
+        let batch = KvBatch::decode(batch).map_err(|_| HostError::new())?;
+        self.delta
+            .lock()
+            .unwrap()
+            .extend(batch.ops.iter().filter_map(|op| match op {
+                KvOp::Put { key, .. } => Some(key.clone()),
+                KvOp::Delete { .. } => None,
+            }));
+        apply(&mut self.rows.lock().unwrap(), &batch);
         Ok(())
     }
 }
@@ -282,16 +379,15 @@ pub fn group_events(relay: &FakeRelay, route_hex: &str) -> Vec<Event> {
 }
 
 /// The durability invariant: a published event's id must already sit
-/// inside a durable value — a committed batch at or below the acked
+/// inside a durable row key — a committed batch at or below the acked
 /// watermark, or the rows this incarnation loaded at open (a batch
 /// committed before a restart is durable even though its in-session ack
-/// died). Row values are host-defined bytes — the fanout codec stores
-/// the id raw, JSON rows store it hex — so accept either encoding.
+/// died). Keys are host-defined bytes carrying the id raw (the
+/// `SessionOutbox` key segment is the event id), so a raw window match
+/// suffices; the hex form is accepted too.
 pub fn assert_durable(durable: &[Vec<u8>], item: &Outbound) {
     assert!(
-        durable
-            .iter()
-            .any(|value| contains_id(value, &item.event.id)),
+        durable.iter().any(|key| contains_id(key, &item.event.id)),
         "published event escaped its gating batch: {}",
         hex::encode(item.event.id)
     );
@@ -303,6 +399,49 @@ pub fn contains_id(buf: &[u8], id: &[u8; 32]) -> bool {
     buf.windows(event_hex.len())
         .any(|w| w == event_hex.as_bytes())
         || buf.windows(32).any(|w| w == id)
+}
+
+/// Add `key`'s 32- and 64-byte segments (the shapes an id takes inside a
+/// `keys.rs`-framed row key) to `ids`. Keys that do not parse as framed
+/// are skipped: a later full scan still decides the verdict, so skipping
+/// can only cost time, never a false pass.
+fn index_durable_key(ids: &mut HashSet<Vec<u8>>, key: &[u8]) {
+    let Some((_, framed)) = key.split_first() else {
+        return;
+    };
+    let mut rest = framed;
+    while !rest.is_empty() {
+        if rest.len() < 4 {
+            return;
+        }
+        let len = u32::from_be_bytes(rest[..4].try_into().expect("len")) as usize;
+        if rest.len() < 4 + len {
+            return;
+        }
+        let segment = &rest[4..4 + len];
+        if segment.len() == 32 || segment.len() == 64 {
+            ids.insert(segment.to_vec());
+        }
+        rest = &rest[4 + len..];
+    }
+}
+
+/// `assert_durable` with a segment index fast path: when the event id sits
+/// in a durable key's segment (the common case — the outbox key carries it
+/// as a segment) the check is O(1). A miss falls back to the full
+/// `durable_keys` scan, which asserts exactly as before, so the invariant
+/// and its failure message are unchanged.
+fn assert_durable_indexed<H: Host + DurableKeys>(
+    ids: &HashSet<Vec<u8>>,
+    host: &H,
+    watermark: u64,
+    item: &Outbound,
+) {
+    if ids.contains(item.event.id.as_slice()) || ids.contains(hex::encode(item.event.id).as_bytes())
+    {
+        return;
+    }
+    assert_durable(&host.durable_keys(watermark), item);
 }
 
 /// The newest kind-30443 `KeyPackage` event authored by `account_hex`.
@@ -320,9 +459,9 @@ pub fn hex_to_32(text: &str) -> [u8; 32] {
 }
 
 /// One account-device bridge under test.
-pub struct Member {
-    pub bridge: Bridge<MemHost>,
-    pub host: MemHost,
+pub struct Member<H: Host = MemHost> {
+    pub bridge: Bridge<H>,
+    pub host: H,
     pub signer: LocalSigner,
     pub unix_ms: u64,
     pub mono_ms: u64,
@@ -331,12 +470,29 @@ pub struct Member {
     /// reports only still-gated seqs, so a round with nothing new pending
     /// returns `None` even though earlier rounds acked higher.
     pub acked: u64,
+    /// When set, `publish`/`try_publish` check the durability invariant
+    /// against `durable_ids` — an incremental index of id-bearing key
+    /// segments — instead of scanning every durable key per item. Same
+    /// verdict, O(new durable keys) per publish round: bench and
+    /// regression loops set this so the untimed publish half stays cheap.
+    pub indexed_publish: bool,
+    /// 32- and 64-byte segments of every durable key seen so far.
+    durable_ids: HashSet<Vec<u8>>,
 }
 
-impl Member {
+impl Member<MemHost> {
     /// A fresh bridge over empty storage.
     pub fn new() -> Self {
-        let host = MemHost::new();
+        Self::with_host(MemHost::new())
+    }
+}
+
+impl<H> Member<H>
+where
+    H: Host + DurableKeys + Clone,
+{
+    /// A fresh bridge over `host`.
+    pub fn with_host(host: H) -> Self {
         Self {
             bridge: Bridge::new(host.clone()),
             host,
@@ -344,6 +500,8 @@ impl Member {
             unix_ms: 1_700_000_000_000,
             mono_ms: 1_000,
             acked: 0,
+            indexed_publish: false,
+            durable_ids: HashSet::new(),
         }
     }
 
@@ -567,9 +725,21 @@ impl Member {
             if items.is_empty() {
                 break;
             }
-            let durable = self.host.durable_values(self.acked);
+            let durable = if self.indexed_publish {
+                for key in self.host.take_durable_delta() {
+                    index_durable_key(&mut self.durable_ids, &key);
+                }
+                None
+            } else {
+                Some(self.host.durable_keys(self.acked))
+            };
             for item in items {
-                assert_durable(&durable, &item);
+                match &durable {
+                    Some(durable) => assert_durable(durable, &item),
+                    None => {
+                        assert_durable_indexed(&self.durable_ids, &self.host, self.acked, &item);
+                    }
+                }
                 let results = relay.publish(&item, self.acked);
                 let id = item.id;
                 let response = self

@@ -19,7 +19,8 @@
     "test": "vp run -r test && vp test",
     "check:pins": "bun scripts/check-pins.ts",
     "release": "bumpp",
-    "prepare": "vp config"
+    "prepare": "vp config",
+    "build:native": "bun scripts/build-native.ts"
   },
   "devDependencies": {
     "@qntx/oxfmt": "1.1.1",

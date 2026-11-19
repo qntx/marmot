@@ -43,9 +43,12 @@ const BLOB_V1: u8 = 1;
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct GroupStateImage {
     /// The serialized `cgka_groups` row bytes.
+    #[serde(with = "crate::ser::blob")]
     pub(crate) group: Vec<u8>,
+    #[serde(with = "crate::ser::opt_blob")]
     pub(crate) validated_tree_marker: Option<Vec<u8>>,
     /// `(row_key, value)` pairs, sorted by row key.
+    #[serde(with = "crate::ser::blob_pairs")]
     pub(crate) openmls: Vec<(Vec<u8>, Vec<u8>)>,
 }
 
@@ -54,10 +57,13 @@ struct SnapshotBlob {
     /// `true` — a full snapshot that captured ledger and queue.
     full: bool,
     state: GroupStateImage,
+    #[serde(with = "crate::ser::opt_blob")]
     convergence_policy: Option<Vec<u8>>,
     /// `(insert_order, serialized MessageRecord)` in order; full only.
+    #[serde(with = "crate::ser::opt_u64_pairs")]
     messages: Option<Vec<(u64, Vec<u8>)>>,
     /// `(insert_order, serialized QueuedOutboundIntent)` in order; full only.
+    #[serde(with = "crate::ser::opt_u64_pairs")]
     queued_outbound: Option<Vec<(u64, Vec<u8>)>>,
 }
 
@@ -102,11 +108,16 @@ fn capture(
     let state = capture_state(provider, group_id)?;
     let convergence_policy = provider.convergence_policy(group_id)?;
     let (messages, queued_outbound) = if full {
+        // `Message[gid]` keys are `(gid, seq8, mid)` so the prefix scan is
+        // already in insertion order; raw row bytes are copied as-is.
         let messages = provider
-            .ordered_messages(group_id)?
+            .scan_rows(Table::Message, &[gid_seg(group_id)])?
             .into_iter()
-            .map(|(seq, record)| Ok((seq, ser::ser(&record)?)))
-            .collect::<StorageResult<Vec<_>>>()?;
+            .map(|(row_key, value)| {
+                let seq = row_key_seq(&row_key)?;
+                Ok((seq, value))
+            })
+            .collect::<StorageResult<Vec<(u64, Vec<u8>)>>>()?;
         let queued = provider
             .scan_rows(Table::QueuedIntent, &[])?
             .iter()
@@ -280,6 +291,16 @@ pub(crate) fn rollback_group_state(
     })
 }
 
+/// The `seq8` segment of a `Table::Message` row key, decoded.
+fn row_key_seq(row_key: &[u8]) -> StorageResult<u64> {
+    let seq = keys::segments(row_key)
+        .and_then(|segments| segments.get(1).copied())
+        .ok_or_else(|| StorageError::Backend("kv row key malformed".into()))?;
+    Ok(u64::from_be_bytes(seq.try_into().map_err(|_| {
+        StorageError::Backend("kv row key malformed".into())
+    })?))
+}
+
 /// `restore.rs:messages` — replace the ledger at captured positions, then
 /// drop pending application events whose source message the rollback
 /// discarded.
@@ -300,21 +321,11 @@ fn restore_messages(
         if segments.first().copied() == Some(gid_seg(group_id)) {
             continue;
         }
-        let seq = u64::from_be_bytes(
-            segments
-                .get(1)
-                .copied()
-                .ok_or_else(|| StorageError::Backend("kv row key malformed".into()))?
-                .try_into()
-                .map_err(|_| StorageError::Backend("kv row key malformed".into()))?,
-        );
-        survivor_orders.insert(seq);
+        survivor_orders.insert(row_key_seq(&row_key)?);
     }
-    for (_, record) in provider.ordered_messages(group_id)? {
-        provider.delete_message_row(&record)?;
-    }
+    provider.delete_group_message_rows(group_id)?;
     for (seq, bytes) in messages {
-        let record: cgka_traits::message::MessageRecord = ser::de(bytes)?;
+        let record: cgka_traits::message::MessageRecord = ser::de_message(bytes)?;
         if provider.message_row_key(&record.id)?.is_some() || survivor_orders.contains(seq) {
             return Err(StorageError::Backend(
                 "kv snapshot restore message conflict".into(),

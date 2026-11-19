@@ -67,7 +67,7 @@
   "scripts": {
     "build": "vp pack",
     "dev": "vp pack --watch",
-    "test": "vp test",
+    "test": "vp test && bun test tests/bun",
     "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.src.json",
     "check:pkg": "vp pack && publint && attw --pack . --profile esm-only",
     "pack:local": "vp pack && bun pm pack"
