@@ -1,5 +1,5 @@
 /**
- * TypeScript mirror of the mk-bridge JSON wire protocol (`PROTOCOL_VERSION` 1). Decoded
+ * TypeScript mirror of the mk-bridge JSON wire protocol (`PROTOCOL_VERSION` 2). Decoded
  * representation: `u64` fields arrive as decimal strings and decode to `bigint`; identifiers (event
  * ids, pubkeys, group ids, nostr group ids, signatures, outbound ids, hashes, nonces) decode to
  * validated lowercase hex `string`s; payload blobs (`key_package`, component `data`, attachment
@@ -17,7 +17,7 @@ import type { InputCategory } from "../core/errors.ts";
 export type Complete<T extends never> = T;
 
 /** Wire protocol version. Bumped on any breaking schema change. */
-export const PROTOCOL_VERSION = 1;
+export const PROTOCOL_VERSION = 2;
 
 /** One reading of the injected clock (decimal strings on the wire). */
 export type ClockReading = {
@@ -187,9 +187,15 @@ export type _SendOutcomeComplete = Complete<
 >;
 
 /** Per-relay publish status the host reports. */
-export type RelayStatus = "accepted" | "rejected" | "unavailable" | "unknown";
+export type RelayStatus = "accepted" | "rejected" | "unavailable" | "not_sent" | "unknown";
 
-export const RELAY_STATUSES = ["accepted", "rejected", "unavailable", "unknown"] as const;
+export const RELAY_STATUSES = [
+  "accepted",
+  "rejected",
+  "unavailable",
+  "not_sent",
+  "unknown",
+] as const;
 
 export type _RelayStatusComplete = Complete<Exclude<RelayStatus, (typeof RELAY_STATUSES)[number]>>;
 
@@ -311,6 +317,26 @@ export type _WireInputCategoryComplete = Complete<
   Exclude<WireInputCategory, (typeof INPUT_CATEGORY_VALUES)[number]>
 >;
 
+/** The availability cause behind an `unavailable` input outcome. */
+export type WireAvailability =
+  | "transport_deferred"
+  | "resource_refused"
+  | "signer_refused"
+  | "signer_failed"
+  | "unmapped";
+
+export const AVAILABILITY_VALUES = [
+  "transport_deferred",
+  "resource_refused",
+  "signer_refused",
+  "signer_failed",
+  "unmapped",
+] as const;
+
+export type _WireAvailabilityComplete = Complete<
+  Exclude<WireAvailability, (typeof AVAILABILITY_VALUES)[number]>
+>;
+
 /** A canonical local ingest condition. */
 export type LocalState = "rejoin_confirmation_required" | "removed" | "quarantined" | "unmapped";
 
@@ -329,7 +355,7 @@ export type InputOutcome =
   | { type: "deferred"; category: WireInputCategory | undefined }
   | { type: "stale"; category: WireInputCategory }
   | { type: "rejected"; category: WireInputCategory }
-  | { type: "unavailable"; category: WireInputCategory }
+  | { type: "unavailable"; category: WireAvailability }
   | { type: "local"; state: LocalState }
   | { type: "recovery_offered" }
   | { type: "unmapped" };
