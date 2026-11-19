@@ -1,11 +1,17 @@
 /**
  * Phase D interop — real White Noise `wn`/`wnd` against `MarmotClient` on the release wasm backend
- * over one in-process websocket relay (`serveFakeRelay`). The expected wn version is `mdk.tag` from
- * `upstream.json` without the leading `v` (currently `wn 0.17.0`). Mirrors
- * `crates/interop/tests/support/mod.rs` (CLI flags, daemon env, JSON pointers) and the scenario
- * flow of `crates/interop/tests/wn.rs`. Every step, timing and PASS/FAIL line is appended to
- * `<repo>/target/interop-m3b.log`; the script exits non-zero on any failure. It needs local wn/wnd
- * binaries, so it is not part of `test:wasm` or CI.
+ * over one in-process websocket relay (`serveFakeRelay`). `WN_BIN`/`WND_BIN` name the binaries
+ * built from the `wn` pin in `upstream.json`; `wn --version` must report that pin's tag without the
+ * leading `v` (currently `wn 0.17.0`). Mirrors `crates/interop/tests/support/mod.rs` (CLI flags,
+ * daemon env, JSON pointers) and the scenario flow of `crates/interop/tests/wn.rs`. Every step,
+ * timing and PASS/FAIL line is appended to `<repo>/target/interop-m3b.log`; the script exits
+ * non-zero on any failure.
+ *
+ * `INTEROP_RELAY` picks the relay shape. `nip11` (default) answers NIP-11 information requests with
+ * a `limitation.max_limit`, as production relays do, in front of the fake relay. `bare` is the fake
+ * relay alone: no NIP-11 document, which makes wnd's post-join history sweep degenerate into
+ * one-second slices and drop a message that arrives meanwhile (S2; see the CI job
+ * `interop-known-upstream`).
  */
 
 import { spawn, spawnSync } from "node:child_process";
@@ -20,6 +26,8 @@ import {
   readFileSync,
   rmSync,
 } from "node:fs";
+import { createServer } from "node:http";
+import { connect } from "node:net";
 import { join, resolve } from "node:path";
 
 import { finalizeEvent, generateSecretKey } from "nostr-tools";
@@ -35,8 +43,26 @@ import { serveFakeRelay } from "@qntx/nostr/testing";
 import { releaseBackend } from "../tests/shared/env.ts";
 import { testSigner } from "../tests/signer.ts";
 
-const WN_BIN = process.env["WN_BIN"] ?? "/Users/xu/Desktop/qntx/marmot/spike/target/wn/bin/wn";
-const WND_BIN = process.env["WND_BIN"] ?? "/Users/xu/Desktop/qntx/marmot/spike/target/wn/bin/wnd";
+function requiredEnv(name: string): string {
+  const value = process.env[name];
+  if (value === undefined || value === "") {
+    throw new Error(`${name} must point at the binary built from the upstream.json wn pin`);
+  }
+  return value;
+}
+
+const WN_BIN = requiredEnv("WN_BIN");
+const WND_BIN = requiredEnv("WND_BIN");
+const RELAY_SHAPE = process.env["INTEROP_RELAY"] ?? "nip11";
+if (RELAY_SHAPE !== "nip11" && RELAY_SHAPE !== "bare") {
+  throw new Error(`INTEROP_RELAY must be nip11 or bare, got ${RELAY_SHAPE}`);
+}
+/** The NIP-11 document a production relay serves (`max_limit` 500 is strfry's default). */
+const RELAY_INFORMATION = {
+  name: "marmot-interop",
+  supported_nips: [1, 11],
+  limitation: { max_limit: 500 },
+};
 const REPO_ROOT = resolve(import.meta.dirname, "../../..");
 const LOG_PATH = join(REPO_ROOT, "target", "interop-m5a.log");
 
@@ -233,26 +259,125 @@ function stamp(): string {
   return `-${Math.floor(Date.now() / 1000)}-${Math.floor(Math.random() * 1e4)}`;
 }
 
+type ServedFakeRelay = Awaited<ReturnType<typeof serveFakeRelay>>;
+
+type InteropRelay = {
+  url: string;
+  relay: ServedFakeRelay["relay"];
+  /** NIP-11 documents served so far (always 0 for `bare`). */
+  documentsServed: () => number;
+  close: () => Promise<void>;
+};
+
+/**
+ * The fake relay behind an HTTP front that answers NIP-11 requests itself and splices every
+ * WebSocket upgrade, byte for byte, onto the fake relay's own port.
+ */
+async function serveNip11Relay(served: ServedFakeRelay): Promise<InteropRelay> {
+  const backend = new URL(served.url);
+  const spliced = new Set<{ destroy: () => void }>();
+  let documents = 0;
+  const front = createServer((request, response) => {
+    if (request.headers.accept?.includes("application/nostr+json") === true) {
+      documents += 1;
+      response.writeHead(200, {
+        "content-type": "application/nostr+json",
+        "access-control-allow-origin": "*",
+      });
+      response.end(JSON.stringify(RELAY_INFORMATION));
+      return;
+    }
+    response.writeHead(404).end();
+  });
+  front.on("upgrade", (request, socket, head) => {
+    const upstream = connect(Number(backend.port), backend.hostname, () => {
+      const lines = [`${request.method ?? "GET"} ${request.url ?? "/"} HTTP/1.1`];
+      const raw = request.rawHeaders;
+      for (let i = 0; i + 1 < raw.length; i += 2) {
+        lines.push(`${raw[i] ?? ""}: ${raw[i + 1] ?? ""}`);
+      }
+      upstream.write(`${lines.join("\r\n")}\r\n\r\n`);
+      upstream.write(head);
+      socket.pipe(upstream).pipe(socket);
+    });
+    spliced.add(socket).add(upstream);
+    socket.on("close", () => {
+      spliced.delete(socket);
+      upstream.destroy();
+    });
+    upstream.on("close", () => {
+      spliced.delete(upstream);
+      socket.destroy();
+    });
+    upstream.on("error", () => {
+      socket.destroy();
+    });
+    socket.on("error", () => {
+      upstream.destroy();
+    });
+  });
+  await new Promise<void>((resolve, reject) => {
+    front.once("error", reject);
+    front.listen(0, "127.0.0.1", () => {
+      resolve();
+    });
+  });
+  const address = front.address();
+  if (address === null || typeof address === "string") {
+    throw new Error("NIP-11 front has no TCP address");
+  }
+  const { port } = address;
+  return {
+    url: `ws://127.0.0.1:${port}`,
+    relay: served.relay,
+    documentsServed: () => documents,
+    close: async () => {
+      for (const stream of spliced) {
+        stream.destroy();
+      }
+      await new Promise<void>((resolve) => {
+        front.close(() => {
+          resolve();
+        });
+      });
+      await served.close();
+    },
+  };
+}
+
+async function serveRelay(): Promise<InteropRelay> {
+  const served = await serveFakeRelay({ host: "127.0.0.1", port: 0 });
+  if (RELAY_SHAPE === "nip11") {
+    return serveNip11Relay(served);
+  }
+  return {
+    url: served.url.replace(/\/$/, ""),
+    relay: served.relay,
+    documentsServed: () => 0,
+    close: served.close,
+  };
+}
+
 async function run(): Promise<void> {
   mkdirSync(join(REPO_ROOT, "target"), { recursive: true });
   log("m5a interop: wn/wnd vs MarmotClient (release wasm, app surface)");
 
-  // The pinned MDK tag (upstream.json `mdk.tag`, minus the leading `v`) is the wn release we
-  // interoperate with — the check fails loudly when the local binary is a different cohort.
+  // The wn pin's tag (upstream.json `wn.tag`, minus the leading `v`) is the release we
+  // interoperate with — the check fails loudly when the binary comes from another build.
   const upstream: unknown = JSON.parse(readFileSync(join(REPO_ROOT, "upstream.json"), "utf8"));
   if (
     typeof upstream !== "object" ||
     upstream === null ||
-    !("mdk" in upstream) ||
-    typeof upstream.mdk !== "object" ||
-    upstream.mdk === null ||
-    !("tag" in upstream.mdk) ||
-    typeof upstream.mdk.tag !== "string" ||
-    !upstream.mdk.tag.startsWith("v")
+    !("wn" in upstream) ||
+    typeof upstream.wn !== "object" ||
+    upstream.wn === null ||
+    !("tag" in upstream.wn) ||
+    typeof upstream.wn.tag !== "string" ||
+    !upstream.wn.tag.startsWith("v")
   ) {
-    throw new Error("upstream.json: mdk.tag must be a v-prefixed release tag");
+    throw new Error("upstream.json: wn.tag must be a v-prefixed release tag");
   }
-  const expectedWn = `wn ${upstream.mdk.tag.slice(1)}`;
+  const expectedWn = `wn ${upstream.wn.tag.slice(1)}`;
   const version = spawnSync(WN_BIN, ["--version"], { encoding: "utf8" });
   const versionText = `${version.stdout ?? ""}${version.stderr ?? ""}`.trim();
   log(`wn --version: ${versionText}`);
@@ -260,9 +385,9 @@ async function run(): Promise<void> {
     throw new Error(`expected "${expectedWn}", got: ${versionText || "(no output)"}`);
   }
 
-  const served = await serveFakeRelay({ host: "127.0.0.1", port: 0 });
-  const url = served.url.replace(/\/$/, "");
-  log(`relay: ${served.url}`);
+  const served = await serveRelay();
+  const { url } = served;
+  log(`relay: ${url} (${RELAY_SHAPE})`);
 
   // wnd rejects a home under world-writable /tmp ("untrusted directory alias"); the repo's
   // target/ is user-owned and keeps the socket path short (macOS ~104-char limit).
@@ -1240,6 +1365,10 @@ async function run(): Promise<void> {
       }, "our snapshot disbanded");
     });
 
+    log(`NIP-11 documents served: ${served.documentsServed()}`);
+    if (RELAY_SHAPE === "nip11" && served.documentsServed() === 0) {
+      failures.push("relay shape: wnd never asked for the NIP-11 document");
+    }
     log(
       `${failures.length === 0 ? "ALL PASS" : `FAILURES: ${failures.join(", ")}`} ` +
         `(${secs(startMs)} total)`,
