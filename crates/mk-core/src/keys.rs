@@ -119,7 +119,9 @@ pub(crate) const META_PENDING_HIGH_WATER: &[u8] = b"pending-ref-high-water";
 
 /// Current store schema version. Bumped when the row format or layout changes;
 /// older or newer stores refuse to open (no migration code by design).
-pub(crate) const SCHEMA_VERSION: u32 = 3;
+/// v4: `Table::Group` rows are mk-core-owned `GroupRow` documents whose byte
+/// fields are base64, not the upstream `Group` decimal-array encoding.
+pub(crate) const SCHEMA_VERSION: u32 = 4;
 
 /// Whether `key` names a row the `OpenMLS` store owns — the write set the
 /// engine's write generation counts (provider.rs `mls_write_generation`).

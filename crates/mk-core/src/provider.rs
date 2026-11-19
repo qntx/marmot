@@ -704,7 +704,9 @@ impl GroupStorage for KvStorageProvider {
     }
 
     fn get_group(&self, id: &GroupId) -> StorageResult<Group> {
-        self.de_row(Table::Group, &[gid_seg(id)])?
+        self.row(Table::Group, &[gid_seg(id)])?
+            .map(|value| ser::de_group(&value))
+            .transpose()?
             .ok_or(StorageError::NotFound)
     }
 
@@ -818,7 +820,7 @@ impl GroupStorage for KvStorageProvider {
     fn list_group_records(&self) -> StorageResult<Vec<Group>> {
         self.scan_rows(Table::Group, &[])?
             .iter()
-            .map(|(_, value)| ser::de(value))
+            .map(|(_, value)| ser::de_group(value))
             .collect()
     }
 
@@ -948,7 +950,7 @@ impl KvStorageProvider {
                 "kv group awaiting fresh welcome".into(),
             ));
         }
-        self.put_ser(Table::Group, &[gid_seg(&group.id)], group)
+        self.put_row(Table::Group, &[gid_seg(&group.id)], ser::ser_group(group)?)
     }
 
     /// `UPDATE cgka_committed_roster_revision SET last = last + 1 RETURNING
