@@ -66,6 +66,7 @@ use cgka_traits::error::EngineError;
 use cgka_traits::group::ProtocolProfile;
 use cgka_traits::storage::{
     AccountDeviceSignerBinding, AccountDeviceSignerStorage, DisbandRequestStatus, MessageStorage,
+    OutboundFanoutStorage,
 };
 use cgka_traits::transport_adapter::{
     FanoutPendingKind, FanoutTargetStatus, OutboundApplicationMessage, OutboundFanout,
@@ -1099,12 +1100,13 @@ impl Session {
             return Ok(resolution);
         }
         let stored = self
-            .engine
-            .outbound_fanouts()
-            .map_err(session_engine_error)?
-            .into_iter()
-            .find(|fanout| {
-                outbound_id_of(fanout.message_id()).is_ok_and(|fanout_id| fanout_id == *id)
+            .provider
+            .outbound_fanout(&MessageId::new(id.0.to_vec()))
+            .map_err(SessionError::Storage)?
+            .filter(|fanout| {
+                fanout
+                    .group_id()
+                    .is_none_or(|group_id| self.engine.check_group_live(group_id).is_ok())
             })
             .ok_or(SessionError::UnknownOutbound)?;
         // Record results on the value that marked the attempts while it
@@ -2593,6 +2595,14 @@ impl Session {
             return Err(SessionError::InvalidRelayUrl);
         }
         Ok(())
+    }
+
+    /// Fanout listings this session's provider has served, across the
+    /// engine's clone — the `report_publish` regression bound.
+    #[cfg(feature = "testing")]
+    #[must_use]
+    pub fn outbound_fanout_list_count(&self) -> usize {
+        self.provider.fanout_list_count()
     }
 }
 

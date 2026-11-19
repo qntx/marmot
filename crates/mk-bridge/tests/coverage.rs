@@ -111,6 +111,11 @@ const TABLE: &[(&str, &str, Mapping)] = &[
     ),
     ("Session", "groups", Request("groups")),
     ("Session", "group", Request("group")),
+    (
+        "Session",
+        "outbound_fanout_list_count",
+        Elsewhere("testing feature"),
+    ),
 ];
 
 /// The public method names declared directly inside `impl <name> { ... }`
