@@ -1,6 +1,7 @@
 /**
- * Phase D interop — real White Noise `wn`/`wnd` 0.16.0 against `MarmotClient` on the release wasm
- * backend over one in-process websocket relay (`serveFakeRelay`). Mirrors
+ * Phase D interop — real White Noise `wn`/`wnd` against `MarmotClient` on the release wasm backend
+ * over one in-process websocket relay (`serveFakeRelay`). The expected wn version is `mdk.tag` from
+ * `upstream.json` without the leading `v` (currently `wn 0.17.0`). Mirrors
  * `crates/interop/tests/support/mod.rs` (CLI flags, daemon env, JSON pointers) and the scenario
  * flow of `crates/interop/tests/wn.rs`. Every step, timing and PASS/FAIL line is appended to
  * `<repo>/target/interop-m3b.log`; the script exits non-zero on any failure. It needs local wn/wnd
@@ -16,6 +17,7 @@ import {
   mkdirSync,
   mkdtempSync,
   openSync,
+  readFileSync,
   rmSync,
 } from "node:fs";
 import { join, resolve } from "node:path";
@@ -231,11 +233,27 @@ async function run(): Promise<void> {
   mkdirSync(join(REPO_ROOT, "target"), { recursive: true });
   log("m3b phase D interop: wn/wnd vs MarmotClient (release wasm)");
 
+  // The pinned MDK tag (upstream.json `mdk.tag`, minus the leading `v`) is the wn release we
+  // interoperate with — the check fails loudly when the local binary is a different cohort.
+  const upstream: unknown = JSON.parse(readFileSync(join(REPO_ROOT, "upstream.json"), "utf8"));
+  if (
+    typeof upstream !== "object" ||
+    upstream === null ||
+    !("mdk" in upstream) ||
+    typeof upstream.mdk !== "object" ||
+    upstream.mdk === null ||
+    !("tag" in upstream.mdk) ||
+    typeof upstream.mdk.tag !== "string" ||
+    !upstream.mdk.tag.startsWith("v")
+  ) {
+    throw new Error("upstream.json: mdk.tag must be a v-prefixed release tag");
+  }
+  const expectedWn = `wn ${upstream.mdk.tag.slice(1)}`;
   const version = spawnSync(WN_BIN, ["--version"], { encoding: "utf8" });
   const versionText = `${version.stdout ?? ""}${version.stderr ?? ""}`.trim();
   log(`wn --version: ${versionText}`);
-  if (!versionText.includes("wn 0.16.0")) {
-    throw new Error(`expected "wn 0.16.0", got: ${versionText || "(no output)"}`);
+  if (!versionText.includes(expectedWn)) {
+    throw new Error(`expected "${expectedWn}", got: ${versionText || "(no output)"}`);
   }
 
   const served = await serveFakeRelay({ host: "127.0.0.1", port: 0 });
