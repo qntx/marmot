@@ -2,9 +2,11 @@
 //! profiler. A and B open, A creates a group inviting B, B joins; then
 //!
 //! - `HEAP_SIDE=receive` (default): A sends `HEAP_MESSAGES` messages
-//!   unprofiled; B ingests them in calls of `HEAP_CHUNK` events and drains
-//!   once at the end (the `scaling` bench's ingest shape);
-//! - `HEAP_SIDE=send`: A sends and publishes `HEAP_MESSAGES` messages.
+//!   unprofiled; B ingests them in calls of `HEAP_CHUNK` events, acking
+//!   durability after each call as a host does, and drains once at the end
+//!   (the `scaling` bench's ingest shape);
+//! - `HEAP_SIDE=send`: A sends and publishes `HEAP_MESSAGES` messages, then
+//!   drains its session events once.
 //!
 //! The profiler runs from just before the first profiled call until after
 //! the final drain, and is stopped while both members are still alive, so
@@ -130,6 +132,7 @@ async fn run() {
                     }))
                     .await;
                 assert!(matches!(response, Response::Ok { .. }), "ingest");
+                b.ack_all().await;
             }
             let peak_before_drain = dhat::HeapStats::get().max_bytes;
             let drained = b.drain_and_ack().await;
@@ -158,6 +161,7 @@ async fn run() {
             for i in 0..messages {
                 a.send_chat(&mut relay, &group, &format!("m{i}")).await;
             }
+            drop(a.drain_and_ack().await);
             profiler
         }
         other => panic!("unknown HEAP_SIDE {other}"),
