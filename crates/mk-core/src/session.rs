@@ -2633,7 +2633,7 @@ impl Session {
             .transact(|| -> Result<(), StorageError> { self.persist_media_secret_effects(&mapped) })
             .map_err(SessionError::Storage)?;
         let mut out: Vec<SessionEvent> = mapped.into_iter().map(|item| item.event).collect();
-        out.append(&mut self.resolutions);
+        out.extend(std::mem::take(&mut self.resolutions));
         Ok(out)
     }
 
