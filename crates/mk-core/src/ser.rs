@@ -115,17 +115,12 @@ pub(crate) struct GroupRow {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     members: Vec<MemberRow>,
     required_capabilities: GroupCapabilities,
-    #[serde(default)]
     protocol_profile: ProtocolProfile,
-    #[serde(default)]
     removed: bool,
-    #[serde(default)]
     unrecoverable: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     disbanded: Option<TombstoneRow>,
-    #[serde(default)]
     join_epoch: u64,
-    #[serde(default)]
     local_copy_install_epoch: u64,
     #[serde(default, skip_serializing_if = "Vec::is_empty", with = "fixed_seq")]
     self_removed_sibling_slots: Vec<[u8; 32]>,
@@ -261,7 +256,6 @@ pub(crate) struct TombstoneRow {
     local_was_committer_leaf: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     former_members: Vec<MemberRow>,
-    #[serde(default)]
     announced: bool,
 }
 
