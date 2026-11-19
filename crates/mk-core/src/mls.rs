@@ -194,6 +194,22 @@ pub(crate) const fn is_undecodable(error: &StorageError) -> bool {
     matches!(error, StorageError::Serialization(_))
 }
 
+#[cfg(feature = "testing")]
+thread_local! {
+    /// Join-config reads on this thread. `MlsGroup::load` is the only
+    /// `OpenMLS` caller of `mls_group_join_config` (openmls
+    /// `group/mls_group/mod.rs:561`), so this counts group loads. Per
+    /// thread because the session is sans-IO and runs on its caller's
+    /// thread, which keeps parallel tests from sharing a count.
+    static GROUP_LOADS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// `MlsGroup::load` calls made on the current thread so far.
+#[cfg(feature = "testing")]
+pub(crate) fn group_loads() -> usize {
+    GROUP_LOADS.with(std::cell::Cell::get)
+}
+
 /// The `OpenMLS` storage provider: one `KvStore` behind
 /// `openmls_traits`'s `StorageProvider<CURRENT_VERSION>`.
 #[derive(Clone, Debug)]
@@ -652,6 +668,8 @@ impl StorageProvider<CURRENT_VERSION> for KvOpenMlsStorage {
         &self,
         group_id: &GroupId,
     ) -> Result<Option<MlsGroupJoinConfig>, Self::Error> {
+        #[cfg(feature = "testing")]
+        GROUP_LOADS.with(|loads| loads.set(loads.get() + 1));
         self.read_group_entity(JOIN_CONFIG_LABEL, group_id)
     }
 

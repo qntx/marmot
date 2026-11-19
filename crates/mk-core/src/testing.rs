@@ -360,6 +360,14 @@ impl ProofRequest {
     }
 }
 
+/// `MlsGroup::load` calls made on the current thread so far, counted at
+/// the one `OpenMLS` read only a load performs. Compare two readings taken
+/// on the thread that drives the session.
+#[must_use]
+pub fn openmls_group_loads() -> usize {
+    crate::mls::group_loads()
+}
+
 /// Require the stored index rows to match what the `Message` rows imply.
 ///
 /// Rebuilds the expected `MessageState`/`MessageIndex` rows with the same
