@@ -25,14 +25,8 @@ import { join, resolve } from "node:path";
 import { finalizeEvent, generateSecretKey } from "nostr-tools";
 
 import type { Backend } from "@qntx/marmot/backend";
-import { MarmotClient, nostrRelayPort } from "@qntx/marmot/client";
-import type {
-  ClientMessage,
-  GroupEvent,
-  InviteEvent,
-  MarmotError,
-  Timer,
-} from "@qntx/marmot/client";
+import { MarmotClient, nostrRelayPort, MarmotError } from "@qntx/marmot/client";
+import type { ClientMessage, GroupEvent, InviteEvent, Timer } from "@qntx/marmot/client";
 import { memoryCursorStore, memoryKv } from "@qntx/marmot/testing";
 import { Pool } from "@qntx/nostr";
 import { decode, npubEncode } from "@qntx/nostr/nips/nip19";
@@ -737,8 +731,8 @@ async function run(): Promise<void> {
     }
 
     /**
-     * App-data updates refuse with `invalid_transition` while a previous commit's resolution is
-     * still in flight — retry the staging call until the transition clears.
+     * Commit-producing ops refuse with `group_busy` while a previous commit's publish resolution is
+     * still in flight — retry the staging call until the group settles.
      */
     async function whenTransitionClears<T>(op: () => Promise<T>): Promise<T> {
       const deadline = Date.now() + STEP_DEADLINE_MS;
@@ -747,13 +741,10 @@ async function run(): Promise<void> {
           // oxlint-disable-next-line no-await-in-loop -- retries are inherently sequential
           return await op();
         } catch (error) {
-          const message =
-            error instanceof Error && error.cause instanceof Error
-              ? error.cause.message
-              : error instanceof Error
-                ? error.message
-                : String(error);
-          if (!message.includes("invalid_transition") || Date.now() > deadline) {
+          if (
+            !(error instanceof MarmotError && error.kind === "group_busy") ||
+            Date.now() > deadline
+          ) {
             throw error;
           }
           // oxlint-disable-next-line no-await-in-loop -- backoff between retries
