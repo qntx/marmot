@@ -599,13 +599,17 @@ impl KvStorageProvider {
         Ok(())
     }
 
-    /// Restore `rows` as the group's complete `OpenMLS` state.
+    /// Restore `rows` as the group's complete `OpenMLS` state. Every restore
+    /// path — snapshot, checkpoint, keeping-live — funnels here, so the
+    /// generation's reset half moves once per restore even when the rows
+    /// are byte-identical to live state.
     pub(crate) fn restore_group_openmls_rows(
         &self,
         gid: &GroupId,
         rows: &[(Vec<u8>, Vec<u8>)],
     ) -> StorageResult<()> {
         self.delete_group_openmls_rows(gid)?;
+        self.store.note_openmls_restore()?;
         for (row_key, value) in rows {
             self.store.put(row_key.clone(), value.clone())?;
             self.put_row(
@@ -2540,11 +2544,44 @@ impl StorageProvider for KvStorageProvider {
         self.store.pending_high_water()
     }
 
-    /// The committed-batch count: a strict over-approximation of sqlite's
-    /// OpenMLS-write generation (which also moves on unrelated commits via
-    /// `PRAGMA data_version`); over-invalidation is always safe.
+    /// The `MlsGroup`-reuse generation. What the pinned engine (MDK
+    /// 4df811a) assumes:
+    ///
+    /// - `traits/storage.rs:1439-1449` — the count must change on every
+    ///   write to the `OpenMLS` store, including transaction rollbacks and
+    ///   snapshot restores that bypass the `OpenMLS` provider; `None`
+    ///   disables reuse.
+    /// - `mls_group_cache.rs:142-170` (`take_mls_group`, equality at
+    ///   `:164`) — a cached object is reused only while the value equals
+    ///   the one stored with the entry; `:189-198`
+    ///   (`return_unmodified_mls_group`, `:194`) applies the same rule to
+    ///   an object no write went through; `:175-184` (`return_mls_group`,
+    ///   `:180`) with `foreign_half` at `:44-46` keeps an object written
+    ///   through when the upper 32 bits are unchanged since the take — the
+    ///   low half may move.
+    /// - `openmls_projection/resumable.rs:258-278` (`:273`) — replay
+    ///   continuations compare the generation only when no replay
+    ///   fingerprint exists; this provider always returns one
+    ///   (`group_replay_state_fingerprint`). `:386`/`:606` — `None` would
+    ///   switch to the synchronous evaluator, so this must keep returning
+    ///   `Some`.
+    /// - Reference: `storage-sqlite` `protocol/provider.rs:28-44` packs
+    ///   `data_version << 32 | own`; `base/connection.rs:1197` bumps its
+    ///   own counter on every `ROLLBACK`.
+    ///
+    /// The low half counts writes to `OpenMlsValue`/`OpenMlsGroupIndex`
+    /// rows when the write lands in the current layer — committed or not.
+    /// The high half moves on changes no cached object could have written
+    /// through: a discarded layer (transaction/savepoint rollback,
+    /// including an unwinding closure) that held such a write, and every
+    /// restore of a group's `OpenMLS` rows. Writes to any other table
+    /// leave the generation unchanged, and the KV host never writes on
+    /// its own (kv.rs contract), so there is no foreign writer. Moving the
+    /// high half on rollback is stricter than storage-sqlite — which only
+    /// moves its own counter there — and makes `return_mls_group` drop an
+    /// object that outlived a rollback.
     fn mls_write_generation(&self) -> Option<u64> {
-        self.store.write_generation().ok()
+        self.store.mls_write_generation().ok()
     }
 
     /// A frozen read view for the duration of `f`; writes inside fail.

@@ -121,6 +121,16 @@ pub(crate) const META_PENDING_HIGH_WATER: &[u8] = b"pending-ref-high-water";
 /// older or newer stores refuse to open (no migration code by design).
 pub(crate) const SCHEMA_VERSION: u32 = 3;
 
+/// Whether `key` names a row the `OpenMLS` store owns — the write set the
+/// engine's write generation counts (provider.rs `mls_write_generation`).
+pub(crate) const fn is_openmls_row(key: &[u8]) -> bool {
+    matches!(
+        key.first().copied(),
+        Some(table)
+            if table == Table::OpenMlsValue as u8 || table == Table::OpenMlsGroupIndex as u8
+    )
+}
+
 /// Encode a row key or scan prefix. `segments` must be nonempty content for a
 /// row key; prefixes use fewer segments of the same layout.
 pub(crate) fn key(table: Table, segments: &[&[u8]]) -> Vec<u8> {

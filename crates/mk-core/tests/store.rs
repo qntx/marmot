@@ -67,12 +67,17 @@ use cgka_traits::capabilities::GroupCapabilities;
 use cgka_traits::group::{Group, ProtocolProfile};
 use cgka_traits::message::{MessageRecord, MessageState};
 use cgka_traits::storage::{
-    CommittedMembers, CommittedRosterStorage, CommittedRosterWrite, GroupStorage, MessageStorage,
-    RosterRevision, StorageError, StorageProvider,
+    CommittedMembers, CommittedRosterStorage, CommittedRosterWrite, GroupStateCheckpointRef,
+    GroupStorage, MessageStorage, RosterRevision, StorageError, StorageProvider,
 };
 use cgka_traits::transport::Timestamp;
 use cgka_traits::types::{EpochId, GroupId, MemberId, MessageId};
 use mk_core::{BatchCodecError, KvBatch, KvHost, KvOp, KvStorageProvider, OpenError};
+use openmls::prelude::GroupId as MlsGroupId;
+use openmls_traits::storage::{
+    CURRENT_VERSION, Entity as MlsEntity, StorageProvider as MlsStorage, traits as mls_traits,
+};
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Default)]
 struct TestHost {
@@ -421,6 +426,225 @@ fn group_savepoint_rolls_back_its_scope_only() {
         provider.get_message(&mid(9)),
         Err(StorageError::NotFound)
     ));
+}
+
+// --- engine write generation (`mls_write_generation`) ---
+//
+// The generation the engine reuses a cached `MlsGroup` under: the low half
+// counts `OpenMLS`-row writes at land time, the high half counts changes no
+// cached object could have written through (discarded units, restores).
+
+/// Serializable stand-in for `OpenMLS` entities, like model.rs's `V`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct V(u8);
+
+impl MlsEntity<CURRENT_VERSION> for V {}
+impl mls_traits::TreeSync<CURRENT_VERSION> for V {}
+
+fn mls_gid(n: u8) -> MlsGroupId {
+    MlsGroupId::from_slice(gid(n).as_slice())
+}
+
+fn generation(provider: &KvStorageProvider) -> u64 {
+    provider.mls_write_generation().expect("generation tracked")
+}
+
+fn openmls_put(provider: &KvStorageProvider, g: u8, v: u8) {
+    provider
+        .mls_storage()
+        .write_tree::<MlsGroupId, V>(&mls_gid(g), &V(v))
+        .expect("openmls write");
+}
+
+/// A write to a non-`OpenMLS` table never moves the generation — bare or
+/// inside a committed unit.
+#[test]
+fn non_openmls_writes_leave_generation() {
+    let (provider, _host) = open_provider();
+    let before = generation(&provider);
+    provider.put_group_keeping_roster(&group(1)).expect("group");
+    provider
+        .put_message(&record(1, 1, MessageState::Created))
+        .expect("message");
+    provider
+        .with_transaction(|p| {
+            p.put_group_keeping_roster(&group(2))?;
+            p.put_message(&record(2, 2, MessageState::Created))
+        })
+        .expect("tx");
+    assert_eq!(generation(&provider), before);
+}
+
+/// An `OpenMLS` write moves the generation at write time — bare, and inside
+/// a unit before its commit lands; the commit itself moves nothing.
+#[test]
+fn openmls_writes_move_generation() {
+    let (provider, _host) = open_provider();
+    let before = generation(&provider);
+    openmls_put(&provider, 1, 7);
+    let after_bare = generation(&provider);
+    assert_ne!(after_bare, before);
+
+    let mut inside = before;
+    provider
+        .with_transaction(|p| {
+            assert_eq!(
+                generation(p),
+                after_bare,
+                "an unrelated commit moved nothing"
+            );
+            openmls_put(p, 1, 8);
+            inside = generation(p);
+            assert_ne!(inside, after_bare, "the write moved it inside the unit");
+            Ok::<_, StorageError>(())
+        })
+        .expect("tx");
+    assert_eq!(
+        generation(&provider),
+        inside,
+        "the commit itself moves nothing"
+    );
+}
+
+/// A rolled-back unit that held an `OpenMLS` write moves the generation
+/// again — the reset half — so a cached object loaded inside the unit
+/// cannot read as current. A rollback of non-`OpenMLS` writes alone
+/// changes nothing.
+#[test]
+fn rollback_after_openmls_write_moves_generation() {
+    let (provider, _host) = open_provider();
+    provider.put_group_keeping_roster(&group(1)).expect("group");
+    let before = generation(&provider);
+    let mut inside = before;
+    let result = provider.with_transaction(|p| -> Result<(), StorageError> {
+        openmls_put(p, 1, 7);
+        inside = generation(p);
+        Err(StorageError::Backend("abort".into()))
+    });
+    assert!(result.is_err());
+    assert_ne!(inside, before, "the write moved it inside the unit");
+    let after = generation(&provider);
+    assert_ne!(after, before, "the discarded unit moved it again");
+    assert_ne!(after, inside, "the reset half moved too");
+
+    let before = generation(&provider);
+    let result = provider.with_transaction(|p| -> Result<(), StorageError> {
+        p.put_message(&record(3, 1, MessageState::Created))?;
+        Err(StorageError::Backend("abort".into()))
+    });
+    assert!(result.is_err());
+    assert_eq!(generation(&provider), before, "no OpenMLS write, no move");
+}
+
+/// The same for `with_group_savepoint` — a real rollback scope even nested
+/// inside a committed transaction — and a committed savepoint inside a
+/// rolled-back transaction still counts, since its writes die with the
+/// outer discard.
+#[test]
+fn savepoint_rollback_after_openmls_write_moves_generation() {
+    let (provider, _host) = open_provider();
+    provider.put_group_keeping_roster(&group(1)).expect("group");
+
+    let before = generation(&provider);
+    let result = provider.with_group_savepoint(&gid(1), "sp", |p| -> Result<(), StorageError> {
+        openmls_put(p, 1, 7);
+        Err(StorageError::Backend("abort".into()))
+    });
+    assert!(result.is_err());
+    assert_ne!(generation(&provider), before);
+
+    // Rolled-back savepoint inside a committed transaction.
+    let before = generation(&provider);
+    provider
+        .with_transaction(|p| {
+            let inner = p.with_group_savepoint(&gid(1), "sp", |s| -> Result<(), StorageError> {
+                openmls_put(s, 1, 8);
+                Err(StorageError::Backend("abort".into()))
+            });
+            assert!(inner.is_err());
+            Ok::<_, StorageError>(())
+        })
+        .expect("outer commits");
+    assert_ne!(generation(&provider), before);
+
+    // Committed savepoint inside a rolled-back transaction: the write it
+    // folded up dies with the outer discard, so the generation still moves.
+    let before = generation(&provider);
+    let result = provider.with_transaction(|p| -> Result<(), StorageError> {
+        p.with_group_savepoint(&gid(1), "sp", |s| -> Result<(), StorageError> {
+            openmls_put(s, 1, 9);
+            Ok(())
+        })?;
+        Err(StorageError::Backend("outer abort".into()))
+    });
+    assert!(result.is_err());
+    assert_ne!(generation(&provider), before);
+}
+
+/// Every group `OpenMLS` restore moves the generation even when the
+/// restored rows equal the live rows — snapshot, state-snapshot,
+/// checkpoint, and keeping-live restores all funnel through the reset.
+#[test]
+fn openmls_restores_move_generation() {
+    let (provider, _host) = open_provider();
+    provider.put_group_keeping_roster(&group(1)).expect("group");
+    openmls_put(&provider, 1, 7);
+    provider
+        .create_group_snapshot(&gid(1), "snap")
+        .expect("snapshot");
+    provider
+        .create_group_state_snapshot(&gid(1), "ss")
+        .expect("state snapshot");
+    provider
+        .create_group_state_checkpoint(
+            &gid(1),
+            &GroupStateCheckpointRef {
+                id: "cp".to_owned(),
+                resulting_epoch: EpochId(7),
+            },
+        )
+        .expect("checkpoint");
+
+    let check = |label: &str, restore: &mut dyn FnMut(&KvStorageProvider)| {
+        let before = generation(&provider);
+        restore(&provider);
+        assert_ne!(generation(&provider), before, "{label} moved it");
+    };
+    check("rollback_group_to_snapshot", &mut |p| {
+        p.rollback_group_to_snapshot(&gid(1), "snap")
+            .expect("restore");
+    });
+    check("rollback_group_state_to_snapshot", &mut |p| {
+        p.rollback_group_state_to_snapshot(&gid(1), "ss")
+            .expect("restore");
+    });
+    check("restore_group_state_checkpoint", &mut |p| {
+        p.restore_group_state_checkpoint(&gid(1), "cp")
+            .expect("restore");
+    });
+    check("rollback_group_state_keeping_live_records", &mut |p| {
+        p.rollback_group_state_keeping_live_records(&gid(1), "snap")
+            .expect("restore");
+    });
+}
+
+/// A write refused inside `with_read_snapshot` moves nothing.
+#[test]
+fn refused_write_inside_read_snapshot_leaves_generation() {
+    let (provider, _host) = open_provider();
+    let before = generation(&provider);
+    provider
+        .with_read_snapshot(|p| -> Result<(), StorageError> {
+            assert!(
+                p.mls_storage()
+                    .write_tree::<MlsGroupId, V>(&mls_gid(1), &V(9))
+                    .is_err(),
+                "writes are refused inside a read snapshot"
+            );
+            Ok(())
+        })
+        .expect("read snapshot");
+    assert_eq!(generation(&provider), before);
 }
 
 // --- committed rosters (mdk#3273) ---
