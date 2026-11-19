@@ -307,6 +307,24 @@ export class Pump {
     }
   }
 
+  /**
+   * Queue a tick + publish pass for an op that armed deferred engine work (a pending disband or the
+   * delayed self-remove commit). Serialized after the op's own pass, so the promoted outbound still
+   * publishes in order; the wake is re-armed from the engine's answer.
+   */
+  requestTick(): void {
+    void (async () => {
+      try {
+        const next = await this.run(async () => this.engine.tick());
+        if (!this.closed) {
+          this.scheduleWake(next === undefined ? undefined : Number(next));
+        }
+      } catch (error) {
+        this.emitError(toMarmotError(error));
+      }
+    })();
+  }
+
   private async publishOutbox(): Promise<void> {
     if (this.closed) {
       return;

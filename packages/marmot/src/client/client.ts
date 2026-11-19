@@ -252,7 +252,14 @@ export class MarmotClient {
   }
 
   async leave(group: string): Promise<SendOutcome> {
-    return this.op(async (engine) => groups.leave(engine, group));
+    return this.op(async (engine) => {
+      const outcome = await groups.leave(engine, group);
+      // A leave arms the delayed self-remove auto-commit: queue a tick to arm its wake.
+      if (outcome.type === "leave_requested") {
+        this.pump.requestTick();
+      }
+      return outcome;
+    });
   }
 
   async selfUpdate(group: string): Promise<SendOutcome> {
@@ -329,6 +336,11 @@ export class MarmotClient {
     return this.op(async (engine) => {
       const outcome = await groups.disband(engine, group);
       this.pump.flagReconcile();
+      // A disband request arms deferred engine work: queue a tick so it reaches an
+      // outbound commit without waiting on unrelated traffic.
+      if (outcome.type === "disband_requested") {
+        this.pump.requestTick();
+      }
       return outcome;
     });
   }
