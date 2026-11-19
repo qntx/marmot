@@ -326,9 +326,11 @@ export class MarmotClient {
 
   /** Request the group's terminal disband; subscriptions reconcile afterwards. */
   async disband(group: string): Promise<SendOutcome> {
-    const outcome = await this.op(async (engine) => groups.disband(engine, group));
-    this.pump.flagReconcile();
-    return outcome;
+    return this.op(async (engine) => {
+      const outcome = await groups.disband(engine, group);
+      this.pump.flagReconcile();
+      return outcome;
+    });
   }
 
   /** Require the lifecycle component on a group that predates it. */
@@ -338,8 +340,10 @@ export class MarmotClient {
 
   /** Forget the group locally; subscriptions reconcile away from it. */
   async forgetGroup(group: string): Promise<void> {
-    await this.op(async (engine) => groups.forgetGroup(engine, group));
-    this.pump.flagReconcile();
+    await this.op(async (engine) => {
+      await groups.forgetGroup(engine, group);
+      this.pump.flagReconcile();
+    });
   }
 
   /**

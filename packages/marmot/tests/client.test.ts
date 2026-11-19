@@ -1325,9 +1325,12 @@ describe("MarmotClient", () => {
     await settle(fixture.timer, 5000);
     expect(fixture.network.openSubscriptions()).toBe(2);
     script.groups = [];
+    // The op's own post-run reconcile drops the group's subscription, so it is
+    // already closed by the time `forgetGroup` resolves — no settle, no other op.
     await fixture.client.forgetGroup(GROUP);
-    await settle(fixture.timer, 5000);
     expect(callsOf(fixture.script, "forget_group")).toHaveLength(1);
+    expect(fixture.network.openSubscriptions()).toBe(1);
+    await settle(fixture.timer, 5000);
     expect(fixture.network.openSubscriptions()).toBe(1);
     await fixture.client.close();
   });
