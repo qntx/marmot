@@ -26,6 +26,7 @@
 )]
 use std::collections::BTreeMap;
 
+use dhat as _;
 use hex as _;
 use mk_bridge::protocol::REQUEST_TYPES;
 use mk_core as _;

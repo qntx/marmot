@@ -34,6 +34,7 @@
 
 mod support;
 
+use dhat as _;
 use hex as _;
 use mk_bridge::protocol::*;
 use mk_bridge::{Bridge, MAX_REQUEST_BYTES};

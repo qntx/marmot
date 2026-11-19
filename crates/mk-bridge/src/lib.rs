@@ -42,4 +42,4 @@ pub use protocol::{MAX_REQUEST_BYTES, PROTOCOL_VERSION};
 pub use rows::{Row, RowsError, decode_rows, encode_rows};
 
 #[cfg(test)]
-use {tokio as _, tracing as _};
+use {dhat as _, tokio as _, tracing as _};
