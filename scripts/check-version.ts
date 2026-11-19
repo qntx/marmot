@@ -69,13 +69,14 @@ function escapeRegExp(text: string): string {
 /**
  * Lockstep check: every workspace package manifest's `version` must equal
  * `[workspace.package].version`, every workspace member must inherit `version.workspace = true`,
- * every internal `crates/` path dependency must pin `=<version>`, the version string may appear
- * nowhere else in Cargo.toml (bumpp rewrites every occurrence), internal `@qntx/*` dependencies
- * must use `^<version>` in peerDependencies and `<version>` in devDependencies, every `[[package]]`
- * in Cargo.lock without a `source` (a workspace member) must record the workspace version, and
- * every `workspaces` entry in bun.lock must record the package.json version of its workspace
- * directory. The private workspace root is not passed in and takes no part. `lockToml` is `null`
- * when no Cargo.lock exists yet — the workspace has no crates — and its checks are skipped.
+ * every internal path dependency (`crates/` in the workspace manifest, `../` in member manifests)
+ * must pin `=<version>`, the version string may appear nowhere else in Cargo.toml (bumpp rewrites
+ * every occurrence), internal `@qntx/*` dependencies must use `^<version>` in dependencies and
+ * peerDependencies and `<version>` in devDependencies, every `[[package]]` in Cargo.lock without a
+ * `source` (a workspace member) must record the workspace version, and every `workspaces` entry in
+ * bun.lock must record the package.json version of its workspace directory. The private workspace
+ * root is not passed in and takes no part. `lockToml` is `null` when no Cargo.lock exists yet — the
+ * workspace has no crates — and its checks are skipped.
  */
 export function checkVersion(
   packages: PackageEntry[],
@@ -112,6 +113,7 @@ export function checkVersion(
       errors.push(`version mismatch: ${path} has ${version}, Cargo.toml has ${cargoVersion}`);
     }
     for (const [section, prefix] of [
+      ["dependencies", "^"],
       ["peerDependencies", "^"],
       ["devDependencies", ""],
     ] as const) {
@@ -131,11 +133,27 @@ export function checkVersion(
     }
   }
 
-  // Every workspace member inherits the workspace version.
+  // Every workspace member inherits the workspace version, and an internal
+  // `../` path dependency pins `=<version>` exactly.
   for (const [path, member] of Object.entries(memberTomls)) {
     const { version } = asRecord(asRecord(member)["package"]);
     if (version !== "workspace" && asRecord(version)["workspace"] !== true) {
       errors.push(`${path}: must inherit version via version.workspace = true`);
+    }
+    for (const section of ["dependencies", "dev-dependencies", "build-dependencies"] as const) {
+      const deps = asRecord(asRecord(member)[section]);
+      for (const [name, spec] of Object.entries(deps)) {
+        const entry = asRecord(spec);
+        if (typeof entry["path"] !== "string" || !entry["path"].startsWith("../")) {
+          continue;
+        }
+        const expected = `=${typeof cargoVersion === "string" ? cargoVersion : ""}`;
+        if (entry["version"] !== expected) {
+          errors.push(
+            `${path}: internal dependency "${name}" must use version "${expected}", got ${JSON.stringify(entry["version"])}`,
+          );
+        }
+      }
     }
   }
 
