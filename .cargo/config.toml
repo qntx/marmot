@@ -1,0 +1,8 @@
+# SQLCipher (bundled through MDK's storage-sqlite, a dev-dependency of the
+# mk-core comparison tests; no shipped artifact links SQLite) mlocks its
+# buffers and logs a WARN line to stderr for every mlock the RLIMIT_MEMLOCK
+# cap refuses. On a Linux runner that made one `rust / ci` job log ~1.2 GB and
+# buried the failing assertion. Test databases hold nothing worth pinning in
+# RAM, so SQLCipher builds without memory locking here.
+[env]
+LIBSQLITE3_FLAGS = "-DOMIT_MEMLOCK"
