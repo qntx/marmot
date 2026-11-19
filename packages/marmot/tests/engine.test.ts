@@ -11,7 +11,7 @@ import type { Json } from "../src/backend/codec.ts";
 import { Engine, SignerRefusedError } from "../src/backend/engine.ts";
 import type { Clock, Signer } from "../src/backend/engine.ts";
 import { BridgeError } from "../src/backend/errors.ts";
-import { encodeKvBatch } from "../src/backend/kv.ts";
+import { encodeKvBatch, encodeRows } from "../src/backend/kv.ts";
 import type { Backend, BridgeHandle, BridgeHost } from "../src/backend/port.ts";
 import type {
   BridgeRequest,
@@ -23,6 +23,7 @@ import type {
 } from "../src/backend/protocol.ts";
 import { utf8Decode, utf8Encode } from "../src/backend/utf8.ts";
 import { memoryKv } from "../src/testing/memory.ts";
+import type { MemoryKv } from "../src/testing/memory.ts";
 
 const ACCOUNT = "a".repeat(64);
 const DONE: BridgeResponse = { type: "ok", result: { type: "done" } };
@@ -79,13 +80,20 @@ function putBatch(seq: bigint): Uint8Array {
   });
 }
 
-type Handler = (request: BridgeRequest, host: BridgeHost) => BridgeResponse;
+type Handler = (
+  request: BridgeRequest,
+  host: BridgeHost,
+) => BridgeResponse | Promise<BridgeResponse>;
 
 /** Route requests to per-type handlers; unhandled types answer `done`. */
 function routes(map: Partial<Record<BridgeRequest["type"], Handler>>): Handler {
-  return (request, host) => {
+  return async (request, host) => {
     const handler = map[request.type];
-    return handler === undefined ? DONE : handler(request, host);
+    if (handler === undefined) {
+      return DONE;
+    }
+    const response = await handler(request, host);
+    return response;
   };
 }
 
@@ -159,8 +167,9 @@ function twoSignEvents(): Handler {
 }
 
 type Script = {
-  open?: OpenResponse;
+  open?: OpenResponse | ((host: BridgeHost) => OpenResponse | Promise<OpenResponse>);
   onCall?: Handler;
+  onCreate?: (host: BridgeHost) => void;
   drain?: DrainResponse;
 };
 
@@ -176,20 +185,30 @@ function fakeBackend(script: Script): {
   const backend: Backend = {
     name: "fake",
     create: (host) => {
+      script.onCreate?.(host);
       const handle: BridgeHandle = {
-        open: (config) => {
+        open: async (config) => {
           configs.push(decodeConfigValue(parse(config)));
-          return wire(encodeOpenResponse(script.open ?? { type: "ready", account: ACCOUNT }));
+          const scripted = script.open;
+          const response =
+            typeof scripted === "function"
+              ? await scripted(host)
+              : (scripted ?? { type: "ready", account: ACCOUNT });
+          return wire(encodeOpenResponse(response));
         },
-        call: (bytes) => {
+        call: async (bytes) => {
           const { request } = decodeCallValue(parse(bytes));
           calls.push(request);
-          const response = script.onCall?.(request, host) ?? DONE;
+          const response = await (script.onCall?.(request, host) ?? DONE);
           return wire(encodeResponse(response));
         },
-        drain: () => wire(encodeDrainResponse(script.drain ?? { type: "events", events: [] })),
-        close: () => {
+        drain: async () => {
+          await Promise.resolve();
+          return wire(encodeDrainResponse(script.drain ?? { type: "events", events: [] }));
+        },
+        close: async () => {
           closed = true;
+          await Promise.resolve();
         },
       };
       return handle;
@@ -498,6 +517,126 @@ describe("Engine", () => {
     const outcome = await capture(engine.tick());
     expect(outcome).toBeInstanceOf(BridgeError);
     expect(outcome).toMatchObject({ kind: "busy" });
+    await engine.close();
+  });
+
+  test("an open-time commit is acked even when open settles after kv.commit", async () => {
+    const inner = memoryKv();
+    let lastCommit: Promise<void> = Promise.resolve();
+    const kv: MemoryKv = {
+      ...inner,
+      commit: async (batch) => {
+        lastCommit = inner.commit(batch);
+        await lastCommit;
+      },
+    };
+    const { backend, calls } = fakeBackend({
+      open: async (host) => {
+        host.commit(putBatch(11n));
+        // The open promise settles strictly after the commit's durability resolved — the ack
+        // had to wait out `open` in the deferred buffer, not ride the handle.
+        await lastCommit;
+        return { type: "ready", account: ACCOUNT };
+      },
+    });
+    const engine = await Engine.open({ backend, kv, clock, signer: signer() });
+    await engine.whenDurable();
+    expect(ackSeqs(calls)).toStrictEqual([11n]);
+    await engine.close();
+  });
+
+  test("a non-increasing commit seq moves the engine to failed", async () => {
+    const { backend, closed } = fakeBackend({
+      onCall: routes({
+        tick: (_request, host) => {
+          host.commit(putBatch(5n));
+          host.commit(putBatch(5n));
+          return TICKED;
+        },
+      }),
+    });
+    const engine = await Engine.open({ backend, kv: memoryKv(), clock, signer: signer() });
+    await engine.tick();
+    expect(kindOf(await capture(engine.whenDurable()))).toBe("host_failed");
+    expect(closed()).toBe(true);
+    expect(kindOf(await capture(engine.tick()))).toBe("host_failed");
+    await engine.close();
+  });
+
+  test("the host hands the durable rows over exactly once", async () => {
+    const kv = memoryKv([[Uint8Array.of(1), Uint8Array.of(2)]]);
+    const snapshots: Uint8Array[] = [];
+    let secondThrew = false;
+    const { backend } = fakeBackend({
+      onCreate: (host) => {
+        snapshots.push(host.load());
+        try {
+          host.load();
+        } catch {
+          secondThrew = true;
+        }
+      },
+    });
+    const engine = await Engine.open({ backend, kv, clock, signer: signer() });
+    expect(snapshots).toStrictEqual([encodeRows(kv.rows())]);
+    expect(secondThrew).toBe(true);
+    await engine.close();
+  });
+
+  test("whenDurable waits for the ack call, not just kv.commit", async () => {
+    const ackGate = gate();
+    const { backend, calls } = fakeBackend({
+      onCall: routes({
+        tick: (_request, host) => {
+          host.commit(putBatch(4n));
+          return TICKED;
+        },
+        ack_durable: async () => {
+          await ackGate.promise;
+          return DONE;
+        },
+      }),
+    });
+    const engine = await Engine.open({ backend, kv: memoryKv(), clock, signer: signer() });
+    await engine.tick();
+    let durable = false;
+    const waiting = (async () => {
+      await engine.whenDurable();
+      durable = true;
+    })();
+    // Let kv.commit resolve and the ack reach the bridge.
+    await new Promise((resolve) => {
+      setTimeout(resolve);
+    });
+    expect(ackSeqs(calls)).toStrictEqual([4n]);
+    expect(durable).toBe(false);
+    ackGate.open();
+    await waiting;
+    expect(durable).toBe(true);
+    await engine.close();
+  });
+
+  test("an ack goes out while the op call that produced it is still pending", async () => {
+    const opGate = gate();
+    const { backend, calls } = fakeBackend({
+      onCall: routes({
+        tick: async (_request, host) => {
+          host.commit(putBatch(6n));
+          await opGate.promise;
+          return TICKED;
+        },
+      }),
+    });
+    const engine = await Engine.open({ backend, kv: memoryKv(), clock, signer: signer() });
+    const ticking = engine.tick();
+    // Let the tick call start, the commit land, and the concurrent ack call be issued.
+    await new Promise((resolve) => {
+      setTimeout(resolve);
+    });
+    expect(ackSeqs(calls)).toStrictEqual([6n]);
+    opGate.open();
+    await ticking;
+    await engine.whenDurable();
     await engine.close();
   });
 });

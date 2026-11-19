@@ -1,6 +1,11 @@
 import { describe, expect, test } from "vite-plus/test";
 
-import { checkVersion, excludedCrates } from "./check-version.ts";
+import {
+  checkStandaloneApps,
+  checkVersion,
+  excludedCrates,
+  STANDALONE_APPS,
+} from "./check-version.ts";
 
 const MARMOT = {
   path: "packages/marmot/package.json",
@@ -284,5 +289,29 @@ describe("check-version", () => {
       }),
     ).toStrictEqual(new Set(["interop", "spike", "fuzz"]));
     expect(excludedCrates({ workspace: {} })).toStrictEqual(new Set());
+  });
+});
+
+describe("checkStandaloneApps", () => {
+  test("native-smoke is the registered standalone app", () => {
+    expect([...STANDALONE_APPS]).toStrictEqual(["native-smoke"]);
+  });
+
+  test("accepts a registered private app", () => {
+    const errors = checkStandaloneApps([
+      { path: "apps/native-smoke/package.json", pkg: { private: true, version: "0.0.0" } },
+    ]);
+    expect(errors).toStrictEqual([]);
+  });
+
+  test("rejects an unregistered app and a non-private one", () => {
+    const errors = checkStandaloneApps([
+      { path: "apps/other/package.json", pkg: { private: true } },
+      { path: "apps/native-smoke/package.json", pkg: {} },
+    ]);
+    expect(errors).toStrictEqual([
+      "apps/other/package.json: not registered in STANDALONE_APPS — apps/ projects are excluded from version checks and must be listed explicitly",
+      'apps/native-smoke/package.json: standalone apps must declare "private": true',
+    ]);
   });
 });

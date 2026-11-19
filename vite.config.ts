@@ -98,6 +98,8 @@ const config: UserConfig = defineConfig({
       "3rdparty/**",
       "target/**",
       "spike/**",
+      // Standalone Expo project: its own toolchain, lockfile, and Expo-required CJS configs.
+      "apps/**",
       // Committed wasm-bindgen --target web glue (regenerated, diffed by check:generated).
       "packages/marmot-wasm/src/generated/**",
       "packages/marmot-wasm/tests/generated/**",
@@ -112,6 +114,21 @@ const config: UserConfig = defineConfig({
         rules: {
           // Maintenance scripts and benches print their results.
           "eslint/no-console": "off",
+        },
+      },
+      {
+        // Nitrogen parses `interface` + method signatures; the preset's
+        // type-alias and property-signature styles would break the generated
+        // glue. react-native.config.js is the RN CLI's CJS hook.
+        files: [
+          "packages/marmot-native/src/specs/**",
+          "packages/marmot-native/react-native.config.js",
+        ],
+        rules: {
+          "typescript/consistent-type-definitions": "off",
+          "typescript/method-signature-style": "off",
+          "unicorn/prefer-module": "off",
+          "import/no-commonjs": "off",
         },
       },
       {
@@ -161,9 +178,14 @@ const config: UserConfig = defineConfig({
       "**/*.toml",
       "vectors/**",
       "spike/**",
+      // Standalone Expo project: Expo-required CJS configs, its own style.
+      "apps/**",
       // Committed wasm-bindgen glue is generated output, not hand-written.
       "packages/marmot-wasm/src/generated/**",
       "packages/marmot-wasm/tests/generated/**",
+      // Nitrogen spec DSL: oxfmt canonicalizes `interface X extends
+      // HybridObject` into an intersection type, which nitrogen cannot parse.
+      "packages/marmot-native/src/specs/**",
     ],
   },
   run: { cache: process.env["CI"] === undefined || process.env["CI"] === "" },

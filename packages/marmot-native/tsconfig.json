@@ -1,0 +1,15 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    // Development resolution for the workspace siblings without a prior pack
+    // build; the emitted package keeps importing @qntx/marmot/* (peer dep).
+    "paths": {
+      "@qntx/marmot": ["../marmot/src/index.ts"],
+      "@qntx/marmot/*": ["../marmot/src/*/index.ts"],
+      // See types/react-native.d.ts: keeps RN's global augmentations out of
+      // this program so the mapped marmot sources still typecheck.
+      "react-native": ["./types/react-native.d.ts"]
+    }
+  },
+  "include": ["src", "tests", "vite.config.ts"]
+}

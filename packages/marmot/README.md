@@ -16,13 +16,15 @@ storage and testing support under dedicated subpaths:
   const engine = await Engine.open({ backend, kv, signer, clock });
   ```
 
-- `@qntx/marmot/storage` — `indexedDbKv`, the durable KV driver for
-  browsers. It **requires** an injected `cipher` (encrypts every stored
-  value, authenticating the row key as associated data so sealed values
-  cannot be swapped between rows) and `lock` (e.g.
-  `webLocks(navigator.locks)`) — a driver that
-  cannot take the exclusive lock reports `StorageError` kind `locked`, and
-  a driver is terminal after a failed `commit`.
+- `@qntx/marmot/storage` — the durable KV drivers `indexedDbKv`
+  (browsers) and `sqliteKv` (an injected `SqlitePort`; op-sqlite's `DB`
+  or a `node:sqlite`/`bun:sqlite` adapter satisfies it). Both **require**
+  an injected `cipher` (encrypts every stored value, authenticating the
+  row key as associated data so sealed values cannot be swapped between
+  rows) and `lock` (`webLocks(navigator.locks)` or the process-local
+  `localLocks()`) — a driver that cannot take the exclusive lock reports
+  `StorageError` kind `locked`, and a driver is terminal after a failed
+  `commit`. `sqliteKv` never closes the host-owned database.
 - `@qntx/marmot/testing` — `memoryKv`, `manualClock`, `fakeRelay` and
   `runFlow` for engine-level suites without a browser.
 

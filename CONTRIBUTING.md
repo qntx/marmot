@@ -7,9 +7,15 @@
   project's own copy under `crates/interop`, `crates/conformance`, `fuzz/`).
 - `cargo-deny` — supply-chain check (`cargo install cargo-deny`).
 - `cargo-hack` — per-feature check (`cargo install cargo-hack`).
-- **Android NDK** — only for the `aarch64-linux-android` check
-  (`secp256k1-sys` compiles C); point `CC_aarch64_linux_android` at the NDK
-  clang.
+- **Android NDK `27.1.12297006`** — for the `aarch64-linux-android` check
+  (`secp256k1-sys` compiles C) and for `build:native --android`; point
+  `CC_aarch64_linux_android` at the NDK clang, or set `ANDROID_NDK_HOME` /
+  install under `~/Library/Android/sdk/ndk/`.
+- **Xcode** — only for `build:native --ios` (the xcframework step uses
+  `xcodebuild` and the iOS SDK clang).
+- **rustup targets** — only for `build:native`:
+  `rustup target add aarch64-apple-ios aarch64-apple-ios-sim
+  aarch64-linux-android x86_64-linux-android`
 - **Rust nightly + cargo-fuzz 0.13** — only for fuzzing
   (`cargo install cargo-fuzz`).
 - **wasm-bindgen-cli** — only for `build:wasm`; the version must equal
@@ -19,6 +25,14 @@
   there or on `PATH` and fails clearly on a mismatch.
 - **binaryen** — installed by `bun install` (`binaryen` devDependency);
   `build:wasm` runs its `wasm-opt -Oz` on the release artifact.
+- **Homebrew LLVM** — only on macOS, only for `build:wasm` from scratch:
+  Apple `ar` silently produces an empty archive for wasm objects, so
+  `secp256k1-sys` links with no symbols. Set
+  `CC_wasm32_unknown_unknown=/opt/homebrew/opt/llvm/bin/clang
+  AR_wasm32_unknown_unknown=/opt/homebrew/opt/llvm/bin/llvm-ar
+  RANLIB_wasm32_unknown_unknown=/opt/homebrew/opt/llvm/bin/llvm-ranlib`
+  and `cargo clean -p secp256k1-sys --target wasm32-unknown-unknown`
+  before the first build. CI uses GNU `ar` and is unaffected.
 - **Playwright Chromium** — only for `test:browser`
   (`bunx playwright install --with-deps chromium`).
 - **Odin `dev-2026-10`, rev `84bc3fc`** — only for `crates/conformance`
@@ -43,6 +57,11 @@ packages/marmot-wasm/ @qntx/marmot-wasm — loader around the mk-wasm
 crates/mk-core/       pure-Rust core: KV storage provider + Session API
 crates/mk-bridge/     byte-oriented JSON host protocol over mk-core
 crates/mk-wasm/       wasm-bindgen shell over mk-bridge
+crates/mk-ffi/        C ABI over mk-bridge (marmot_ffi.h); one engine
+                      thread per handle, the only crate with `unsafe`
+packages/marmot-native/ @qntx/marmot-native — React Native Backend:
+                      C++ Nitro HybridObjects over the mk-ffi prebuilts
+                      (ios/MarmotFfi.xcframework, android jniLibs)
 crates/interop/       standalone project — wn/wnd scenario tests against
                       the public Session API (excluded from the workspace)
 crates/conformance/   standalone project — recorded MDK vectors replayed
@@ -154,6 +173,100 @@ cargo +nightly fuzz run <target> -- -max_total_time=60
 
 CI (`ci-rust-fuzz`) runs every target for 60 s starting from an empty
 corpus — no seeds needed there.
+
+## Native build (`packages/marmot-native`)
+
+`bun run build:native [--ios] [--android] [--host]` (no flag = `--ios
+--android`) builds the `mk-ffi` staticlib with `--profile native`
+(panic=unwind — the FFI boundary's `catch_unwind` needs it; `release` is
+panic=abort) and relinks each shared artifact itself:
+
+- `--ios` (macOS + Xcode): `aarch64-apple-ios` and `aarch64-apple-ios-sim`
+  only → two dynamic `MarmotFfi.framework`s (install name
+  `@rpath/MarmotFfi.framework/MarmotFfi`, min iOS 15.1) →
+  `xcodebuild -create-xcframework` →
+  `packages/marmot-native/ios/MarmotFfi.xcframework`.
+- `--android` (NDK `27.1.12297006`): `arm64-v8a` and `x86_64` →
+  `libmarmot_ffi.so` under `android/src/main/jniLibs/<abi>/`, linked with
+  `-z max-page-size=16384` and `-soname,libmarmot_ffi.so`, then
+  `llvm-strip --strip-unneeded`. The script fails unless SONAME is set and
+  every LOAD segment is ≥ 16 KB aligned (`llvm-readelf -lW`).
+- `--host`: the host shared library under `target/native/` — the CI export
+  gate (`.github/workflows/ci.yml` `native` job runs it on Ubuntu).
+
+The final link is ours (not rustc's): rustc's cdylib link unions its own
+export list — every `#[no_mangle]` item in the dep graph — with any list we
+add, so secp256k1-sys symbols would leak into the dynamic table. Relinking
+the staticlib with `-force_load`/`--whole-archive` plus a generated
+`-exported_symbols_list`/`--version-script` makes the dynamic table exactly
+the seven `mk_*` symbols; the script asserts that set per artifact (which
+also proves `mk_bridge_test_panic` never ships) and prints size + SHA-256.
+
+## Native smoke (`apps/native-smoke`)
+
+`apps/native-smoke` is a standalone Expo dev-client app (private, own
+`bun.lock`, excluded from version lockstep via `STANDALONE_APPS` in
+`scripts/check-version.ts`) that proves the native stack end to end:
+`@qntx/marmot-native` (Nitro C++ HybridObject → mk-ffi engine thread) +
+`sqliteKv` over `@op-engineering/op-sqlite`, bundled to Hermes bytecode in a
+Release build. The app runs one mode per launch from
+`marmotsmoke://run?mode=…` (iOS passes `Documents/run.json` instead —
+`simctl openurl` needs a consent dialog) and reports to a host collector on
+`127.0.0.1:8100`:
+
+- `flow` — the shared `runFlow` scenario (create, join, 500 messages,
+  close/reopen, add, remove, failed-publish retry) through the public
+  `Engine` API.
+- `kill`/`verify` — the kill-during-write loop from `marmot-wasm`'s
+  `e2e/kill.spec.ts`: journal batches/acks/publishes out of process, kill
+  mid-write (`kill -9` of the app process on iOS, `am force-stop` on
+  Android), relaunch, dump the decrypted durable rows, and check the
+  prefix/ack/publish invariants.
+- `perf` — the measurement cases in `src/perf.ts` (`kp`, `ingest500`,
+  `add50`, `send`, `memgen`, `memrecv`), one fresh process per case, with
+  device/host metadata, load averages, and process memory sampled around
+  the memory cases.
+
+Prerequisites: the mk-ffi prebuilts (`bun run build:native --ios
+--android`), Xcode + an iOS runtime for the simulator, and for Android the
+SDK with the 16 KB-page image
+`system-images;android-37.0;google_apis_playstore_ps16k;arm64-v8a` plus
+Android Studio's JBR as `JAVA_HOME`.
+
+```sh
+cd apps/native-smoke
+bun install
+bun run smoke:ios        # Release build, flow + kill loop on a private simulator
+bun run smoke:android    # Release APK, flow + kill loop on a private 16 KB emulator
+```
+
+Driver flags: `--flow` (flow only), `--kill` (kill loop only),
+`--iterations=N` (default 30), `--seed=N` (default 20260209, the browser
+suite's seed). Results land under `apps/native-smoke/target/`:
+`flow-<platform>.json`, `kill-<platform>.json`, `kill-<platform>-<i>.json`.
+Local packages are synced into `node_modules` by `scripts/sync-local.ts`
+(file copies — Expo autolinking does not follow the repo symlinks); rerun
+it after changing `packages/marmot` or `packages/marmot-native`.
+
+Perf runs reuse the same drivers — `bun run perf:ios` /
+`bun run perf:android` (`--perf`), with `--cases=kp,ingest500,...` to pick
+a subset, `--members=N` to override the `memgen` member count (labelled
+`-m<N>` in the output filename), `--source=<run>` plus
+`--db/--key/--secret` to point `memrecv` at a previous `memgen` database,
+and `--keep-emulator`/`--keep-device` to leave the device up between
+runs. Results: `target/perf-<platform>-<case>[-m<N>].json`.
+
+`bun run size` (`scripts/size.ts`) builds the Release app with and without
+`@qntx/marmot-native` (temporary `expo.autolinking.exclude` + the
+`MARMOT_SMOKE_NO_NATIVE` metro stub) and reports APK/`.app`/zip/native
+library sizes to `target/appsize.json`.
+
+Shared-machine discipline: the iOS driver takes a simulator slot under
+`~/Desktop/qntx/meowl.social/.cache/sim-slots/` (max 3, 40-minute hold,
+released on exit) on its own `marmot-m4` device; Android uses a private
+`marmot_m4` AVD on console port 5600 (`emulator-5600`) and only ever
+addresses `-s emulator-5600`. The collector port is shared — run one driver
+at a time.
 
 ## Commits
 

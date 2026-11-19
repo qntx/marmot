@@ -24,20 +24,23 @@ const TrapBridge: BridgeClass = class {
 };
 
 describe("createBackend", () => {
-  test("a throwing call poisons the backend on every handle", () => {
+  test("a throwing call poisons the backend on every handle", async () => {
     const backend = createBackend(TrapBridge);
     const first = backend.create(host);
     const second = backend.create(host);
-    const trapped = decodeResponse(first.call(utf8Encode("{}")));
+    const trapped = decodeResponse(await first.call(utf8Encode("{}")));
     expect(trapped).toStrictEqual({ type: "error", error: { kind: "poisoned" } });
-    const outcomes = [decodeResponse(second.call(utf8Encode("{}"))), decodeResponse(first.drain())];
+    const outcomes = [
+      decodeResponse(await second.call(utf8Encode("{}"))),
+      decodeResponse(await first.drain()),
+    ];
     for (const response of outcomes) {
       expect(response).toStrictEqual({ type: "error", error: { kind: "poisoned" } });
     }
-    const open = decodeOpenResponse(second.open(utf8Encode("{}")));
+    const open = decodeOpenResponse(await second.open(utf8Encode("{}")));
     expect(open).toStrictEqual({ type: "error", error: { kind: "poisoned" } });
-    first.close();
-    second.close();
+    await first.close();
+    await second.close();
   });
 });
 

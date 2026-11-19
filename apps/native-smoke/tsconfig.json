@@ -1,0 +1,33 @@
+{
+  "extends": "expo/tsconfig.base",
+  "compilerOptions": {
+    "strict": true,
+    "noEmit": true,
+    "lib": [
+      "es2023",
+      "dom"
+    ],
+    "types": [
+      "react-native",
+      "node",
+      "bun-types"
+    ],
+    "paths": {
+      "@qntx/marmot": [
+        "../../packages/marmot/src/index.ts"
+      ],
+      "@qntx/marmot/*": [
+        "../../packages/marmot/src/*/index.ts"
+      ]
+    },
+    "allowImportingTsExtensions": true
+  },
+  "include": [
+    "index.ts",
+    "src",
+    "scripts",
+    "app.config.ts",
+    "metro.config.js",
+    "plugins"
+  ]
+}
