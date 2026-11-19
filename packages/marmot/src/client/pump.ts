@@ -16,7 +16,7 @@ import type {
   RelayResult,
   SessionEvent,
 } from "../backend/protocol.ts";
-import { blockedInvites } from "../invites/index.ts";
+import { pendingInvites } from "../invites/index.ts";
 import type { InviteEvent } from "../invites/index.ts";
 import type { CursorStore } from "../storage/driver.ts";
 import type { PlannedSubscription, RelayPort, Timer } from "../transport/index.ts";
@@ -56,8 +56,6 @@ export const OUTBOX_RETRY_TICK_MS = 5000;
 /** Delay before reconciling after a relay-initiated subscription close. */
 export const RESUBSCRIBE_DELAY_MS = 5000;
 
-type SignerVerdict = "refused" | "failed" | undefined;
-
 /** What the pump needs to drive one client session. */
 export type PumpOptions = {
   engine: Engine;
@@ -68,8 +66,6 @@ export type PumpOptions = {
   state: ClientState;
   account: string;
   allowLoopback: boolean;
-  /** `observeSigner`'s `take`: the first refused/failed signer call since the last take. */
-  takeVerdict: () => SignerVerdict;
 };
 
 type ActiveSub = {
@@ -91,7 +87,6 @@ export class Pump {
   private readonly state: ClientState;
   private readonly account: string;
   private readonly allowLoopback: boolean;
-  private readonly takeVerdict: () => SignerVerdict;
 
   private readonly listeners = {
     messages: new Set<(batch: ClientMessage[]) => void | Promise<void>>(),
@@ -125,7 +120,6 @@ export class Pump {
     this.state = options.state;
     this.account = options.account;
     this.allowLoopback = options.allowLoopback;
-    this.takeVerdict = options.takeVerdict;
   }
 
   /** Reconcile subscriptions and run the first tick, so early listeners see the first drain. */
@@ -203,6 +197,24 @@ export class Pump {
   /** Mark subscriptions for re-planning (a group-change listener observed churn). */
   flagReconcile(): void {
     this.reconcileFlag = true;
+  }
+
+  /**
+   * Close every active kind-1059 subscription and reconcile, so the inbox subscriptions reopen with
+   * `since` taken from the capped cursor (an `unavailable` ingest report caps its key at the
+   * earliest `createdAt − 1`) and the relays replay the withheld wraps. Stores no wraps.
+   */
+  async retryInvites(): Promise<void> {
+    await this.run(async () => {
+      for (const [key, sub] of this.active) {
+        if (sub.kind === GIFT_WRAP_KIND) {
+          sub.close();
+          this.active.delete(key);
+        }
+      }
+      this.reconcileFlag = true;
+      await Promise.resolve();
+    }, false);
   }
 
   /**
@@ -430,14 +442,9 @@ export class Pump {
     const batch = [...this.buffer.values()];
     this.buffer.clear();
     const work = this.run(async () => {
-      this.takeVerdict();
       const events = batch.map((entry) => entry.event);
       const reports = await this.engine.ingest(events);
-      const verdict = this.takeVerdict();
-      const wraps = new Set(
-        events.filter((event) => event.kind === GIFT_WRAP_KIND).map((event) => event.id),
-      );
-      for (const invite of blockedInvites(reports, wraps, verdict)) {
+      for (const invite of pendingInvites(reports)) {
         this.emitInvite(invite);
       }
       await this.engine.whenDurable();

@@ -79,7 +79,6 @@ export class MarmotClient {
       state,
       account: options.signer.pubkey,
       allowLoopback: this.allowLoopback,
-      takeVerdict: observed.take,
     });
   }
 
@@ -151,8 +150,7 @@ export class MarmotClient {
   private async op<T>(job: (engine: Engine) => Promise<T>): Promise<T> {
     this.guard();
     return this.pump.run(async () => {
-      // Reset, then run: a verdict belongs to the job that observed the signer call. Taking it
-      // inside the serialized body keeps a later ingest from stealing it for a `blocked` invite.
+      // Reset, then run: a verdict belongs to the job that observed the signer call.
       this.observed.take();
       try {
         return await job(this.engine);
@@ -300,6 +298,16 @@ export class MarmotClient {
     ciphertext: Uint8Array,
   ): Promise<Uint8Array> {
     return this.op(async (engine) => engine.openAttachment(group, message, reference, ciphertext));
+  }
+
+  /**
+   * Replay pending invites: close the kind-1059 inbox subscriptions and reopen them at the capped
+   * cursor, so the relays redeliver wraps the signer refused or failed to unwrap. The client stores
+   * no wraps; redelivery goes through the normal ingest path.
+   */
+  async retryInvites(): Promise<void> {
+    this.guard();
+    await this.pump.retryInvites();
   }
 
   async groups(): Promise<GroupSnapshot[]> {
