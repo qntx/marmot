@@ -166,6 +166,25 @@ impl KvStorageProvider {
     pub fn interned_description_count(&self) -> usize {
         self.interned_count()
     }
+
+    /// Run `f` inside a held savepoint — the session's signer-refusal
+    /// span — then drop the guard uncommitted. A discarded span that held
+    /// an `OpenMLS` write moves the generation's reset half, like every
+    /// other rolled-back layer.
+    ///
+    /// # Errors
+    /// `f`'s error, or [`cgka_traits::storage::StorageError`] on lock
+    /// poisoning.
+    pub fn dropped_held_savepoint<T, E, F>(&self, f: F) -> Result<T, E>
+    where
+        E: From<cgka_traits::storage::StorageError>,
+        F: FnOnce() -> Result<T, E>,
+    {
+        let savepoint = self.store().begin_savepoint().map_err(E::from)?;
+        let out = f();
+        drop(savepoint);
+        out
+    }
 }
 
 /// A manually-driven [`Clock`].

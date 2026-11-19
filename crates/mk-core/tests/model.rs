@@ -587,6 +587,7 @@ enum Op {
     MlsDeleteEpochKeys(u8, u8),
     BeginCommit(Vec<Op>),
     BeginRollback(Vec<Op>),
+    HeldSavepointDrop(Vec<Op>),
     SavepointOk(u8, Vec<Op>),
     SavepointErr(u8, Vec<Op>),
     ReadSnapshot(Vec<Op>),
@@ -740,6 +741,7 @@ fn op_strategy() -> impl Strategy<Value = Op> {
             inner.prop_map(|o| o),
             prop::collection::vec(unit_op_strategy(), 1..6).prop_map(Op::BeginCommit),
             prop::collection::vec(unit_op_strategy(), 1..6).prop_map(Op::BeginRollback),
+            prop::collection::vec(unit_op_strategy(), 1..6).prop_map(Op::HeldSavepointDrop),
             (0..GROUPS, prop::collection::vec(unit_op_strategy(), 1..6))
                 .prop_map(|(g, ops)| Op::SavepointOk(g, ops)),
             (0..GROUPS, prop::collection::vec(unit_op_strategy(), 1..6))
@@ -1007,6 +1009,9 @@ where
                 Ok(())
             });
             Outcome::Nested(inner_outcomes, result.map_err(|e| kind(&e)))
+        }
+        Op::HeldSavepointDrop(_) => {
+            unreachable!("a held savepoint is a top-level step, handled by the driver")
         }
         Op::BeginRollback(ops) => {
             let mut inner_outcomes = Vec::with_capacity(ops.len());
@@ -1559,12 +1564,55 @@ proptest! {
         let mut sql_cache = CacheModel::default();
 
         for (i, op) in ops.iter().enumerate() {
-            let kv_out = apply(&kv, op, &mut |p| kv_cache.check(p, i));
-            let sql_out = apply(&sqlite, op, &mut |p| sql_cache.check(p, i));
-            prop_assert_eq!(
-                &kv_out, &sql_out,
-                "op {} diverged: {:?}",
-                i, op,
+            let (kv_out, sql_out) = if let Op::HeldSavepointDrop(inner_ops) = op {
+                // The session's signer-refusal span: a savepoint held open
+                // while ops run inside, then dropped uncommitted. KV
+                // discards its layer; the sqlite reference discards through
+                // the equivalent erroring savepoint closure.
+                let mut kv_inners = Vec::new();
+                kv.dropped_held_savepoint::<_, StorageError, _>(|| {
+                    for inner in inner_ops {
+                        kv_inners.push(apply(&kv, inner, &mut |p| kv_cache.check(p, i)));
+                    }
+                    Ok(())
+                })
+                .expect("held savepoint");
+                kv_cache.check(&kv, i);
+                let mut sql_inners = Vec::new();
+                let _discarded = sqlite.with_group_savepoint(
+                    &gid(0),
+                    "sp-held",
+                    |inner| -> Result<(), StorageError> {
+                        for inner_op in inner_ops {
+                            sql_inners.push(apply(inner, inner_op, &mut |p| {
+                                sql_cache.check(p, i);
+                            }));
+                        }
+                        Err(StorageError::Backend("held-drop".into()))
+                    },
+                );
+                sql_cache.check(&sqlite, i);
+                (
+                    Outcome::Nested(kv_inners, Ok(())),
+                    Outcome::Nested(sql_inners, Ok(())),
+                )
+            } else {
+                (
+                    apply(&kv, op, &mut |p| kv_cache.check(p, i)),
+                    apply(&sqlite, op, &mut |p| sql_cache.check(p, i)),
+                )
+            };
+            // Inner-step parity does not hold across a held savepoint:
+            // sqlite passes a nested `with_transaction` through to the open
+            // unit, while the KV floor gives it its own layer that rolls back
+            // on `Err` — so a discarded inner write is visible mid-span on
+            // one side only. Final-state parity is still proven by the dump.
+            prop_assert!(
+                matches!(op, Op::HeldSavepointDrop(_)) || kv_out == sql_out,
+                "op {} diverged: {:?}
+kv: {:?}
+sql: {:?}",
+                i, op, kv_out, sql_out,
             );
             prop_assert!(
                 kv_cache.stale.is_none(),

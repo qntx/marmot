@@ -1259,6 +1259,24 @@ mod flow_tests {
                 b.session.group(&gid).is_ok_and(|group| group.is_some()),
                 "the retried ingest joined"
             );
+
+            // The discarded savepoint left nothing cached: the retried
+            // join lands on the inviter's epoch and decrypts fresh
+            // traffic — an `MlsGroup` stale from inside the span could
+            // neither match this epoch nor open this ciphertext. The
+            // generation contract itself is proven by the cache model's
+            // held-savepoint-drop step (tests/model.rs).
+            assert_eq!(
+                snapshot(&b, &gid).epoch,
+                snapshot(&a, &gid).epoch,
+                "the retried join lands on the current epoch"
+            );
+            send_chat(&mut a, &relay, &gid, "after-retry").await;
+            let delivered = sync_member(&mut b, &relay, RELAY, &gid).await;
+            assert!(
+                received(&delivered).contains(&"after-retry".to_owned()),
+                "the retried join decrypts new traffic: {delivered:?}"
+            );
         }
     }
 

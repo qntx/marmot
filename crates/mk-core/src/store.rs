@@ -759,9 +759,10 @@ impl Drop for Savepoint {
         if let Ok(mut inner) = self.store.inner.lock() {
             let mut openmls = false;
             while inner.layers.len() >= self.depth {
-                if let Some(layer) = inner.layers.pop() {
-                    openmls |= layer.openmls_written;
-                }
+                openmls |= inner
+                    .layers
+                    .pop()
+                    .is_some_and(|layer| layer.openmls_written);
             }
             if openmls {
                 inner.openmls_resets = inner.openmls_resets.wrapping_add(1);
