@@ -78,5 +78,6 @@ if (import.meta.main) {
     console.error("rerun `bun run build:wasm`");
     process.exit(1);
   }
-  console.log("stage-wasm: staged paired glue + wasm into dist/");
+  // stderr: as `prepack`, stdout would leak into `npm pack`'s tarball-name output.
+  console.error("stage-wasm: staged paired glue + wasm into dist/");
 }
