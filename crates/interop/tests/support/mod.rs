@@ -37,6 +37,7 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use mk_bridge as _;
@@ -51,6 +52,7 @@ use nostr::prelude::{
 use nostr_sdk::client::Client;
 use nostr_sdk::local_relay::{LocalRelay, RateLimit};
 use serde_json::Value;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 pub const KIND_GROUP_MESSAGE: u16 = 445;
 pub const KIND_GIFT_WRAP: u16 = 1059;
@@ -244,6 +246,138 @@ pub async fn spawn_wnd(home: &Path, socket: &Path, logs: &Path, relay_url: &str)
     }
 }
 
+/// A TCP front that answers NIP-11 relay-information probes itself and
+/// splices every other connection to the `LocalRelay` byte-for-byte.
+/// nostr-sdk's `LocalRelay` serves no relay document; wnd's post-join
+/// history sweep reads it to prove backlog slices complete, so the rig's
+/// public URL is the front's — wnd and the nostr client both dial it.
+/// Aborting the accept loop when the rig drops keeps no task alive.
+#[derive(Debug)]
+struct Nip11Front {
+    url: String,
+    served: Arc<AtomicUsize>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl Nip11Front {
+    /// Bind 127.0.0.1:0 and spawn the accept loop. `backend` is the
+    /// `LocalRelay`'s `host:port`; `document` the relay-information JSON
+    /// body the front serves.
+    async fn bind(backend: String, document: String) -> Self {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind nip11 front");
+        let address = listener.local_addr().expect("front addr");
+        let served = Arc::new(AtomicUsize::new(0));
+        let task = tokio::spawn({
+            let served = served.clone();
+            async move {
+                while let Ok((stream, _)) = listener.accept().await {
+                    tokio::spawn(front_connection(
+                        stream,
+                        backend.clone(),
+                        document.clone(),
+                        served.clone(),
+                    ));
+                }
+            }
+        });
+        Self {
+            url: format!("ws://{address}"),
+            served,
+            task,
+        }
+    }
+}
+
+impl Drop for Nip11Front {
+    #[allow(
+        clippy::print_stderr,
+        reason = "the count reports a test-visible signal on stderr, not a failure"
+    )]
+    fn drop(&mut self) {
+        self.task.abort();
+        eprintln!(
+            "NIP-11 documents served: {}",
+            self.served.load(Ordering::Relaxed)
+        );
+    }
+}
+
+/// Serve one fronted connection: the NIP-11 document for relay-information
+/// probes, a verbatim splice to the `LocalRelay` for everything else. Any
+/// error drops the connection.
+async fn front_connection(
+    mut stream: tokio::net::TcpStream,
+    backend: String,
+    document: String,
+    served: Arc<AtomicUsize>,
+) {
+    let Some(head) = read_head(&mut stream).await else {
+        return;
+    };
+    if is_nip11_probe(&head) {
+        let response = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/nostr+json\r\naccess-control-allow-origin: *\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{document}",
+            document.len()
+        );
+        if stream.write_all(response.as_bytes()).await.is_ok() {
+            served.fetch_add(1, Ordering::Relaxed);
+        }
+        return;
+    }
+    let Ok(mut upstream) = tokio::net::TcpStream::connect(&backend).await else {
+        return;
+    };
+    if upstream.write_all(&head).await.is_err() {
+        return;
+    }
+    drop(tokio::io::copy_bidirectional(&mut stream, &mut upstream).await);
+}
+
+/// Read one HTTP request head through its `\r\n\r\n`; `None` when the peer
+/// closes first or the head exceeds 16 KiB.
+async fn read_head(stream: &mut tokio::net::TcpStream) -> Option<Vec<u8>> {
+    let mut head = Vec::new();
+    let mut chunk = [0_u8; 1024];
+    while !head.windows(4).any(|tail| tail == b"\r\n\r\n") {
+        if head.len() >= 16 * 1024 {
+            return None;
+        }
+        let n = stream.read(&mut chunk).await.ok()?;
+        if n == 0 {
+            return None;
+        }
+        head.extend_from_slice(&chunk[..n]);
+    }
+    Some(head)
+}
+
+/// A relay-information probe: an `Accept` header asking for
+/// `application/nostr+json` and no `Upgrade` header (header names compare
+/// case-insensitively).
+fn is_nip11_probe(head: &[u8]) -> bool {
+    let text = String::from_utf8_lossy(head);
+    let mut accept = false;
+    let mut upgrade = false;
+    for line in text
+        .split("\r\n")
+        .skip(1)
+        .take_while(|line| !line.is_empty())
+    {
+        if let Some((name, value)) = line.split_once(':') {
+            let name = name.trim();
+            if name.eq_ignore_ascii_case("accept") && value.contains("application/nostr+json") {
+                accept = true;
+            }
+            if name.eq_ignore_ascii_case("upgrade") {
+                upgrade = true;
+            }
+        }
+    }
+    accept && !upgrade
+}
+
 /// One full interop rig: in-process relay, nostr client, wnd daemon, and
 /// the wn account (created on first use, KeyPackage published to the
 /// relay).
@@ -251,7 +385,9 @@ pub async fn spawn_wnd(home: &Path, socket: &Path, logs: &Path, relay_url: &str)
 pub struct Rig {
     pub relay: LocalRelay,
     pub client: Client,
-    /// The relay URL as sessions and wn see it (no trailing slash).
+    /// The NIP-11 front URL as sessions and wn see it (no trailing slash):
+    /// document probes are answered there, WebSocket traffic is spliced
+    /// through to `relay`. Under `INTEROP_RELAY=bare` it is `relay`'s own.
     pub url: String,
     pub home: PathBuf,
     pub socket: PathBuf,
@@ -259,6 +395,17 @@ pub struct Rig {
     pub wn_npub: String,
     pub wn_pub: String,
     pub wnd: Wnd,
+    /// `None` under `INTEROP_RELAY=bare`.
+    front: Option<Nip11Front>,
+}
+
+impl Rig {
+    /// NIP-11 relay-information documents the front has served so far.
+    pub fn nip11_documents_served(&self) -> usize {
+        self.front
+            .as_ref()
+            .map_or(0, |front| front.served.load(Ordering::Relaxed))
+    }
 }
 
 /// Start relay + wnd and ensure a wn identity with a published KeyPackage.
@@ -266,21 +413,43 @@ pub async fn rig(test_name: &str) -> Rig {
     assert_wn_version();
     // A real relay's defaults (60 notes/min write cap, 500/filter read cap)
     // would silently reject the bulk-traffic scenarios; lift both while
-    // keeping real NIP-01 storage/ordering semantics.
+    // keeping real NIP-01 storage/ordering semantics. The NIP-11 document
+    // the front serves must tell the truth about that read cap.
+    const MAX_FILTER_LIMIT: usize = 10_000;
     let relay = LocalRelay::builder()
         .rate_limit(RateLimit {
             max_reqs: 500,
             notes_per_minute: 1_000_000,
         })
-        .max_filter_limit(10_000)
+        .max_filter_limit(MAX_FILTER_LIMIT)
         .build();
     relay.run().await.expect("local relay run");
-    let url = relay
+    // nostr-sdk's LocalRelay serves no NIP-11 document; wnd's post-join
+    // history sweep needs one, so the front answers document probes and
+    // passes WebSocket traffic through verbatim.
+    let document = serde_json::json!({
+        "name": "marmot-interop",
+        "supported_nips": [1, 11],
+        "limitation": {"max_limit": MAX_FILTER_LIMIT},
+    });
+    let backend = relay
         .url()
         .await
-        .to_string()
+        .as_str()
+        .strip_prefix("ws://")
+        .expect("local relay ws url")
         .trim_end_matches('/')
         .to_owned();
+    // `INTEROP_RELAY=bare` dials the LocalRelay directly, without the
+    // document — the shape that reproduces White Noise's sweep loss.
+    let front = match std::env::var("INTEROP_RELAY").as_deref() {
+        Ok("bare") => None,
+        Ok("nip11") | Err(_) => Some(Nip11Front::bind(backend.clone(), document.to_string()).await),
+        Ok(other) => panic!("INTEROP_RELAY must be nip11 or bare, got {other}"),
+    };
+    let url = front
+        .as_ref()
+        .map_or_else(|| format!("ws://{backend}"), |front| front.url.clone());
 
     let client = Client::builder().build();
     client
@@ -325,6 +494,7 @@ pub async fn rig(test_name: &str) -> Rig {
         wn_npub,
         wn_pub,
         wnd,
+        front,
     }
 }
 

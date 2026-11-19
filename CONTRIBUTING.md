@@ -151,11 +151,13 @@ WN_BIN=<path>/wn WND_BIN=<path>/wnd \
   bun run --cwd packages/marmot-wasm test:interop
 ```
 
-`INTEROP_RELAY=nip11` (the default) has the in-process relay answer NIP-11
-with `limitation.max_limit` 500, as production relays do; `INTEROP_RELAY=bare`
-serves no NIP-11 — wnd's post-join history sweep then cannot prove a slice
-complete and S2 loses our message in a large share of runs (9/20 on wn
-0.17.0 locally; a White Noise defect, measured by the non-required CI job
+Both suites take `INTEROP_RELAY`. `nip11` (the default) has the in-process
+relay answer NIP-11 with a `limitation.max_limit` (strfry's 500 for the
+TypeScript fake relay, the Rust `LocalRelay`'s configured 10,000 filter
+cap), as production relays do. `bare` serves no NIP-11 — wnd's post-join
+history sweep then cannot prove a slice complete, and S2 of `test:interop`
+loses our message in a large share of runs (9/20 on wn 0.17.0 locally; a
+White Noise defect, measured by the non-required CI job
 `interop-known-upstream`).
 
 ```sh
