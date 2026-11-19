@@ -27,6 +27,7 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
+use dhat as _;
 use hex as _;
 use mk_bridge::BridgeError;
 use mk_bridge::protocol::*;

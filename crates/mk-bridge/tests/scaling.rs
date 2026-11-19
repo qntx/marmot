@@ -28,6 +28,7 @@ mod support;
 
 use std::time::Instant;
 
+use dhat as _;
 use serde as _;
 use thiserror as _;
 use tracing as _;

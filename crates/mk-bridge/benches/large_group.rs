@@ -16,7 +16,13 @@
 //! `LG_ROUNDS` tick/publish rounds once a send queues (default 40),
 //! `LG_ROUND_MS` simulated ms per round (default 15000), `LG_JOIN=0` skips
 //! the invitees' Welcome joins, `LG_ECHO=0` stops the creator ingesting
-//! its own group events back from the relay.
+//! its own group events back from the relay, `LG_RECEIVE` group events
+//! one joined invitee ingests in a single call after the sends (default
+//! 500, `0` skips).
+//!
+//! `MlsGroup::load` calls on the creator are counted per phase of the send
+//! loop (the send call, its publish, its relay echo) through
+//! `mk_core::testing::openmls_group_loads`; the bench runs on one thread.
 
 #![allow(
     clippy::cast_lossless,
@@ -50,8 +56,9 @@ use std::time::Instant;
 
 use mk_bridge::protocol::{
     AppMessage, CreateGroupRequest, IngestRequest, Invitee, NoArgs, OpResult, Request,
-    SendMessageRequest, SendOutcome, SendOutcomeResult, TickedResult,
+    SendMessageRequest, SendOutcome, SendOutcomeResult, SessionEvent, TickedResult,
 };
+use mk_core::testing::openmls_group_loads;
 use serde_json::{Value, json};
 use support::*;
 
@@ -232,6 +239,7 @@ async fn run_n(n: usize) -> Value {
     let round_ms = env_usize("LG_ROUND_MS", 15_000) as u64;
     let join = env_flag("LG_JOIN");
     let echo_on = env_flag("LG_ECHO");
+    let receive = env_usize("LG_RECEIVE", 500);
 
     let mut relay = FakeRelay::new();
     let setup = Instant::now();
@@ -297,13 +305,16 @@ async fn run_n(n: usize) -> Value {
     let create_reasons = reasons::take();
     reasons::take_metadata();
     let rows_after_create = table_stats(&creator.host);
+    let events_before_sends = creator_group_events(&relay, &route);
 
+    let mut loads = [0usize; 3];
     let mut send_ms = Vec::with_capacity(sends);
     let mut outcomes = Vec::with_capacity(sends);
     let mut first_queued = None;
     let mut queued = 0usize;
     for i in 0..sends {
         creator.advance(1_000);
+        let loads_at = openmls_group_loads();
         let start = Instant::now();
         let response = creator
             .call(Request::SendMessage(SendMessageRequest {
@@ -316,6 +327,7 @@ async fn run_n(n: usize) -> Value {
             }))
             .await;
         send_ms.push(ms_since(start));
+        loads[0] += openmls_group_loads() - loads_at;
         let OpResult::SendOutcome(SendOutcomeResult { outcome }) = ok_result(response) else {
             panic!("send result");
         };
@@ -331,11 +343,40 @@ async fn run_n(n: usize) -> Value {
             SendOutcome::Unmapped => "unmapped",
         };
         outcomes.push(label);
+        let loads_at = openmls_group_loads();
         creator.publish(&mut relay).await;
+        loads[1] += openmls_group_loads() - loads_at;
         if echo_on {
+            let loads_at = openmls_group_loads();
             echo(&mut creator, &relay, &route, &mut seen).await;
+            loads[2] += openmls_group_loads() - loads_at;
         }
     }
+    let receipt = if join && receive > 0 && !members.is_empty() {
+        let backlog: Vec<_> = group_events(&relay, &route)
+            .into_iter()
+            .skip(events_before_sends)
+            .take(receive)
+            .collect();
+        let events = backlog.len();
+        let receiver = &mut members[0];
+        let loads_at = openmls_group_loads();
+        let start = Instant::now();
+        let drained = receiver.ingest_and_drain(backlog).await;
+        let receive_ms = ms_since(start);
+        let received = drained
+            .iter()
+            .filter(|event| matches!(event, SessionEvent::MessageReceived { .. }))
+            .count();
+        assert_eq!(received, events, "the receiver gets every message");
+        json!({
+            "events": events,
+            "receive_ms": receive_ms,
+            "group_loads": openmls_group_loads() - loads_at,
+        })
+    } else {
+        Value::Null
+    };
     let send_reasons = reasons::take();
     let send_metadata = metadata_summary(&reasons::take_metadata());
     let rows_after_sends = table_stats(&creator.host);
@@ -394,6 +435,11 @@ async fn run_n(n: usize) -> Value {
         "send_ms": send_ms,
         "send_median_ms": median(&send_ms),
         "send_first_ms": send_ms.first(),
+        "send_group_loads": loads[0],
+        "publish_group_loads": loads[1],
+        "echo_group_loads": loads[2],
+        "group_loads_per_send": loads[0] as f64 / sends.max(1) as f64,
+        "receive": receipt,
         "released_after_rounds": released_after,
         "release_rounds_run": ticks.len(),
         "tick_median_ms": median(&tick_ms),

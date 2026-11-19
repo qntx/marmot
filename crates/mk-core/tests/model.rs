@@ -587,6 +587,7 @@ enum Op {
     MlsDeleteEpochKeys(u8, u8),
     BeginCommit(Vec<Op>),
     BeginRollback(Vec<Op>),
+    HeldSavepointDrop(Vec<Op>),
     SavepointOk(u8, Vec<Op>),
     SavepointErr(u8, Vec<Op>),
     ReadSnapshot(Vec<Op>),
@@ -740,6 +741,7 @@ fn op_strategy() -> impl Strategy<Value = Op> {
             inner.prop_map(|o| o),
             prop::collection::vec(unit_op_strategy(), 1..6).prop_map(Op::BeginCommit),
             prop::collection::vec(unit_op_strategy(), 1..6).prop_map(Op::BeginRollback),
+            prop::collection::vec(unit_op_strategy(), 1..6).prop_map(Op::HeldSavepointDrop),
             (0..GROUPS, prop::collection::vec(unit_op_strategy(), 1..6))
                 .prop_map(|(g, ops)| Op::SavepointOk(g, ops)),
             (0..GROUPS, prop::collection::vec(unit_op_strategy(), 1..6))
@@ -848,11 +850,14 @@ fn mls_delete_global<M: MlsStorage<CURRENT_VERSION>>(mls: &M, slot: u8, k: u8) -
     })
 }
 
-fn apply<S: StorageProvider>(p: &S, op: &Op) -> Outcome
+/// Apply one op, then notify `after` — the engine may cache an `MlsGroup`
+/// after any op at any nesting depth, so the observer runs inside open
+/// units too, not only after the top-level op returns.
+fn apply<S: StorageProvider>(p: &S, op: &Op, after: &mut dyn FnMut(&S)) -> Outcome
 where
     S::Mls: MlsStorage<CURRENT_VERSION>,
 {
-    match op {
+    let outcome = match op {
         Op::PutGroupWithRoster(g, e, m) => {
             unit(p.put_group_with_roster(&group(*g, *e), &members(*m)))
         }
@@ -999,17 +1004,20 @@ where
             let mut inner_outcomes = Vec::with_capacity(ops.len());
             let result: Result<(), StorageError> = p.with_transaction(|inner| {
                 for op in ops {
-                    inner_outcomes.push(apply(inner, op));
+                    inner_outcomes.push(apply(inner, op, after));
                 }
                 Ok(())
             });
             Outcome::Nested(inner_outcomes, result.map_err(|e| kind(&e)))
         }
+        Op::HeldSavepointDrop(_) => {
+            unreachable!("a held savepoint is a top-level step, handled by the driver")
+        }
         Op::BeginRollback(ops) => {
             let mut inner_outcomes = Vec::with_capacity(ops.len());
             let _discarded = p.with_transaction(|inner| -> Result<(), StorageError> {
                 for op in ops {
-                    inner_outcomes.push(apply(inner, op));
+                    inner_outcomes.push(apply(inner, op, after));
                 }
                 Err(StorageError::Backend("rollback".into()))
             });
@@ -1020,7 +1028,7 @@ where
             let result: Result<(), StorageError> =
                 p.with_group_savepoint(&gid(*g), "sp-model", |inner| {
                     for op in ops {
-                        inner_outcomes.push(apply(inner, op));
+                        inner_outcomes.push(apply(inner, op, after));
                     }
                     Ok(())
                 });
@@ -1031,7 +1039,7 @@ where
             let _discarded =
                 p.with_group_savepoint(&gid(*g), "sp-model", |inner| -> Result<(), StorageError> {
                     for op in ops {
-                        inner_outcomes.push(apply(inner, op));
+                        inner_outcomes.push(apply(inner, op, after));
                     }
                     Err(StorageError::Backend("savepoint-err".into()))
                 });
@@ -1041,7 +1049,7 @@ where
             let mut inner_outcomes = Vec::with_capacity(ops.len());
             let result: Result<(), StorageError> = p.with_read_snapshot(|inner| {
                 for op in ops {
-                    inner_outcomes.push(apply(inner, op));
+                    inner_outcomes.push(apply(inner, op, after));
                 }
                 Ok(())
             });
@@ -1074,6 +1082,113 @@ where
         }
         Op::CheckpointRelease(g, name) => {
             unit(p.release_group_state_checkpoint(&gid(*g), &format!("cp-{name}")))
+        }
+    };
+    after(p);
+    outcome
+}
+
+/// The group's complete `OpenMLS` state as `(canonical-name, value)` pairs —
+/// the ten value slots, own leaf nodes, the queued-proposal store, and the
+/// epoch-key-pair slots `0..8`. `dump` stores each pair under its name; the
+/// cache model joins them into one comparable string.
+fn mls_group_state<S: StorageProvider>(p: &S, g: u8) -> Vec<(String, Result<String, String>)>
+where
+    S::Mls: MlsStorage<CURRENT_VERSION>,
+{
+    let mls = mls_gid(g);
+    let m = p.mls_storage();
+    let mut out = Vec::new();
+    for (slot, name) in [
+        (0u8, "tree"),
+        (1, "context"),
+        (2, "state"),
+        (3, "interim"),
+        (4, "confirmation"),
+        (5, "msgsec"),
+        (6, "epochsec"),
+        (7, "joinconf"),
+        (8, "leafidx"),
+        (9, "resumption"),
+    ] {
+        let value: Result<Option<V>, _> = match slot {
+            0 => m.tree::<MlsGroupId, V>(&mls),
+            1 => m.group_context::<MlsGroupId, V>(&mls),
+            2 => m.group_state::<V, MlsGroupId>(&mls),
+            3 => m.interim_transcript_hash::<MlsGroupId, V>(&mls),
+            4 => m.confirmation_tag::<MlsGroupId, V>(&mls),
+            5 => m.message_secrets::<MlsGroupId, V>(&mls),
+            6 => m.group_epoch_secrets::<MlsGroupId, V>(&mls),
+            7 => m.mls_group_join_config::<MlsGroupId, V>(&mls),
+            8 => m.own_leaf_index::<MlsGroupId, V>(&mls),
+            _ => m.resumption_psk_store::<MlsGroupId, V>(&mls),
+        };
+        out.push((
+            format!("mls-{name}-{g}"),
+            value
+                .map(|v| format!("{v:?}"))
+                .map_err(|_| "mls-err".into()),
+        ));
+    }
+    out.push((
+        format!("mls-leaves-{g}"),
+        (m.own_leaf_nodes::<MlsGroupId, V>(&mls))
+            .map(|v| format!("{v:?}"))
+            .map_err(|_| "mls-err".into()),
+    ));
+    out.push((
+        format!("mls-proposals-{g}"),
+        (m.queued_proposals::<MlsGroupId, K, V>(&mls))
+            .map(|v| format!("{v:?}"))
+            .map_err(|_| "mls-err".into()),
+    ));
+    for e in 0..8u8 {
+        out.push((
+            format!("mls-epochkeys-{g}-{e}"),
+            (m.encryption_epoch_key_pairs::<MlsGroupId, K, V>(&mls, &K(e), 0))
+                .map(|v| format!("{v:?}"))
+                .map_err(|_| "mls-err".into()),
+        ));
+    }
+    out
+}
+
+/// The engine's `MlsGroup` cache, modeled against the generation contract:
+/// a cached object is safe to reuse only while the generation stored with
+/// it is still current, so two different `OpenMLS` states observed under
+/// one generation means a take inside a unit — or across a rollback — would
+/// have read stale rows.
+#[derive(Default)]
+struct CacheModel {
+    /// `group index -> (generation, complete OpenMLS state)` last observed.
+    entries: BTreeMap<u8, (u64, String)>,
+    /// First violation: top-level op index, group, and both states.
+    stale: Option<String>,
+}
+
+impl CacheModel {
+    /// Snapshot every group's `OpenMLS` state under the current generation;
+    /// a changed state under an unchanged generation records the first
+    /// stale-read case.
+    fn check<S: StorageProvider>(&mut self, p: &S, op: usize)
+    where
+        S::Mls: MlsStorage<CURRENT_VERSION>,
+    {
+        let Some(now) = p.mls_write_generation() else {
+            return;
+        };
+        for g in 0..GROUPS {
+            let fresh = format!("{:?}", mls_group_state(p, g));
+            if let Some((generation, state)) = self.entries.get(&g)
+                && *generation == now
+                && *state != fresh
+                && self.stale.is_none()
+            {
+                self.stale = Some(format!(
+                    "op {op} group {g}: generation {now} read changed state\nwas: {state}\nnow: {fresh}"
+                ));
+            }
+            self.entries.insert(g, (now, fresh));
         }
     }
 }
@@ -1201,58 +1316,8 @@ where
                 .map(|v| format!("{v:?}"))
                 .map_err(|e| kind(&e)),
         );
-        let mls = mls_gid(g);
-        let m = p.mls_storage();
-        for (slot, name) in [
-            (0u8, "tree"),
-            (1, "context"),
-            (2, "state"),
-            (3, "interim"),
-            (4, "confirmation"),
-            (5, "msgsec"),
-            (6, "epochsec"),
-            (7, "joinconf"),
-            (8, "leafidx"),
-            (9, "resumption"),
-        ] {
-            let value: Result<Option<V>, _> = match slot {
-                0 => m.tree::<MlsGroupId, V>(&mls),
-                1 => m.group_context::<MlsGroupId, V>(&mls),
-                2 => m.group_state::<V, MlsGroupId>(&mls),
-                3 => m.interim_transcript_hash::<MlsGroupId, V>(&mls),
-                4 => m.confirmation_tag::<MlsGroupId, V>(&mls),
-                5 => m.message_secrets::<MlsGroupId, V>(&mls),
-                6 => m.group_epoch_secrets::<MlsGroupId, V>(&mls),
-                7 => m.mls_group_join_config::<MlsGroupId, V>(&mls),
-                8 => m.own_leaf_index::<MlsGroupId, V>(&mls),
-                _ => m.resumption_psk_store::<MlsGroupId, V>(&mls),
-            };
-            put(
-                &format!("mls-{name}-{g}"),
-                value
-                    .map(|v| format!("{v:?}"))
-                    .map_err(|_| "mls-err".into()),
-            );
-        }
-        put(
-            &format!("mls-leaves-{g}"),
-            (m.own_leaf_nodes::<MlsGroupId, V>(&mls))
-                .map(|v| format!("{v:?}"))
-                .map_err(|_| "mls-err".into()),
-        );
-        put(
-            &format!("mls-proposals-{g}"),
-            (m.queued_proposals::<MlsGroupId, K, V>(&mls))
-                .map(|v| format!("{v:?}"))
-                .map_err(|_| "mls-err".into()),
-        );
-        for e in 0..8u8 {
-            put(
-                &format!("mls-epochkeys-{g}-{e}"),
-                (m.encryption_epoch_key_pairs::<MlsGroupId, K, V>(&mls, &K(e), 0))
-                    .map(|v| format!("{v:?}"))
-                    .map_err(|_| "mls-err".into()),
-            );
+        for (name, value) in mls_group_state(p, g) {
+            put(&name, value);
         }
     }
 
@@ -1495,14 +1560,69 @@ proptest! {
         let host = Arc::new(TestHost::default());
         let kv = KvStorageProvider::open(Vec::new(), host.clone()).expect("kv open");
         let sqlite = SqliteAccountStorage::in_memory_for_test().expect("sqlite open");
+        let mut kv_cache = CacheModel::default();
+        let mut sql_cache = CacheModel::default();
 
         for (i, op) in ops.iter().enumerate() {
-            let kv_out = apply(&kv, op);
-            let sql_out = apply(&sqlite, op);
-            prop_assert_eq!(
-                &kv_out, &sql_out,
-                "op {} diverged: {:?}",
-                i, op,
+            let (kv_out, sql_out) = if let Op::HeldSavepointDrop(inner_ops) = op {
+                // The session's signer-refusal span: a savepoint held open
+                // while ops run inside, then dropped uncommitted. KV
+                // discards its layer; the sqlite reference discards through
+                // the equivalent erroring savepoint closure.
+                let mut kv_inners = Vec::new();
+                kv.dropped_held_savepoint::<_, StorageError, _>(|| {
+                    for inner in inner_ops {
+                        kv_inners.push(apply(&kv, inner, &mut |p| kv_cache.check(p, i)));
+                    }
+                    Ok(())
+                })
+                .expect("held savepoint");
+                kv_cache.check(&kv, i);
+                let mut sql_inners = Vec::new();
+                let _discarded = sqlite.with_group_savepoint(
+                    &gid(0),
+                    "sp-held",
+                    |inner| -> Result<(), StorageError> {
+                        for inner_op in inner_ops {
+                            sql_inners.push(apply(inner, inner_op, &mut |p| {
+                                sql_cache.check(p, i);
+                            }));
+                        }
+                        Err(StorageError::Backend("held-drop".into()))
+                    },
+                );
+                sql_cache.check(&sqlite, i);
+                (
+                    Outcome::Nested(kv_inners, Ok(())),
+                    Outcome::Nested(sql_inners, Ok(())),
+                )
+            } else {
+                (
+                    apply(&kv, op, &mut |p| kv_cache.check(p, i)),
+                    apply(&sqlite, op, &mut |p| sql_cache.check(p, i)),
+                )
+            };
+            // Inner-step parity does not hold across a held savepoint:
+            // sqlite passes a nested `with_transaction` through to the open
+            // unit, while the KV floor gives it its own layer that rolls back
+            // on `Err` — so a discarded inner write is visible mid-span on
+            // one side only. Final-state parity is still proven by the dump.
+            prop_assert!(
+                matches!(op, Op::HeldSavepointDrop(_)) || kv_out == sql_out,
+                "op {} diverged: {:?}
+kv: {:?}
+sql: {:?}",
+                i, op, kv_out, sql_out,
+            );
+            prop_assert!(
+                kv_cache.stale.is_none(),
+                "kv served a cached group whose generation did not move: {:?}",
+                kv_cache.stale,
+            );
+            prop_assert!(
+                sql_cache.stale.is_none(),
+                "sqlite served a cached group whose generation did not move: {:?}",
+                sql_cache.stale,
             );
         }
 

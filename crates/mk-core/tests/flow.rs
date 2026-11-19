@@ -1259,6 +1259,24 @@ mod flow_tests {
                 b.session.group(&gid).is_ok_and(|group| group.is_some()),
                 "the retried ingest joined"
             );
+
+            // The discarded savepoint left nothing cached: the retried
+            // join lands on the inviter's epoch and decrypts fresh
+            // traffic — an `MlsGroup` stale from inside the span could
+            // neither match this epoch nor open this ciphertext. The
+            // generation contract itself is proven by the cache model's
+            // held-savepoint-drop step (tests/model.rs).
+            assert_eq!(
+                snapshot(&b, &gid).epoch,
+                snapshot(&a, &gid).epoch,
+                "the retried join lands on the current epoch"
+            );
+            send_chat(&mut a, &relay, &gid, "after-retry").await;
+            let delivered = sync_member(&mut b, &relay, RELAY, &gid).await;
+            assert!(
+                received(&delivered).contains(&"after-retry".to_owned()),
+                "the retried join decrypts new traffic: {delivered:?}"
+            );
         }
     }
 
@@ -1999,5 +2017,139 @@ mod flow_tests {
             .await
             .expect("report");
         assert_eq!(resolved, PublishResolution::Complete);
+    }
+
+    fn app_message(content: &str) -> mk_core::AppMessage {
+        mk_core::AppMessage {
+            kind: 9,
+            tags: Vec::new(),
+            content: content.to_owned(),
+        }
+    }
+
+    /// The engine's cached `MlsGroup` survives every step that writes no
+    /// `OpenMLS` rows — the send, its publish, the sender's own-echo ingest,
+    /// and a peer's application message — counted at the one `OpenMLS` read
+    /// only `MlsGroup::load` performs.
+    #[tokio::test(flavor = "current_thread")]
+    async fn unchanged_openmls_rows_do_not_reload_the_group() {
+        let relay = FakeRelay::new();
+        let mut a = open_member().await;
+        let mut b = open_member().await;
+        publish_identity(&mut a, &relay, RELAY).await;
+        publish_identity(&mut b, &relay, RELAY).await;
+        let gid = group_with(&mut a, &relay, &[&b], "cache-flow").await;
+        join_via_welcome(&mut b, &relay).await;
+        sync_member(&mut a, &relay, RELAY, &gid).await;
+        sync_member(&mut b, &relay, RELAY, &gid).await;
+
+        // Warm up: one send → publish → own-echo ingest → peer delivery
+        // leaves both engines holding their cached groups.
+        send_chat(&mut a, &relay, &gid, "warm").await;
+        let route = a.route_hex(&gid);
+        ingest_backlog(&mut a, &group_events(&relay, RELAY, &route)).await;
+        let delivered = ingest_backlog(&mut b, &group_events(&relay, RELAY, &route)).await;
+        assert!(received(&delivered).contains(&"warm".to_owned()));
+
+        let loads = mk_core::testing::openmls_group_loads();
+        macro_rules! assert_no_load {
+            ($step:literal) => {
+                assert_eq!(
+                    mk_core::testing::openmls_group_loads(),
+                    loads,
+                    "{} reloaded the group ({} -> {})",
+                    $step,
+                    loads,
+                    mk_core::testing::openmls_group_loads()
+                );
+            };
+        }
+
+        // (1) A second send writes message/outbound rows only.
+        a.session
+            .send_message(&gid, app_message("second"))
+            .await
+            .expect("send_message");
+        assert_no_load!("send_message");
+
+        // (2) Publishing it resolves without touching `OpenMLS` state.
+        let resolution =
+            publish_one(&mut a, &relay, mk_core::OutboundPurpose::ApplicationMessage).await;
+        assert_eq!(resolution, PublishResolution::Complete);
+        assert_no_load!("publish/report");
+
+        // (3) A ingests its own echo, then sends: still nothing to reload.
+        ingest_backlog(&mut a, &group_events(&relay, RELAY, &route)).await;
+        a.session
+            .send_message(&gid, app_message("third"))
+            .await
+            .expect("send_message");
+        assert_no_load!("own-echo ingest + send");
+
+        // (4) B sends; A ingests B's application message, then sends.
+        send_chat(&mut b, &relay, &gid, "from-b").await;
+        let inbound = ingest_backlog(&mut a, &group_events(&relay, RELAY, &route)).await;
+        assert!(received(&inbound).contains(&"from-b".to_owned()));
+        a.session
+            .send_message(&gid, app_message("fourth"))
+            .await
+            .expect("send_message");
+        assert_no_load!("peer-message ingest + send");
+
+        // B's first inbound batch ("second") and its second consecutive
+        // inbound ("third"/"fourth") add no load either.
+        let first = ingest_backlog(&mut b, &group_events(&relay, RELAY, &route)).await;
+        assert!(received(&first).contains(&"second".to_owned()));
+        flush(&mut a, &relay).await;
+        let second = ingest_backlog(&mut b, &group_events(&relay, RELAY, &route)).await;
+        let got = received(&second);
+        assert!(
+            got.contains(&"third".to_owned()) && got.contains(&"fourth".to_owned()),
+            "B receives both of A's later sends: {got:?}"
+        );
+        assert_no_load!("B's consecutive inbound application messages");
+    }
+
+    /// A commit — here a profile rename — moves the generation and evicts
+    /// the cached `MlsGroup`; the next send and the peer's decrypt across
+    /// the commit boundary stay coherent.
+    #[tokio::test(flavor = "current_thread")]
+    async fn send_after_commit_stays_coherent() {
+        let relay = FakeRelay::new();
+        let mut a = open_member().await;
+        let mut b = open_member().await;
+        publish_identity(&mut a, &relay, RELAY).await;
+        publish_identity(&mut b, &relay, RELAY).await;
+        let gid = group_with(&mut a, &relay, &[&b], "commit-flow").await;
+        join_via_welcome(&mut b, &relay).await;
+        sync_member(&mut a, &relay, RELAY, &gid).await;
+        sync_member(&mut b, &relay, RELAY, &gid).await;
+        send_chat(&mut a, &relay, &gid, "pre").await;
+        sync_member(&mut b, &relay, RELAY, &gid).await;
+
+        let loads = mk_core::testing::openmls_group_loads();
+        a.session
+            .update_group_profile(&gid, Some("renamed".to_owned()), None)
+            .await
+            .expect("update_group_profile");
+        let resolution = publish_one(&mut a, &relay, mk_core::OutboundPurpose::Commit).await;
+        assert_eq!(resolution, PublishResolution::Confirmed);
+        let commit_loads = mk_core::testing::openmls_group_loads() - loads;
+        eprintln!("group loads across staged+confirmed commit: {commit_loads}");
+
+        send_chat(&mut a, &relay, &gid, "post-rename").await;
+        let b_route = b.route_hex(&gid);
+        let delivered = ingest_backlog(&mut b, &group_events(&relay, RELAY, &b_route)).await;
+        let got = received(&delivered);
+        assert!(
+            got.contains(&"post-rename".to_owned()),
+            "B decrypts across the commit: {got:?}"
+        );
+        assert_eq!(snapshot(&b, &gid).name, "renamed");
+        assert_eq!(
+            snapshot(&a, &gid).epoch,
+            snapshot(&b, &gid).epoch,
+            "both sides land on the post-commit epoch"
+        );
     }
 }

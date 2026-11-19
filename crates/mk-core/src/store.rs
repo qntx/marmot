@@ -30,17 +30,31 @@ use crate::kv::{CommitSeq, KvBatch, KvHost, KvOp};
 
 type Overlay = BTreeMap<Vec<u8>, Option<Vec<u8>>>;
 
+/// One open write unit's uncommitted state.
+struct Layer {
+    /// Row edits not yet merged into the parent or committed.
+    rows: Overlay,
+    /// Callbacks queued for the outermost commit.
+    callbacks: Vec<Box<dyn FnOnce() + Send + 'static>>,
+    /// The unit wrote at least one `OpenMLS` row: discarding the layer is a
+    /// state change the generation's reset half records.
+    openmls_written: bool,
+}
+
 struct Inner {
     /// Committed mirror of every durable row.
     rows: BTreeMap<Vec<u8>, Vec<u8>>,
     /// Uncommitted layers, bottom to top.
-    overlays: Vec<Overlay>,
-    /// Per-layer after-commit callbacks, parallel to `overlays`.
-    callbacks: Vec<Vec<Box<dyn FnOnce() + Send + 'static>>>,
+    layers: Vec<Layer>,
     /// Batches emitted so far; `seq` of the next batch is `batches + 1`.
     batches: u64,
-    /// Count of committed batches (the engine's cache-invalidation counter).
-    write_gen: u64,
+    /// Writes to `OpenMLS` rows so far, counted when the write lands —
+    /// committed or not (the low half of the engine's write generation).
+    openmls_writes: u64,
+    /// `OpenMLS` state changes no cached object could have written through:
+    /// discarded layers that held an `OpenMLS` write, and group `OpenMLS`
+    /// restores (the high half of the generation).
+    openmls_resets: u64,
     /// Monotonic insertion-order counter, mirrored from `META_SEQUENCE`.
     sequence: u64,
     /// While `true`, every write path fails: `with_read_snapshot`'s
@@ -90,10 +104,10 @@ impl KvStore {
                 host,
                 inner: Arc::new(Mutex::new(Inner {
                     rows: BTreeMap::new(),
-                    overlays: Vec::new(),
-                    callbacks: Vec::new(),
+                    layers: Vec::new(),
                     batches: 0,
-                    write_gen: 0,
+                    openmls_writes: 0,
+                    openmls_resets: 0,
                     sequence: 0,
                     read_only: false,
                     floor: 0,
@@ -143,10 +157,10 @@ impl KvStore {
             host,
             inner: Arc::new(Mutex::new(Inner {
                 rows,
-                overlays: Vec::new(),
-                callbacks: Vec::new(),
+                layers: Vec::new(),
                 batches: 0,
-                write_gen: 0,
+                openmls_writes: 0,
+                openmls_resets: 0,
                 sequence,
                 read_only: false,
                 floor: 0,
@@ -184,7 +198,7 @@ impl KvStore {
     {
         {
             let mut inner = self.lock().map_err(E::from)?;
-            if inner.overlays.len() > inner.floor {
+            if inner.layers.len() > inner.floor {
                 drop(inner);
                 return f();
             }
@@ -192,8 +206,11 @@ impl KvStore {
             // `with_transaction` inside `query_only` runs the callback too;
             // each individual write inside fails at `Inner::write` (the
             // `query_only` equivalent) rather than the scope itself erroring.
-            inner.overlays.push(BTreeMap::new());
-            inner.callbacks.push(Vec::new());
+            inner.layers.push(Layer {
+                rows: BTreeMap::new(),
+                callbacks: Vec::new(),
+                openmls_written: false,
+            });
         }
         // The guard pops the overlay on drop — covering `Err` below *and* any
         // unwind through `f` — unless `commit` disarms it first.
@@ -210,7 +227,7 @@ impl KvStore {
     pub(crate) fn in_unit(&self) -> bool {
         self.inner
             .lock()
-            .is_ok_and(|inner| !inner.overlays.is_empty())
+            .is_ok_and(|inner| !inner.layers.is_empty())
     }
 
     /// Open an owning savepoint that can be held across `.await` — the
@@ -220,21 +237,25 @@ impl KvStore {
     /// layer, rolls back on `Err`, merges into the savepoint on `Ok`), and
     /// [`KvStore::fence_writes`] can refuse every later write for the span.
     /// [`Savepoint::commit`] merges/commits the layer exactly like an outermost
-    /// unit; dropping without commit rolls it back and bumps `write_gen`, so
-    /// group state the engine cached inside the rolled-back unit is
-    /// invalidated.
+    /// unit; dropping without commit rolls it back and, when the span held an
+    /// `OpenMLS` write, moves the generation's reset half — the same rule as
+    /// every other discarded layer, so group state the engine cached inside
+    /// the rolled-back unit is invalidated.
     ///
     /// # Errors
     /// [`StorageError`] on lock poisoning.
     pub(crate) fn begin_savepoint(&self) -> StorageResult<Savepoint> {
         let mut inner = self.lock()?;
-        inner.overlays.push(BTreeMap::new());
-        inner.callbacks.push(Vec::new());
+        inner.layers.push(Layer {
+            rows: BTreeMap::new(),
+            callbacks: Vec::new(),
+            openmls_written: false,
+        });
         let prev_floor = inner.floor;
-        inner.floor = inner.overlays.len();
+        inner.floor = inner.layers.len();
         Ok(Savepoint {
             store: self.clone(),
-            depth: inner.overlays.len(),
+            depth: inner.layers.len(),
             prev_floor,
             armed: true,
         })
@@ -261,8 +282,11 @@ impl KvStore {
     {
         {
             let mut inner = self.lock().map_err(E::from)?;
-            inner.overlays.push(BTreeMap::new());
-            inner.callbacks.push(Vec::new());
+            inner.layers.push(Layer {
+                rows: BTreeMap::new(),
+                callbacks: Vec::new(),
+                openmls_written: false,
+            });
         }
         let mut guard = LayerGuard {
             store: self,
@@ -318,10 +342,10 @@ impl KvStore {
     pub(crate) fn after_commit(&self, callback: Box<dyn FnOnce() + Send + 'static>) {
         let mut callback = Some(callback);
         if let Ok(mut inner) = self.inner.lock()
-            && let Some(queue) = inner.callbacks.last_mut()
+            && let Some(layer) = inner.layers.last_mut()
             && let Some(callback) = callback.take()
         {
-            queue.push(callback);
+            layer.callbacks.push(callback);
         }
         if let Some(callback) = callback {
             callback();
@@ -446,13 +470,22 @@ impl KvStore {
         )
     }
 
-    /// Committed-batch count: the engine's cache-invalidation counter.
-    /// Bumped once per emitted batch — a strict over-approximation of
-    /// `storage-sqlite`'s OpenMLS-write counter (which also counts unrelated
-    /// commits through `PRAGMA data_version`), and over-invalidation is always
-    /// safe.
-    pub(crate) fn write_generation(&self) -> StorageResult<u64> {
-        Ok(self.lock()?.write_gen)
+    /// The engine's write generation: `openmls_resets` in the high half,
+    /// `openmls_writes` in the low half. The contract each half carries —
+    /// and the engine assumptions it answers — is documented at
+    /// `KvStorageProvider::mls_write_generation` (provider.rs).
+    pub(crate) fn mls_write_generation(&self) -> StorageResult<u64> {
+        let inner = self.lock()?;
+        Ok(((inner.openmls_resets & 0xffff_ffff) << 32) | (inner.openmls_writes & 0xffff_ffff))
+    }
+
+    /// A group's `OpenMLS` rows were restored from an image — a change no
+    /// cached object could have written through, so the reset half moves.
+    pub(crate) fn note_openmls_restore(&self) -> StorageResult<()> {
+        let mut inner = self.lock()?;
+        inner.openmls_resets = inner.openmls_resets.wrapping_add(1);
+        drop(inner);
+        Ok(())
     }
 
     /// The last emitted batch sequence, for the session durability gate.
@@ -485,8 +518,8 @@ fn range_is_empty(range: &(Bound<Vec<u8>>, Bound<Vec<u8>>)) -> bool {
 impl Inner {
     /// Read `key` through the overlay stack into committed state.
     fn get(&self, key: &[u8]) -> Option<Vec<u8>> {
-        for overlay in self.overlays.iter().rev() {
-            if let Some(entry) = overlay.get(key) {
+        for layer in self.layers.iter().rev() {
+            if let Some(entry) = layer.rows.get(key) {
                 return entry.clone();
             }
         }
@@ -504,8 +537,8 @@ impl Inner {
             .range(range.clone())
             .map(|(key, _)| key.clone())
             .collect();
-        for overlay in &self.overlays {
-            merge_overlay_keys(&mut out, overlay, range);
+        for layer in &self.layers {
+            merge_overlay_keys(&mut out, &layer.rows, range);
         }
         out.into_iter().collect()
     }
@@ -513,10 +546,10 @@ impl Inner {
     /// The merged verdict for a committed key: the topmost overlay entry for
     /// it wins, otherwise the committed row is live.
     fn key_is_live(&self, key: &[u8]) -> bool {
-        self.overlays
+        self.layers
             .iter()
             .rev()
-            .find_map(|overlay| overlay.get(key))
+            .find_map(|layer| layer.rows.get(key))
             .is_none_or(Option::is_some)
     }
 
@@ -540,17 +573,19 @@ impl Inner {
     /// each key is settled once.
     fn overlay_only_live_key(&self, range: &(Bound<Vec<u8>>, Bound<Vec<u8>>)) -> bool {
         let mut resolved = BTreeSet::new();
-        self.overlays
+        self.layers
             .iter()
             .rev()
-            .flat_map(|overlay| overlay.range(range.clone()))
+            .flat_map(|layer| layer.rows.range(range.clone()))
             .any(|(key, entry)| {
                 !self.rows.contains_key(key) && resolved.insert(key) && entry.is_some()
             })
     }
 
     /// Write into the top overlay, or commit a bare unit when the stack is
-    /// empty.
+    /// empty. An `OpenMLS` row moves the write count at land time —
+    /// committed or not — and marks the open unit so its discard counts
+    /// as a reset.
     fn write(
         &mut self,
         host: &dyn KvHost,
@@ -565,8 +600,14 @@ impl Inner {
                 "kv write inside a read snapshot".into(),
             ));
         }
-        if let Some(overlay) = self.overlays.last_mut() {
-            overlay.insert(key, value);
+        if keys::is_openmls_row(&key) {
+            self.openmls_writes = self.openmls_writes.wrapping_add(1);
+            if let Some(layer) = self.layers.last_mut() {
+                layer.openmls_written = true;
+            }
+        }
+        if let Some(layer) = self.layers.last_mut() {
+            layer.rows.insert(key, value);
         } else {
             let mut pending = BTreeMap::new();
             pending.insert(key, value);
@@ -580,18 +621,16 @@ impl Inner {
     fn absorb(
         &mut self,
         host: &dyn KvHost,
-        overlay: Overlay,
-        queued: Vec<Box<dyn FnOnce() + Send + 'static>>,
+        layer: Layer,
     ) -> Vec<Box<dyn FnOnce() + Send + 'static>> {
-        if let Some(parent) = self.overlays.last_mut() {
-            parent.extend(overlay);
-            if let Some(queue) = self.callbacks.last_mut() {
-                queue.extend(queued);
-            }
+        if let Some(parent) = self.layers.last_mut() {
+            parent.rows.extend(layer.rows);
+            parent.callbacks.extend(layer.callbacks);
+            parent.openmls_written |= layer.openmls_written;
             return Vec::new();
         }
-        self.commit_pending(host, overlay);
-        queued
+        self.commit_pending(host, layer.rows);
+        layer.callbacks
     }
 
     /// Merge `pending` into committed state and emit one batch. Emits nothing
@@ -611,7 +650,6 @@ impl Inner {
             }
         }
         self.batches += 1;
-        self.write_gen += 1;
         // `commit` runs while the lock is held: that is what guarantees the
         // host observes batches strictly in seq order.
         host.commit(KvBatch {
@@ -635,11 +673,10 @@ impl LayerGuard<'_> {
         self.armed = false;
         let callbacks = {
             let mut inner = self.store.lock()?;
-            let Some(overlay) = inner.overlays.pop() else {
+            let Some(layer) = inner.layers.pop() else {
                 return Err(StorageError::Backend("kv transaction layer missing".into()));
             };
-            let queued = inner.callbacks.pop().unwrap_or_default();
-            inner.absorb(self.store.host.as_ref(), overlay, queued)
+            inner.absorb(self.store.host.as_ref(), layer)
         };
         // Callbacks run after the batch is committed and the lock released.
         for callback in callbacks {
@@ -654,9 +691,11 @@ impl Drop for LayerGuard<'_> {
         if !self.armed {
             return;
         }
-        if let Ok(mut inner) = self.store.inner.lock() {
-            inner.overlays.pop();
-            inner.callbacks.pop();
+        if let Ok(mut inner) = self.store.inner.lock()
+            && let Some(layer) = inner.layers.pop()
+            && layer.openmls_written
+        {
+            inner.openmls_resets = inner.openmls_resets.wrapping_add(1);
         }
     }
 }
@@ -666,7 +705,7 @@ impl Drop for LayerGuard<'_> {
 /// a `KvStore` clone, so it can be held across `.await`.
 pub(crate) struct Savepoint {
     store: KvStore,
-    /// `overlays.len()` after this savepoint's layer was pushed; the layer
+    /// `layers.len()` after this savepoint's layer was pushed; the layer
     /// sits at index `depth - 1`.
     depth: usize,
     /// The `transact` floor in effect before this savepoint opened.
@@ -686,16 +725,15 @@ impl Savepoint {
     pub(crate) fn commit(mut self) -> StorageResult<()> {
         let callbacks = {
             let mut inner = self.store.lock()?;
-            if inner.overlays.len() != self.depth {
+            if inner.layers.len() != self.depth {
                 return Err(StorageError::Backend(
                     "kv savepoint layers unbalanced".into(),
                 ));
             }
-            let Some(overlay) = inner.overlays.pop() else {
+            let Some(layer) = inner.layers.pop() else {
                 return Err(StorageError::Backend("kv savepoint layer missing".into()));
             };
-            let queued = inner.callbacks.pop().unwrap_or_default();
-            let run = inner.absorb(self.store.host.as_ref(), overlay, queued);
+            let run = inner.absorb(self.store.host.as_ref(), layer);
             inner.floor = self.prev_floor;
             inner.write_fence = false;
             run
@@ -709,19 +747,26 @@ impl Savepoint {
 }
 
 impl Drop for Savepoint {
-    /// Rollback: discard the savepoint's layer plus anything left above it,
-    /// and bump `write_gen` so group state cached inside the rolled-back
-    /// unit is invalidated. Covers `Err` propagation and unwinding alike.
+    /// Rollback: discard the savepoint's layer plus anything left above it.
+    /// A discarded layer that held an `OpenMLS` write moves the generation's
+    /// reset half — the same rule as every other rollback — so group state
+    /// the engine cached inside the rolled-back unit is invalidated. Covers
+    /// `Err` propagation and unwinding alike.
     fn drop(&mut self) {
         if !self.armed {
             return;
         }
         if let Ok(mut inner) = self.store.inner.lock() {
-            while inner.overlays.len() >= self.depth {
-                inner.overlays.pop();
-                inner.callbacks.pop();
+            let mut openmls = false;
+            while inner.layers.len() >= self.depth {
+                openmls |= inner
+                    .layers
+                    .pop()
+                    .is_some_and(|layer| layer.openmls_written);
             }
-            inner.write_gen += 1;
+            if openmls {
+                inner.openmls_resets = inner.openmls_resets.wrapping_add(1);
+            }
             inner.floor = self.prev_floor;
             inner.write_fence = false;
         }
@@ -973,18 +1018,14 @@ mod tests {
     }
 
     #[test]
-    fn dropped_savepoint_rolls_back_and_bumps_generation() {
+    fn dropped_savepoint_rolls_back_and_moves_generation_on_openmls() {
         let store = open();
         put(&store, b"k1");
-        let before = store.write_generation().unwrap();
+        let before = store.mls_write_generation().unwrap();
         {
+            // A span holding no OpenMLS write leaves the generation alone.
             let savepoint = store.begin_savepoint().unwrap();
             put(&store, b"k9");
-            assert_eq!(
-                store.keys_in(all_range()).unwrap(),
-                vec![b"k1".to_vec(), b"k9".to_vec()],
-                "writes are visible inside the span"
-            );
             drop(savepoint);
         }
         assert_eq!(
@@ -993,9 +1034,20 @@ mod tests {
             "a dropped savepoint leaves no trace"
         );
         assert_eq!(
-            store.write_generation().unwrap(),
-            before + 1,
-            "rollback bumps the generation to invalidate cached group state"
+            store.mls_write_generation().unwrap(),
+            before,
+            "no OpenMLS write inside the span, no invalidation"
+        );
+        {
+            // An OpenMLS row inside the span makes its discard a reset.
+            let savepoint = store.begin_savepoint().unwrap();
+            put(&store, &keys::key(Table::OpenMlsValue, &[b"g"]));
+            drop(savepoint);
+        }
+        assert_eq!(
+            store.mls_write_generation().unwrap(),
+            before + (1 << 32) + 1,
+            "one OpenMLS write landed (low half) and its span was discarded (high half)"
         );
         assert!(!store.in_unit());
     }

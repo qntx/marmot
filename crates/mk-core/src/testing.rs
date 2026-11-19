@@ -166,6 +166,25 @@ impl KvStorageProvider {
     pub fn interned_description_count(&self) -> usize {
         self.interned_count()
     }
+
+    /// Run `f` inside a held savepoint — the session's signer-refusal
+    /// span — then drop the guard uncommitted. A discarded span that held
+    /// an `OpenMLS` write moves the generation's reset half, like every
+    /// other rolled-back layer.
+    ///
+    /// # Errors
+    /// `f`'s error, or [`cgka_traits::storage::StorageError`] on lock
+    /// poisoning.
+    pub fn dropped_held_savepoint<T, E, F>(&self, f: F) -> Result<T, E>
+    where
+        E: From<cgka_traits::storage::StorageError>,
+        F: FnOnce() -> Result<T, E>,
+    {
+        let savepoint = self.store().begin_savepoint().map_err(E::from)?;
+        let out = f();
+        drop(savepoint);
+        out
+    }
 }
 
 /// A manually-driven [`Clock`].
@@ -358,6 +377,14 @@ impl ProofRequest {
     pub fn check(&self, signed: &Event) -> Result<[u8; 64], crate::ProofError> {
         crate::session::check_account_proof(self.account, &self.request, signed)
     }
+}
+
+/// `MlsGroup::load` calls made on the current thread so far, counted at
+/// the one `OpenMLS` read only a load performs. Compare two readings taken
+/// on the thread that drives the session.
+#[must_use]
+pub fn openmls_group_loads() -> usize {
+    crate::mls::group_loads()
 }
 
 /// Require the stored index rows to match what the `Message` rows imply.
