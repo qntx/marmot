@@ -13,6 +13,8 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
+use crate::store::KvStore;
+
 use cgka_engine::account_identity_proof::{
     AccountIdentityProofRequest, AccountIdentityProofSigner,
 };
@@ -83,17 +85,101 @@ fn signer_failed(error: SignerError) -> MarmotSignerError {
 
 const NIP04_UNSUPPORTED: &str = "nip04 unsupported";
 
+/// The first verdict an armed span observed: which way a `nip44_decrypt`
+/// call ended while the latch was armed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SignerVerdict {
+    /// [`SignerError::Refused`]
+    Refused,
+    /// [`SignerError::Failed`]
+    Failed,
+}
+
+/// Shared latch between `Session` (arming it around a kind-1059 ingest
+/// span) and [`SignerAdapter`] (recording `nip44_decrypt` failures into
+/// it). On the first recorded verdict it fences the store's writes, so
+/// nothing written after a refused unwrap can reach durable state and the
+/// whole span can be rolled back and reported as retryable instead of
+/// poisoned as a permanent rejection.
+pub(crate) struct SignerLatch {
+    store: KvStore,
+    state: Mutex<LatchState>,
+}
+
+#[derive(Default)]
+struct LatchState {
+    armed: bool,
+    verdict: Option<SignerVerdict>,
+}
+
+impl SignerLatch {
+    pub(crate) const fn new(store: KvStore) -> Self {
+        Self {
+            store,
+            state: Mutex::new(LatchState {
+                armed: false,
+                verdict: None,
+            }),
+        }
+    }
+
+    fn state(&self) -> std::sync::MutexGuard<'_, LatchState> {
+        match self.state.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+
+    /// Open a span; clears any earlier verdict.
+    pub(crate) fn arm(&self) {
+        let mut state = self.state();
+        state.armed = true;
+        state.verdict = None;
+    }
+
+    /// Close the span; the recorded verdict stays readable until the next
+    /// `arm`.
+    pub(crate) fn disarm(&self) {
+        self.state().armed = false;
+    }
+
+    /// The first verdict recorded this span, if any.
+    pub(crate) fn verdict(&self) -> Option<SignerVerdict> {
+        self.state().verdict
+    }
+
+    /// Record `verdict` while armed (first one wins) and fence the store so
+    /// no write after the refused unwrap can land.
+    fn record(&self, verdict: SignerVerdict) {
+        {
+            let mut state = self.state();
+            if !state.armed {
+                return;
+            }
+            state.verdict.get_or_insert(verdict);
+        }
+        self.store.fence_writes();
+    }
+}
+
+impl fmt::Debug for SignerLatch {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SignerLatch").finish_non_exhaustive()
+    }
+}
+
 /// [`MarmotNostrSigner`] over [`AccountSigner`]. `nip04_*` returns a typed
 /// refusal: NIP-59 Welcome wrap/peel exercises only `sign_event` and
 /// `nip44_*`, so the refusal can never be hit by the production path (a test
 /// counts calls to prove that).
 pub(crate) struct SignerAdapter {
     inner: Arc<dyn AccountSigner>,
+    latch: Arc<SignerLatch>,
 }
 
 impl SignerAdapter {
-    pub(crate) fn new(inner: Arc<dyn AccountSigner>) -> Self {
-        Self { inner }
+    pub(crate) fn new(inner: Arc<dyn AccountSigner>, latch: Arc<SignerLatch>) -> Self {
+        Self { inner, latch }
     }
 }
 
@@ -162,12 +248,19 @@ impl MarmotNostrSigner for SignerAdapter {
         payload: &'a str,
     ) -> SignerFuture<'a, Result<String, MarmotSignerError>> {
         let inner = Arc::clone(&self.inner);
+        let latch = Arc::clone(&self.latch);
         Box::pin(async move {
             let peer = nostr_account(public_key)?;
-            inner
-                .nip44_decrypt(&peer, payload)
-                .await
-                .map_err(signer_failed)
+            match inner.nip44_decrypt(&peer, payload).await {
+                Ok(text) => Ok(text),
+                Err(error) => {
+                    latch.record(match &error {
+                        SignerError::Refused => SignerVerdict::Refused,
+                        SignerError::Failed(_) => SignerVerdict::Failed,
+                    });
+                    Err(signer_failed(error))
+                }
+            }
         })
     }
 }

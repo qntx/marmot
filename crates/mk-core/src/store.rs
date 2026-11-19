@@ -46,6 +46,14 @@ struct Inner {
     /// While `true`, every write path fails: `with_read_snapshot`'s
     /// read-only scope. The flag freezes the view by enforcement — no clone.
     read_only: bool,
+    /// Depth at which `transact` stops passing through: while a `Savepoint`
+    /// is open (`floor > 0`), a `transact` at or below it pushes its own
+    /// layer — rolling back on `Err`, merging into the savepoint on `Ok` —
+    /// so engine code inside the span keeps outermost-unit semantics.
+    floor: usize,
+    /// While `true`, every write fails: armed by `fence_writes` for the
+    /// duration of an open `Savepoint`, cleared when it ends.
+    write_fence: bool,
 }
 
 /// The mirror plus transactional units over a host KV port.
@@ -88,6 +96,8 @@ impl KvStore {
                     write_gen: 0,
                     sequence: 0,
                     read_only: false,
+                    floor: 0,
+                    write_fence: false,
                 })),
             };
             let mut pending: Overlay = BTreeMap::new();
@@ -139,6 +149,8 @@ impl KvStore {
                 write_gen: 0,
                 sequence,
                 read_only: false,
+                floor: 0,
+                write_fence: false,
             })),
         })
     }
@@ -172,7 +184,7 @@ impl KvStore {
     {
         {
             let mut inner = self.lock().map_err(E::from)?;
-            if !inner.overlays.is_empty() {
+            if inner.overlays.len() > inner.floor {
                 drop(inner);
                 return f();
             }
@@ -199,6 +211,45 @@ impl KvStore {
         self.inner
             .lock()
             .is_ok_and(|inner| !inner.overlays.is_empty())
+    }
+
+    /// Open an owning savepoint that can be held across `.await` — the
+    /// async-spanning counterpart of [`KvStore::savepoint`], whose guard borrows
+    /// the store and therefore cannot outlive its closure. While the guard is
+    /// open, `transact` scopes behave as if outermost (each pushes its own
+    /// layer, rolls back on `Err`, merges into the savepoint on `Ok`), and
+    /// [`KvStore::fence_writes`] can refuse every later write for the span.
+    /// [`Savepoint::commit`] merges/commits the layer exactly like an outermost
+    /// unit; dropping without commit rolls it back and bumps `write_gen`, so
+    /// group state the engine cached inside the rolled-back unit is
+    /// invalidated.
+    ///
+    /// # Errors
+    /// [`StorageError`] on lock poisoning.
+    pub(crate) fn begin_savepoint(&self) -> StorageResult<Savepoint> {
+        let mut inner = self.lock()?;
+        inner.overlays.push(BTreeMap::new());
+        inner.callbacks.push(Vec::new());
+        let prev_floor = inner.floor;
+        inner.floor = inner.overlays.len();
+        Ok(Savepoint {
+            store: self.clone(),
+            depth: inner.overlays.len(),
+            prev_floor,
+            armed: true,
+        })
+    }
+
+    /// Refuse every subsequent write until the open `Savepoint` ends —
+    /// `put`/`delete`/`next_sequence` all fail with a fixed
+    /// [`StorageError::Backend`] text. Committing or dropping the savepoint
+    /// clears the fence. A no-op when no savepoint is open.
+    pub(crate) fn fence_writes(&self) {
+        if let Ok(mut inner) = self.inner.lock()
+            && inner.floor > 0
+        {
+            inner.write_fence = true;
+        }
     }
 
     /// `with_group_savepoint`: always pushes a layer — a `SAVEPOINT` is a real
@@ -350,6 +401,9 @@ impl KvStore {
     /// the row that consumes it.
     pub(crate) fn next_sequence(&self) -> StorageResult<u64> {
         let mut inner = self.lock()?;
+        if inner.write_fence {
+            return Err(StorageError::Backend("kv write fenced by savepoint".into()));
+        }
         if inner.read_only {
             return Err(StorageError::Backend(
                 "kv write inside a read snapshot".into(),
@@ -503,6 +557,9 @@ impl Inner {
         key: Vec<u8>,
         value: Option<Vec<u8>>,
     ) -> StorageResult<()> {
+        if self.write_fence {
+            return Err(StorageError::Backend("kv write fenced by savepoint".into()));
+        }
         if self.read_only {
             return Err(StorageError::Backend(
                 "kv write inside a read snapshot".into(),
@@ -600,6 +657,73 @@ impl Drop for LayerGuard<'_> {
         if let Ok(mut inner) = self.store.inner.lock() {
             inner.overlays.pop();
             inner.callbacks.pop();
+        }
+    }
+}
+
+/// The owning guard [`KvStore::begin_savepoint`] returns: pops or commits its
+/// layer on exit, restoring the transaction floor and the write fence. It owns
+/// a `KvStore` clone, so it can be held across `.await`.
+pub(crate) struct Savepoint {
+    store: KvStore,
+    /// `overlays.len()` after this savepoint's layer was pushed; the layer
+    /// sits at index `depth - 1`.
+    depth: usize,
+    /// The `transact` floor in effect before this savepoint opened.
+    prev_floor: usize,
+    armed: bool,
+}
+
+impl Savepoint {
+    /// Merge the layer into the parent unit — or commit one batch and run the
+    /// queued callbacks, for an outermost savepoint. Exactly
+    /// [`LayerGuard::commit`]'s semantics.
+    ///
+    /// # Errors
+    /// [`StorageError::Backend`] when inner scopes left the layer stack
+    /// unbalanced (the whole unit then rolls back through `Drop`), or on
+    /// lock poisoning.
+    pub(crate) fn commit(mut self) -> StorageResult<()> {
+        let callbacks = {
+            let mut inner = self.store.lock()?;
+            if inner.overlays.len() != self.depth {
+                return Err(StorageError::Backend(
+                    "kv savepoint layers unbalanced".into(),
+                ));
+            }
+            let Some(overlay) = inner.overlays.pop() else {
+                return Err(StorageError::Backend("kv savepoint layer missing".into()));
+            };
+            let queued = inner.callbacks.pop().unwrap_or_default();
+            let run = inner.absorb(self.store.host.as_ref(), overlay, queued);
+            inner.floor = self.prev_floor;
+            inner.write_fence = false;
+            run
+        };
+        self.armed = false;
+        for callback in callbacks {
+            callback();
+        }
+        Ok(())
+    }
+}
+
+impl Drop for Savepoint {
+    /// Rollback: discard the savepoint's layer plus anything left above it,
+    /// and bump `write_gen` so group state cached inside the rolled-back
+    /// unit is invalidated. Covers `Err` propagation and unwinding alike.
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        if let Ok(mut inner) = self.store.inner.lock() {
+            while inner.overlays.len() >= self.depth {
+                inner.overlays.pop();
+                inner.callbacks.pop();
+            }
+            inner.write_gen += 1;
+            inner.floor = self.prev_floor;
+            inner.write_fence = false;
         }
     }
 }
@@ -836,5 +960,133 @@ mod tests {
             assert_eq!(store.keys_in(range.clone()).unwrap(), Vec::<Vec<u8>>::new());
             assert!(!store.any_key_in(range).unwrap());
         }
+    }
+
+    #[test]
+    fn committed_savepoint_makes_writes_durable() {
+        let store = open();
+        let savepoint = store.begin_savepoint().unwrap();
+        put(&store, b"k1");
+        savepoint.commit().unwrap();
+        assert_eq!(store.keys_in(all_range()).unwrap(), vec![b"k1".to_vec()]);
+        assert!(!store.in_unit());
+    }
+
+    #[test]
+    fn dropped_savepoint_rolls_back_and_bumps_generation() {
+        let store = open();
+        put(&store, b"k1");
+        let before = store.write_generation().unwrap();
+        {
+            let savepoint = store.begin_savepoint().unwrap();
+            put(&store, b"k9");
+            assert_eq!(
+                store.keys_in(all_range()).unwrap(),
+                vec![b"k1".to_vec(), b"k9".to_vec()],
+                "writes are visible inside the span"
+            );
+            drop(savepoint);
+        }
+        assert_eq!(
+            store.keys_in(all_range()).unwrap(),
+            vec![b"k1".to_vec()],
+            "a dropped savepoint leaves no trace"
+        );
+        assert_eq!(
+            store.write_generation().unwrap(),
+            before + 1,
+            "rollback bumps the generation to invalidate cached group state"
+        );
+        assert!(!store.in_unit());
+    }
+
+    #[test]
+    fn transact_inside_savepoint_behaves_outermost() {
+        let store = open();
+        let savepoint = store.begin_savepoint().unwrap();
+        put(&store, b"k1");
+        // A failed inner transact rolls back only its own layer: the
+        // savepoint's earlier writes survive and the span stays usable.
+        let failed = store.transact::<(), StorageError, _>(|| {
+            put(&store, b"k2");
+            Err(StorageError::Backend("abort".into()))
+        });
+        assert!(failed.is_err());
+        assert_eq!(store.keys_in(all_range()).unwrap(), vec![b"k1".to_vec()]);
+        // A succeeding inner transact merges into the savepoint; a
+        // passthrough-depth transact inside it still passes through.
+        store
+            .transact::<_, StorageError, _>(|| {
+                put(&store, b"k3");
+                let inner = store.transact::<(), StorageError, _>(|| {
+                    put(&store, b"k4");
+                    Err(StorageError::Backend("abort".into()))
+                });
+                assert!(inner.is_err());
+                assert_eq!(
+                    store.keys_in(all_range())?,
+                    vec![b"k1".to_vec(), b"k3".to_vec(), b"k4".to_vec()],
+                    "passthrough writes stay in the enclosing unit on Err"
+                );
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(
+            store.keys_in(all_range()).unwrap(),
+            vec![b"k1".to_vec(), b"k3".to_vec(), b"k4".to_vec()]
+        );
+        savepoint.commit().unwrap();
+        // After the span, transact passthrough rules are the old ones: a
+        // failed outermost transact still rolls back.
+        let aborted = store.transact::<(), StorageError, _>(|| {
+            put(&store, b"k5");
+            Err(StorageError::Backend("abort".into()))
+        });
+        assert!(aborted.is_err());
+        assert_eq!(
+            store.keys_in(all_range()).unwrap(),
+            vec![b"k1".to_vec(), b"k3".to_vec(), b"k4".to_vec()]
+        );
+    }
+
+    #[test]
+    fn fenced_writes_fail_until_the_savepoint_ends() {
+        let store = open();
+        let savepoint = store.begin_savepoint().unwrap();
+        store.fence_writes();
+        for attempt in [
+            store.put(b"k1".to_vec(), b"v".to_vec()),
+            store.delete(b"k1"),
+            store.next_sequence().map(|_| ()),
+        ] {
+            assert_eq!(
+                attempt.unwrap_err().to_string(),
+                "backend failure: kv write fenced by savepoint"
+            );
+        }
+        drop(savepoint);
+        put(&store, b"k1");
+        store.next_sequence().unwrap();
+        // The fence is a per-span flag: a new savepoint is not fenced.
+        let reopened = store.begin_savepoint().unwrap();
+        put(&store, b"k2");
+        reopened.commit().unwrap();
+    }
+
+    #[test]
+    fn fence_is_a_noop_without_an_open_savepoint() {
+        let store = open();
+        store.fence_writes();
+        put(&store, b"k1");
+        store.next_sequence().unwrap();
+    }
+
+    #[test]
+    fn committed_savepoint_also_clears_the_fence() {
+        let store = open();
+        let savepoint = store.begin_savepoint().unwrap();
+        store.fence_writes();
+        savepoint.commit().unwrap();
+        put(&store, b"k1");
     }
 }

@@ -96,7 +96,7 @@ use crate::outbox::{
 use crate::provider::KvStorageProvider;
 use crate::signer::{
     AccountSigner, DeferringProofSigner, FixedProofSigner, RefusingProofSigner, SignerAdapter,
-    SignerError,
+    SignerError, SignerLatch, SignerVerdict,
 };
 use crate::types::{AccountId, Event, EventId, GroupId, OutboundId, UnsignedEvent};
 use cgka_traits::storage::StorageError;
@@ -309,11 +309,13 @@ impl PendingProof {
                 error: ProofError::Storage(error),
             });
         }
+        let latch = Arc::new(SignerLatch::new(self.provider.store().clone()));
         let engine = match build_engine(
             &self.provider,
             &self.signer,
             &self.clock,
             Arc::new(RefusingProofSigner::new()),
+            &latch,
         ) {
             Ok(engine) => engine,
             Err(error) => {
@@ -332,6 +334,7 @@ impl PendingProof {
             clock: Arc::clone(&self.clock),
             destination_policy: self.destination_policy,
             client_name: self.client_name.clone(),
+            signer_latch: latch,
             acked: CommitSeq::from_raw(0),
             gate: BTreeMap::new(),
             handed: HashSet::new(),
@@ -351,8 +354,9 @@ fn build_engine(
     signer: &Arc<dyn AccountSigner>,
     clock: &Arc<dyn Clock>,
     proof_signer: Arc<dyn AccountIdentityProofSigner>,
+    latch: &Arc<SignerLatch>,
 ) -> Result<Engine<KvStorageProvider>, EngineError> {
-    let adapter = Arc::new(SignerAdapter::new(Arc::clone(signer)));
+    let adapter = Arc::new(SignerAdapter::new(Arc::clone(signer), Arc::clone(latch)));
     let peeler = NostrMlsPeeler::new().with_welcome_signer_arc(adapter);
     EngineBuilder::new(provider.clone())
         .identity(signer.account().0.to_vec())
@@ -805,6 +809,10 @@ pub struct Session {
     held: HashMap<OutboundId, OutboundFanout>,
     /// Publish resolutions produced since the last `drain_events`.
     resolutions: Vec<SessionEvent>,
+    /// The signer-refusal latch shared with the engine's `SignerAdapter`:
+    /// armed around each kind-1059 ingest so a refused/failed unwrap can
+    /// roll the span back instead of poisoning it as a permanent rejection.
+    signer_latch: Arc<SignerLatch>,
 }
 
 impl std::fmt::Debug for Session {
@@ -851,7 +859,14 @@ impl Session {
         let capture = Arc::new(DeferringProofSigner::new());
         let cloned = Arc::clone(&capture);
         let proof_signer: Arc<dyn AccountIdentityProofSigner> = cloned;
-        match build_engine(&provider, &config.signer, &config.clock, proof_signer) {
+        let signer_latch = Arc::new(SignerLatch::new(provider.store().clone()));
+        match build_engine(
+            &provider,
+            &config.signer,
+            &config.clock,
+            proof_signer,
+            &signer_latch,
+        ) {
             Err(error) => {
                 let Some(request) = capture.captured() else {
                     return Err(open_error_of(&error));
@@ -874,6 +889,7 @@ impl Session {
                 clock: config.clock,
                 destination_policy: config.destination_policy,
                 client_name: config.client_name,
+                signer_latch,
                 acked: CommitSeq::from_raw(0),
                 gate: BTreeMap::new(),
                 handed: HashSet::new(),
@@ -2266,6 +2282,36 @@ impl Session {
                 category: crate::events::InputCategory::InvalidEncoding,
             });
         };
+        if event.kind == 1059 {
+            // A refused or failed gift-wrap unwrap is retryable, never a
+            // permanent rejection: the adapter's latch records the first
+            // signer verdict and fences every write after it, so the ingest
+            // ends in an engine error before the dedup epilogue can remember
+            // the id — and the savepoint discards whatever it did write.
+            self.signer_latch.arm();
+            let savepoint = self
+                .provider
+                .store()
+                .begin_savepoint()
+                .map_err(SessionError::Storage)?;
+            let result = self.engine.ingest(message).await;
+            self.signer_latch.disarm();
+            if let Some(verdict) = self.signer_latch.verdict() {
+                drop(savepoint);
+                return Ok(InputOutcome::Unavailable {
+                    category: match verdict {
+                        SignerVerdict::Refused => crate::events::Availability::SignerRefused,
+                        SignerVerdict::Failed => crate::events::Availability::SignerFailed,
+                    },
+                });
+            }
+            // No verdict: commit the span even when the engine errored —
+            // pre-latch behaviour kept those writes (a rejected input's
+            // dedup marker is still the point of the ingest).
+            savepoint.commit().map_err(SessionError::Storage)?;
+            let outcome = result.map_err(session_engine_error)?;
+            return Ok(input_outcome(&outcome));
+        }
         let outcome = self
             .engine
             .ingest(message)
@@ -2775,7 +2821,8 @@ mod proof_tests {
         let capture = Arc::new(DeferringProofSigner::new());
         let cloned = Arc::clone(&capture);
         let proof_signer: Arc<dyn AccountIdentityProofSigner> = cloned;
-        let result = build_engine(&provider, &signer, &clock, proof_signer);
+        let latch = Arc::new(SignerLatch::new(provider.store().clone()));
+        let result = build_engine(&provider, &signer, &clock, proof_signer, &latch);
         assert!(
             matches!(result, Err(EngineError::Other(_))),
             "pinned deferred-build variant must be EngineError::Other"
@@ -2810,7 +2857,8 @@ mod proof_tests {
         let refusing = Arc::new(RefusingProofSigner::new());
         let refusing_cloned = Arc::clone(&refusing);
         let refusing_dyn: Arc<dyn AccountIdentityProofSigner> = refusing_cloned;
-        let engine = build_engine(&provider, &signer, &clock, refusing_dyn);
+        let latch = Arc::new(SignerLatch::new(provider.store().clone()));
+        let engine = build_engine(&provider, &signer, &clock, refusing_dyn, &latch);
         assert!(
             engine.is_ok(),
             "stored binding must rebuild without signing"

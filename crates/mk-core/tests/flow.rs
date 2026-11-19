@@ -48,12 +48,16 @@ mod support;
 #[cfg(feature = "testing")]
 mod flow_tests {
     use super::support::*;
+    use std::sync::Arc;
+
     use mk_core::{
-        CreateGroup, GroupId, GroupState, InputCategory, InputOutcome, Invitee, PublishResolution,
-        RelayStatus, SendOutcome, SessionError, SessionEvent,
+        AccountSigner, Availability, Clock, CreateGroup, GroupId, GroupState, InputCategory,
+        InputOutcome, Invitee, Outbound, PublishResolution, RelayResult, RelayStatus, SendOutcome,
+        SessionError, SessionEvent, UnsignedEvent,
     };
 
     const RELAY: &str = "ws://127.0.0.1:7777";
+    const RELAY2: &str = "ws://127.0.0.1:7778";
 
     /// Create a group between `creator` and every `members` account whose
     /// `KeyPackage` + 10050 were already published, then deliver the Welcomes.
@@ -626,7 +630,7 @@ mod flow_tests {
             let results: Vec<_> = item
                 .relays
                 .iter()
-                .map(|relay_url| mk_core::RelayResult {
+                .map(|relay_url| RelayResult {
                     relay: relay_url.clone(),
                     status: RelayStatus::Rejected,
                 })
@@ -718,7 +722,7 @@ mod flow_tests {
                 let results: Vec<_> = item
                     .relays
                     .iter()
-                    .map(|relay_url| mk_core::RelayResult {
+                    .map(|relay_url| RelayResult {
                         relay: relay_url.clone(),
                         status: RelayStatus::Rejected,
                     })
@@ -1198,4 +1202,151 @@ mod flow_tests {
             "report_publish must not list the fanout table"
         );
     }
+
+    /// A refused or failed Welcome unwrap is retryable, never terminal:
+    /// the ingest reports `unavailable` with the matching `signer_*`
+    /// category, commits no durable batch, and re-ingesting the same gift
+    /// wrap once the signer answers again joins the group in the same
+    /// session.
+    #[tokio::test(flavor = "current_thread")]
+    async fn refused_welcome_unwrap_is_retryable() {
+        for (mode, category) in [
+            (DecryptGate::Refused, Availability::SignerRefused),
+            (DecryptGate::Failed, Availability::SignerFailed),
+        ] {
+            let relay = FakeRelay::new();
+            let mut a = open_member().await;
+            publish_identity(&mut a, &relay, RELAY).await;
+            let signer = Arc::new(GatedSigner::new());
+            let mut b = open_member_with(Arc::<GatedSigner>::clone(&signer)).await;
+            publish_identity(&mut b, &relay, RELAY).await;
+            let gid = group_with(&mut a, &relay, &[&b], "retryable-unwrap").await;
+
+            let welcomes = welcomes_for(&relay, RELAY, &b.account_hex());
+            assert!(!welcomes.is_empty(), "a welcome must be waiting");
+            let batches_before = b.host.batches().len();
+            signer.set(mode);
+            let reports = b
+                .session
+                .ingest_batch(welcomes.clone())
+                .await
+                .expect("refused ingest reports");
+            assert!(
+                reports
+                    .iter()
+                    .all(|report| report.outcome == InputOutcome::Unavailable { category }),
+                "a refused/failed unwrap reports unavailable: {reports:?}"
+            );
+            assert_eq!(
+                b.host.batches().len(),
+                batches_before,
+                "a refused ingest commits no durable batch"
+            );
+            assert!(
+                b.session.group(&gid).is_err(),
+                "no group before the unwrap succeeds"
+            );
+
+            signer.set(DecryptGate::Working);
+            let retried = b.session.ingest_batch(welcomes).await.expect("retry");
+            assert!(
+                retried
+                    .iter()
+                    .all(|report| report.outcome == InputOutcome::Accepted),
+                "the retried welcome is accepted: {retried:?}"
+            );
+            assert!(
+                b.session.group(&gid).is_ok_and(|group| group.is_some()),
+                "the retried ingest joined"
+            );
+        }
+    }
+
+    /// The refused unwrap survives a restart too: nothing of the failed
+    /// span reached durable rows, so the reopened session unwraps the same
+    /// wrap and joins.
+    #[tokio::test(flavor = "current_thread")]
+    async fn refused_welcome_retry_survives_restart() {
+        let relay = FakeRelay::new();
+        let mut a = open_member().await;
+        publish_identity(&mut a, &relay, RELAY).await;
+        let signer = Arc::new(GatedSigner::new());
+        let mut b = open_member_with(Arc::<GatedSigner>::clone(&signer)).await;
+        publish_identity(&mut b, &relay, RELAY).await;
+        let gid = group_with(&mut a, &relay, &[&b], "restart-unwrap").await;
+
+        let welcomes = welcomes_for(&relay, RELAY, &b.account_hex());
+        assert!(!welcomes.is_empty(), "a welcome must be waiting");
+        signer.set(DecryptGate::Refused);
+        let reports = b
+            .session
+            .ingest_batch(welcomes.clone())
+            .await
+            .expect("refused ingest reports");
+        assert!(
+            reports.iter().all(|report| report.outcome
+                == InputOutcome::Unavailable {
+                    category: Availability::SignerRefused,
+                }),
+            "refused: {reports:?}"
+        );
+
+        let mut b = reopen_member(&b).await;
+        signer.set(DecryptGate::Working);
+        let retried = b.session.ingest_batch(welcomes).await.expect("retry");
+        assert!(
+            retried
+                .iter()
+                .all(|report| report.outcome == InputOutcome::Accepted),
+            "the retried welcome is accepted after restart: {retried:?}"
+        );
+        assert!(
+            b.session.group(&gid).is_ok_and(|group| group.is_some()),
+            "the retried ingest joined after restart"
+        );
+    }
+
+    /// A wrap whose content decrypts but does not parse as a NIP-59 seal is
+    /// a genuine rejection, not an availability verdict: it reports
+    /// `rejected: invalid_encoding` and re-ingest is `duplicate`.
+    #[tokio::test(flavor = "current_thread")]
+    async fn malformed_welcome_stays_rejected() {
+        let relay = FakeRelay::new();
+        let mut b = open_member().await;
+        publish_identity(&mut b, &relay, RELAY).await;
+
+        // A gift wrap by a throwaway author whose NIP-44 content decrypts
+        // to bytes that are not a seal.
+        let author = mk_core::testing::LocalSigner::new();
+        let ciphertext = author
+            .nip44_encrypt(&b.signer.account(), "not a seal")
+            .await
+            .expect("encrypt");
+        let unsigned = UnsignedEvent {
+            pubkey: author.account(),
+            created_at: b.clock.now().unix_ms / 1_000,
+            kind: 1059,
+            tags: vec![vec!["p".to_owned(), b.account_hex()]],
+            content: ciphertext,
+        };
+        let malformed = author.sign_event(unsigned).await.expect("sign");
+
+        let report = b.session.ingest(&malformed).await.expect("ingest");
+        assert_eq!(
+            report.outcome,
+            InputOutcome::Rejected {
+                category: InputCategory::InvalidEncoding,
+            },
+            "a malformed wrap is rejected"
+        );
+        let again = b.session.ingest(&malformed).await.expect("re-ingest");
+        assert_eq!(
+            again.outcome,
+            InputOutcome::Rejected {
+                category: InputCategory::Duplicate,
+            },
+            "the rejected wrap is remembered"
+        );
+    }
+
 }
