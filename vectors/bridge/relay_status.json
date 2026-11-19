@@ -2,5 +2,6 @@
   "accepted": "accepted",
   "rejected": "rejected",
   "unavailable": "unavailable",
+  "not_sent": "not_sent",
   "unknown": "unknown"
 }

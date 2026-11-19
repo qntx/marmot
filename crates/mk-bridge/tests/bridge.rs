@@ -510,7 +510,15 @@ async fn full_flow() {
     );
     relay.down = false;
     let response = a.call(Request::Tick(NoArgs {})).await;
-    assert!(matches!(response, Response::Ok { .. }), "tick");
+    let Response::Ok { result } = response else {
+        panic!("tick: {response:?}")
+    };
+    let OpResult::Ticked(TickedResult { next_wake_ms }) = *result else {
+        panic!("tick result: {result:?}")
+    };
+    // The session paces the retry: the item re-offers only once its
+    // backoff deadline passes.
+    a.advance(next_wake_ms.unwrap_or(0).max(1_000));
     let retried = a.publish(&mut relay).await;
     assert!(
         retried
@@ -773,8 +781,10 @@ async fn durability_gate() {
 /// A host `refused`/`failed` signer reply surfaces as a `signer` error
 /// carrying the matching reason; the bridge settles back to Ready and the
 /// refused operation releases nothing. On the welcome path the same refusal
-/// fails the gift-wrap unwrap inside the engine, which is indistinguishable
-/// from a corrupted wrap: the event is rejected, not errored.
+/// fails the gift-wrap unwrap inside the engine: the ingest reports the
+/// input `unavailable` with the matching `signer_*` category and stays
+/// retryable — nothing of the failed span becomes durable or remembered,
+/// so re-ingesting the same welcomes with a working signer joins.
 #[tokio::test(flavor = "current_thread")]
 async fn signer_refusal() {
     let mut relay = FakeRelay::new();
@@ -833,71 +843,107 @@ async fn signer_refusal() {
 
     // nip44: B's welcome ingest decrypts through the signer.
     let mut a = Member::new();
-    let mut b = Member::new();
     a.open().await;
-    b.open().await;
     a.publish_identity(&mut relay).await;
-    b.publish_identity(&mut relay).await;
-    let response = a
-        .call(Request::CreateGroup(CreateGroupRequest {
-            name: "g".to_owned(),
-            description: String::new(),
-            relays: vec![RELAY.to_owned()],
-            invitees: vec![Invitee {
-                key_package: key_package_of(&relay, &b.account_hex()),
-                inbox_relays: vec![RELAY.to_owned()],
-            }],
-            admins: Vec::new(),
-            components: Vec::new(),
-        }))
-        .await;
-    assert!(
-        matches!(response, Response::Ok { .. }),
-        "create: {response:?}"
-    );
-    a.publish(&mut relay).await;
-    let welcomes = welcomes_for(&relay, &b.account_hex());
-    assert_ne!(welcomes.len(), 0, "welcome published");
-    let response = b.call_once(Request::Ingest(IngestRequest { events: welcomes }));
-    let Response::SignerPending { requests } = response else {
-        panic!("welcome ingest suspends on nip44: {response:?}")
-    };
-    assert!(
-        requests
+    for (refusal, category) in [
+        (SignerResult::Refused, AvailabilityCategory::SignerRefused),
+        (SignerResult::Failed, AvailabilityCategory::SignerFailed),
+    ] {
+        let mut b = Member::new();
+        b.open().await;
+        b.publish_identity(&mut relay).await;
+        let response = a
+            .call(Request::CreateGroup(CreateGroupRequest {
+                name: "g".to_owned(),
+                description: String::new(),
+                relays: vec![RELAY.to_owned()],
+                invitees: vec![Invitee {
+                    key_package: key_package_of(&relay, &b.account_hex()),
+                    inbox_relays: vec![RELAY.to_owned()],
+                }],
+                admins: Vec::new(),
+                components: Vec::new(),
+            }))
+            .await;
+        assert!(
+            matches!(response, Response::Ok { .. }),
+            "create: {response:?}"
+        );
+        a.publish(&mut relay).await;
+        let welcomes = welcomes_for(&relay, &b.account_hex());
+        assert_ne!(welcomes.len(), 0, "welcome published");
+        let response = b.call_once(Request::Ingest(IngestRequest {
+            events: welcomes.clone(),
+        }));
+        let Response::SignerPending { requests } = response else {
+            panic!("welcome ingest suspends on nip44: {response:?}")
+        };
+        assert!(
+            requests
+                .iter()
+                .any(|request| matches!(&request.op, SignerOp::Nip44Decrypt { .. })),
+            "welcome unwrap asks nip44_decrypt: {requests:?}"
+        );
+        let replies = requests
             .iter()
-            .any(|request| matches!(&request.op, SignerOp::Nip44Decrypt { .. })),
-        "welcome unwrap asks nip44_decrypt: {requests:?}"
-    );
-    let replies = requests
-        .iter()
-        .map(|request| SignerReply {
-            id: request.id,
-            result: SignerResult::Refused,
-        })
-        .collect();
-    let response = b.call_once(Request::SignerReply(SignerReplyRequest { replies }));
-    let Response::Ok { result } = response else {
-        panic!("refused welcome rejects, not errors: {response:?}")
-    };
-    let OpResult::Ingested(IngestedResult { reports }) = *result else {
-        panic!()
-    };
-    assert!(
-        reports
-            .iter()
-            .all(|report| matches!(report.outcome, InputOutcome::Rejected { .. })),
-        "refused welcome rejected: {reports:?}"
-    );
+            .map(|request| SignerReply {
+                id: request.id,
+                result: refusal.clone(),
+            })
+            .collect();
+        let response = b.call_once(Request::SignerReply(SignerReplyRequest { replies }));
+        let Response::Ok { result } = response else {
+            panic!("refused welcome reports, not errors: {response:?}")
+        };
+        let OpResult::Ingested(IngestedResult { reports }) = *result else {
+            panic!()
+        };
+        assert!(
+            reports.iter().all(
+                |report| matches!(report.outcome, InputOutcome::Unavailable {
+                    category: reported,
+                } if reported == category)
+            ),
+            "refused welcome stays retryable: {reports:?}"
+        );
 
-    // The bridge settles back to Ready and B never joined the group.
-    let response = b.call(Request::Groups(NoArgs {})).await;
-    let Response::Ok { result } = response else {
-        panic!("b ready: {response:?}")
-    };
-    let OpResult::Groups(GroupsResult { groups }) = *result else {
-        panic!()
-    };
-    assert!(groups.is_empty(), "a refused welcome leaves no group");
+        // The bridge settles back to Ready and B never joined the group.
+        let response = b.call(Request::Groups(NoArgs {})).await;
+        let Response::Ok { result } = response else {
+            panic!("b ready: {response:?}")
+        };
+        let OpResult::Groups(GroupsResult { groups }) = *result else {
+            panic!()
+        };
+        assert!(groups.is_empty(), "a refused welcome leaves no group");
+
+        // Nothing of the refused span became durable or remembered:
+        // re-ingesting the same welcomes, answered by the working signer,
+        // joins the group.
+        let response = b
+            .call(Request::Ingest(IngestRequest { events: welcomes }))
+            .await;
+        let Response::Ok { result } = response else {
+            panic!("retry reports: {response:?}")
+        };
+        let OpResult::Ingested(IngestedResult { reports }) = *result else {
+            panic!()
+        };
+        assert!(
+            reports
+                .iter()
+                .all(|report| matches!(report.outcome, InputOutcome::Accepted)),
+            "retried welcome accepted: {reports:?}"
+        );
+        let response = b.call(Request::Groups(NoArgs {})).await;
+        let Response::Ok { result } = response else {
+            panic!("b ready: {response:?}")
+        };
+        let OpResult::Groups(GroupsResult { groups }) = *result else {
+            panic!()
+        };
+        assert_eq!(groups.len(), 1, "a retried welcome joins the group");
+    }
 }
 
 /// Ingest order invariance: the same backlog delivered ascending,
@@ -1000,7 +1046,7 @@ async fn protocol_errors() {
     let mut member = Member::new();
 
     // Version probe first: mismatch answers even with a malformed rest.
-    let config = json!({"protocol_version": 2, "account": 7, "now": "nope"});
+    let config = json!({"protocol_version": PROTOCOL_VERSION + 1, "account": 7, "now": "nope"});
     let opened = member.open_bytes(&serde_json::to_vec(&config).unwrap());
     assert_eq!(open_error_kind(&opened), "protocol_version_mismatch");
 

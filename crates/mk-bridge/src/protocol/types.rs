@@ -518,6 +518,8 @@ pub enum RelayStatus {
     Rejected,
     /// The relay could not be reached or did not answer.
     Unavailable,
+    /// The event was not transmitted to this relay; no exposure recorded.
+    NotSent,
     /// The outcome is ambiguous; the event may have been exposed.
     Unknown,
 }
@@ -528,6 +530,7 @@ impl From<RelayStatus> for core::RelayStatus {
             RelayStatus::Accepted => Self::Accepted,
             RelayStatus::Rejected => Self::Rejected,
             RelayStatus::Unavailable => Self::Unavailable,
+            RelayStatus::NotSent => Self::NotSent,
             RelayStatus::Unknown => Self::Unknown,
         }
     }
@@ -731,6 +734,36 @@ impl From<core::InputCategory> for InputCategory {
     }
 }
 
+/// The availability cause behind `InputOutcome::Unavailable`: the spec's
+/// transport categories plus the session-local signer causes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AvailabilityCategory {
+    /// Undecodable now, recoverable later.
+    TransportDeferred,
+    /// A local bound refused it.
+    ResourceRefused,
+    /// The account signer declined the unwrap.
+    SignerRefused,
+    /// The account signer failed the unwrap.
+    SignerFailed,
+    /// An `mk-core` availability cause this wire version does not know.
+    Unmapped,
+}
+
+impl From<core::Availability> for AvailabilityCategory {
+    fn from(category: core::Availability) -> Self {
+        match category {
+            core::Availability::TransportDeferred => Self::TransportDeferred,
+            core::Availability::ResourceRefused => Self::ResourceRefused,
+            core::Availability::SignerRefused => Self::SignerRefused,
+            core::Availability::SignerFailed => Self::SignerFailed,
+            // `Availability` is `#[non_exhaustive]`.
+            _ => Self::Unmapped,
+        }
+    }
+}
+
 /// A canonical local ingest condition.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -781,7 +814,7 @@ pub enum InputOutcome {
     /// Not currently processable for an availability reason.
     Unavailable {
         /// Why it is unavailable.
-        category: InputCategory,
+        category: AvailabilityCategory,
     },
     /// A canonical local condition blocked processing.
     Local {

@@ -1,0 +1,7 @@
+{
+  "transport_deferred": "transport_deferred",
+  "resource_refused": "resource_refused",
+  "signer_refused": "signer_refused",
+  "signer_failed": "signer_failed",
+  "unmapped": "unmapped"
+}
