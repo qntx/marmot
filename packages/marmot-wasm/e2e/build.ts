@@ -28,9 +28,12 @@ async function bundle(entrypoint: string, name: string): Promise<string> {
 // dist/index.mjs (its glue is a build-matched pair with the shipped .wasm), rebundled so its
 // bare @qntx/marmot imports resolve for the browser.
 const harness = await bundle("harness/index.ts", "harness.js");
+const clientHarness = await bundle("harness/client.ts", "client-harness.js");
 const module_ = await bundle("../dist/index.mjs", "marmot.mjs");
 
 // oxlint-disable-next-line no-console
 console.log(`harness: ${harness}`);
+// oxlint-disable-next-line no-console
+console.log(`client harness: ${clientHarness}`);
 // oxlint-disable-next-line no-console
 console.log(`loader: ${module_}`);

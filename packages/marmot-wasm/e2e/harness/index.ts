@@ -8,11 +8,11 @@
  */
 
 import { Engine, decodeKvBatch } from "@qntx/marmot/backend";
-import type { Backend } from "@qntx/marmot/backend";
+import type { Backend, RelayResult } from "@qntx/marmot/backend";
+import type { RelayPort } from "@qntx/marmot/client";
 import { indexedDbKv, webLocks } from "@qntx/marmot/storage";
 import type { Cipher, IdbFactoryLike, KvDriver, LockManagerLike } from "@qntx/marmot/storage";
 import { fakeRelay, manualClock, memoryKv, runFlow } from "@qntx/marmot/testing";
-import type { FakeRelay } from "@qntx/marmot/testing";
 
 /**
  * The packed loader+glue, reached at runtime as `/marmot.mjs` (served from the `dist/` bundle
@@ -121,7 +121,7 @@ async function idbKv(name: string): Promise<KvDriver> {
 }
 
 /** Publish everything the engine has gated, recording each publish through the Node hook. */
-async function publishAll(engine: Engine, relay: FakeRelay, acked?: () => bigint): Promise<void> {
+async function publishAll(engine: Engine, port: RelayPort, acked?: () => bigint): Promise<void> {
   for (let round = 0; round < 64; round += 1) {
     // oxlint-disable-next-line no-await-in-loop
     await engine.whenDurable();
@@ -133,7 +133,11 @@ async function publishAll(engine: Engine, relay: FakeRelay, acked?: () => bigint
     for (const item of items) {
       // oxlint-disable-next-line no-await-in-loop
       await globalThis.publishOutbound?.(item.id, item.event.id, (acked?.() ?? 0n).toString());
-      const results = relay.publish(item);
+      const results: RelayResult[] = [];
+      for (const relay of item.relays) {
+        // oxlint-disable-next-line no-await-in-loop
+        results.push({ relay, status: await port.publish(relay, item.event) });
+      }
       // oxlint-disable-next-line no-await-in-loop
       await engine.reportPublish(item.id, results);
     }
@@ -173,7 +177,7 @@ function recordingKv(inner: KvDriver): { kv: KvDriver; acked: () => bigint } {
 
 type EngineState = {
   engine: Engine;
-  relay: FakeRelay;
+  port: RelayPort;
   clock: ReturnType<typeof manualClock>;
   driver: KvDriver;
 };
@@ -181,7 +185,7 @@ type EngineState = {
 const state = { current: undefined as EngineState | undefined };
 
 async function openEngine(dbName: string, kv?: KvDriver): Promise<EngineState> {
-  const relay = fakeRelay();
+  const port = fakeRelay().port("e");
   const clock = manualClock();
   const driver = kv ?? (await idbKv(dbName));
   const engine = await Engine.open({
@@ -191,7 +195,7 @@ async function openEngine(dbName: string, kv?: KvDriver): Promise<EngineState> {
     signer: pageSigner,
     allowLoopback: true,
   });
-  state.current = { engine, relay, clock, driver };
+  state.current = { engine, port, clock, driver };
   return state.current;
 }
 
@@ -319,7 +323,7 @@ const api: Harness = {
       relays: [RELAY],
       invitees: [],
     });
-    await publishAll(current.engine, current.relay);
+    await publishAll(current.engine, current.port);
     return group.id;
   },
 
@@ -331,7 +335,7 @@ const api: Harness = {
     }
     current.clock.advance(1000);
     await current.engine.sendMessage(groupId, { kind: 9, tags: [], content: text });
-    await publishAll(current.engine, current.relay);
+    await publishAll(current.engine, current.port);
   },
 
   /** Close the current engine + its driver (releases the Web Lock). */
@@ -366,14 +370,14 @@ const api: Harness = {
       relays: [RELAY],
       invitees: [],
     });
-    await publishAll(current.engine, current.relay, acked);
+    await publishAll(current.engine, current.port, acked);
     const loop = (async () => {
       for (let i = 0; ; i += 1) {
         current.clock.advance(1);
         // oxlint-disable-next-line no-await-in-loop
         await current.engine.sendMessage(group.id, { kind: 9, tags: [], content: `k${i}` });
         // oxlint-disable-next-line no-await-in-loop
-        await publishAll(current.engine, current.relay, acked);
+        await publishAll(current.engine, current.port, acked);
       }
     })();
     void loop;
@@ -420,7 +424,8 @@ const api: Harness = {
     // receiver across groups reuses this driver rather than racing the lock.
     const receiverKv = await idbKv(dbName);
     for (let g = 0; g < groups; g += 1) {
-      const receiverRelay = fakeRelay();
+      const receiverNetwork = fakeRelay();
+      const receiverPort = receiverNetwork.port("r");
       // oxlint-disable-next-line no-await-in-loop
       const receiver = await Engine.open({
         backend: requireBackend(),
@@ -440,7 +445,7 @@ const api: Harness = {
       // oxlint-disable-next-line no-await-in-loop
       await receiver.publishKeyPackage([RELAY]);
       // oxlint-disable-next-line no-await-in-loop
-      await publishAll(receiver, receiverRelay);
+      await publishAll(receiver, receiverPort);
       // oxlint-disable-next-line no-await-in-loop
       const group = await sender.createGroup({
         name: `g${g}`,
@@ -448,15 +453,15 @@ const api: Harness = {
         relays: [RELAY],
         invitees: [
           {
-            keyPackage: receiverRelay.keyPackageOf(receiverSigner.pubkey),
+            keyPackage: receiverNetwork.keyPackageOf(receiverSigner.pubkey),
             inboxRelays: [RELAY],
           },
         ],
       });
       // oxlint-disable-next-line no-await-in-loop
-      await publishAll(sender, receiverRelay);
+      await publishAll(sender, receiverPort);
       // oxlint-disable-next-line no-await-in-loop
-      await receiver.ingest(receiverRelay.welcomesFor(receiverSigner.pubkey));
+      await receiver.ingest(receiverNetwork.welcomesFor(receiverSigner.pubkey));
       // oxlint-disable-next-line no-await-in-loop
       await receiver.tick();
       // oxlint-disable-next-line no-await-in-loop
@@ -469,9 +474,9 @@ const api: Harness = {
         // oxlint-disable-next-line no-await-in-loop
         await sender.sendMessage(group.id, { kind: 9, tags: [], content: `g${g}m${i}` });
         // oxlint-disable-next-line no-await-in-loop
-        await publishAll(sender, receiverRelay);
+        await publishAll(sender, receiverPort);
       }
-      const backlog = receiverRelay.groupEvents(route, "r");
+      const backlog = receiverNetwork.groupEvents(route, "r");
       const t0 = performance.now();
       // oxlint-disable-next-line no-await-in-loop
       await receiver.ingest(backlog);

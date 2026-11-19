@@ -27,6 +27,9 @@ const config: UserConfig = defineConfig({
       "@qntx/marmot/backend": fileURLToPath(
         new URL("../marmot/src/backend/index.ts", import.meta.url),
       ),
+      "@qntx/marmot/client": fileURLToPath(
+        new URL("../marmot/src/client/index.ts", import.meta.url),
+      ),
       "@qntx/marmot/storage": fileURLToPath(
         new URL("../marmot/src/storage/index.ts", import.meta.url),
       ),

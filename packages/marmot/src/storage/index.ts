@@ -3,6 +3,7 @@
  * injected), and the Web Locks / process-local `LockPort` adapters.
  */
 
+export * from "./cursors.ts";
 export * from "./driver.ts";
 export * from "./indexeddb.ts";
 export * from "./locks.ts";

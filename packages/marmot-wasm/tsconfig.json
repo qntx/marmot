@@ -6,5 +6,5 @@
       "@qntx/marmot/*": ["../marmot/src/*/index.ts"]
     }
   },
-  "include": ["src", "tests", "e2e", "vite.config.ts", "playwright.config.ts"]
+  "include": ["src", "tests", "e2e", "interop", "vite.config.ts", "playwright.config.ts"]
 }

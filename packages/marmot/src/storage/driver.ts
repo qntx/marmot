@@ -11,6 +11,12 @@ export type KvDriver = {
   close: () => Promise<void>;
 } & DurableKv;
 
+/** Persistence for the client's sync cursors: one opaque versioned blob. */
+export type CursorStore = {
+  load: () => Promise<Uint8Array | undefined>;
+  save: (bytes: Uint8Array) => Promise<void>;
+};
+
 /**
  * Value encryption for stored rows; installed by the host. `key` is the row key: implementations
  * must authenticate it as associated data so a value sealed for one key cannot be replayed under

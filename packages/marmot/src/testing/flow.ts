@@ -24,7 +24,7 @@ import type { KvDriver } from "../storage/driver.ts";
 import { manualClock } from "./clock.ts";
 import type { ManualClock } from "./clock.ts";
 import { fakeRelay } from "./relay.ts";
-import type { FakeRelay } from "./relay.ts";
+import type { FakeRelayNetwork } from "./relay.ts";
 
 const RELAY = "wss://relay.example";
 
@@ -77,7 +77,8 @@ async function ingestAndDrain(member: Member, events: NostrEvent[]): Promise<Ses
 }
 
 /** TakeOutbound → relay → reportPublish until nothing is gated, like the host delivery loop. */
-async function publish(member: Member, relay: FakeRelay): Promise<PublishResolution[]> {
+async function publish(member: Member, network: FakeRelayNetwork): Promise<PublishResolution[]> {
+  const port = network.port(member.name);
   const resolutions: PublishResolution[] = [];
   for (let round = 0; round < 64; round += 1) {
     // oxlint-disable-next-line no-await-in-loop -- the flow is sequential by design
@@ -88,7 +89,13 @@ async function publish(member: Member, relay: FakeRelay): Promise<PublishResolut
       break;
     }
     for (const item of items) {
-      const results = relay.publish(item);
+      // oxlint-disable-next-line no-await-in-loop -- outbound obligations stay serialized
+      const results = await Promise.all(
+        item.relays.map(async (relay) => ({
+          relay,
+          status: await port.publish(relay, item.event),
+        })),
+      );
       // oxlint-disable-next-line no-await-in-loop -- the flow is sequential by design
       resolutions.push(await member.engine.reportPublish(item.id, results));
     }
@@ -106,15 +113,15 @@ async function routeHex(member: Member, group: string): Promise<string> {
 }
 
 /**
- * Deliver what the relay holds for `member`, tick, advance 2 s, publish — repeated until quiescent:
- * no fresh events, nothing published, and `tick` schedules no wake inside the window. A hard cap
- * turns divergence into a failure instead of a hang.
+ * Deliver what the network holds for `member`, tick, advance 2 s, publish — repeated until
+ * quiescent: no fresh events, nothing published, and `tick` schedules no wake inside the window. A
+ * hard cap turns divergence into a failure instead of a hang.
  */
-async function sync(member: Member, relay: FakeRelay, group: string): Promise<void> {
+async function sync(member: Member, network: FakeRelayNetwork, group: string): Promise<void> {
   const route = await routeHex(member, group);
   const windowMs = 2000n;
   for (let round = 0; round < 64; round += 1) {
-    const fresh = relay.groupEvents(route, member.name);
+    const fresh = network.groupEvents(route, member.name);
     if (fresh.length > 0) {
       // oxlint-disable-next-line no-await-in-loop -- the flow is sequential by design
       await ingestAndDrain(member, fresh);
@@ -123,7 +130,7 @@ async function sync(member: Member, relay: FakeRelay, group: string): Promise<vo
     const nextWakeMs = await member.engine.tick();
     member.clock.advance(Number(windowMs));
     // oxlint-disable-next-line no-await-in-loop -- the flow is sequential by design
-    const resolutions = await publish(member, relay);
+    const resolutions = await publish(member, network);
     const woke = nextWakeMs !== undefined && nextWakeMs <= windowMs;
     if (fresh.length === 0 && resolutions.length === 0 && !woke) {
       return;
@@ -132,11 +139,11 @@ async function sync(member: Member, relay: FakeRelay, group: string): Promise<vo
   throw new Error(`runFlow: sync for ${member.name} did not quiesce in 64 rounds`);
 }
 
-async function publishIdentity(member: Member, relay: FakeRelay): Promise<void> {
+async function publishIdentity(member: Member, network: FakeRelayNetwork): Promise<void> {
   await member.engine.publishKeyPackage([RELAY]);
-  await publish(member, relay);
+  await publish(member, network);
   await member.engine.publishInboxRelays([RELAY]);
-  await publish(member, relay);
+  await publish(member, network);
 }
 
 function messageContents(events: SessionEvent[]): string[] {
@@ -154,7 +161,7 @@ function assert(condition: boolean, site: string): void {
 
 /** Run the shared flow; throws on any mismatch, returns per-stage timings. */
 export async function runFlow(env: FlowEnv): Promise<FlowTimings> {
-  const relay = fakeRelay();
+  const network = fakeRelay();
   const clockFor: () => ManualClock = env.clock ?? manualClock;
   // oxlint-disable-next-line no-unsafe-type-assertion -- each stage stamps its key before return
   const timings = {} as FlowTimings;
@@ -181,8 +188,8 @@ export async function runFlow(env: FlowEnv): Promise<FlowTimings> {
   // ---- open: A and B exist and publish their identities ----
   let a = await openMember("a", env.signer());
   let b = await openMember("b", env.signer());
-  await publishIdentity(a, relay);
-  await publishIdentity(b, relay);
+  await publishIdentity(a, network);
+  await publishIdentity(b, network);
   stamp("open");
 
   // ---- create: A creates the group, inviting B via its published KeyPackage ----
@@ -190,15 +197,15 @@ export async function runFlow(env: FlowEnv): Promise<FlowTimings> {
     name: "flow",
     description: "",
     relays: [RELAY],
-    invitees: [{ keyPackage: relay.keyPackageOf(b.signer.pubkey), inboxRelays: [RELAY] }],
+    invitees: [{ keyPackage: network.keyPackageOf(b.signer.pubkey), inboxRelays: [RELAY] }],
   });
-  await publish(a, relay);
+  await publish(a, network);
   stamp("create");
 
   // ---- join: B ingests its gift wraps and both sides converge ----
-  await b.engine.ingest(relay.welcomesFor(b.signer.pubkey));
-  await sync(b, relay, group.id);
-  await sync(a, relay, group.id);
+  await b.engine.ingest(network.welcomesFor(b.signer.pubkey));
+  await sync(b, network, group.id);
+  await sync(a, network, group.id);
   stamp("join");
 
   // ---- send N: A messages B, publishing as it goes ----
@@ -216,11 +223,11 @@ export async function runFlow(env: FlowEnv): Promise<FlowTimings> {
           throw error;
         }
         // oxlint-disable-next-line no-await-in-loop -- the flow is sequential by design
-        await sync(a, relay, group.id);
+        await sync(a, network, group.id);
       }
     }
     // oxlint-disable-next-line no-await-in-loop -- the flow is sequential by design
-    await publish(a, relay);
+    await publish(a, network);
   }
   stamp("send");
 
@@ -229,17 +236,17 @@ export async function runFlow(env: FlowEnv): Promise<FlowTimings> {
   // slower runtime completes the drain over tick rounds — collect to quiescent.
   const route = await routeHex(b, group.id);
   const expected = Array.from({ length: env.messages }, (_, i) => `m${i}`);
-  const contents = messageContents(await ingestAndDrain(b, relay.groupEvents(route, b.name)));
+  const contents = messageContents(await ingestAndDrain(b, network.groupEvents(route, b.name)));
   for (let round = 0; contents.length < expected.length && round < 64; round += 1) {
     // oxlint-disable-next-line no-await-in-loop -- the flow is sequential by design
     await b.engine.tick();
     b.clock.advance(2000);
-    const fresh = relay.groupEvents(route, b.name);
+    const fresh = network.groupEvents(route, b.name);
     // oxlint-disable-next-line no-await-in-loop -- the flow is sequential by design
     const drained = await ingestAndDrain(b, fresh);
     contents.push(...messageContents(drained));
     // oxlint-disable-next-line no-await-in-loop -- the flow is sequential by design
-    await publish(b, relay);
+    await publish(b, network);
   }
   assert(
     contents.length === expected.length && contents.every((text, i) => text === expected[i]),
@@ -247,7 +254,7 @@ export async function runFlow(env: FlowEnv): Promise<FlowTimings> {
   );
   await b.engine.tick();
   b.clock.advance(2000);
-  await publish(b, relay);
+  await publish(b, network);
   stamp("ingest");
 
   // ---- reopen: both members restart from their durable rows ----
@@ -255,41 +262,41 @@ export async function runFlow(env: FlowEnv): Promise<FlowTimings> {
   await b.engine.close();
   a = await openMember("a", a.signer);
   b = await openMember("b", b.signer);
-  await sync(a, relay, group.id);
-  await sync(b, relay, group.id);
+  await sync(a, network, group.id);
+  await sync(b, network, group.id);
   stamp("reopen");
 
   // ---- add: A invites C through its published KeyPackage; C joins ----
   const c = await openMember("c", env.signer());
-  await publishIdentity(c, relay);
+  await publishIdentity(c, network);
   await a.engine.invite(group.id, [
-    { keyPackage: relay.keyPackageOf(c.signer.pubkey), inboxRelays: [RELAY] },
+    { keyPackage: network.keyPackageOf(c.signer.pubkey), inboxRelays: [RELAY] },
   ]);
-  await publish(a, relay);
-  await c.engine.ingest(relay.welcomesFor(c.signer.pubkey));
-  await sync(c, relay, group.id);
-  await sync(a, relay, group.id);
+  await publish(a, network);
+  await c.engine.ingest(network.welcomesFor(c.signer.pubkey));
+  await sync(c, network, group.id);
+  await sync(a, network, group.id);
   stamp("add");
 
   // ---- remove: A removes C ----
   await a.engine.removeMembers(group.id, [c.signer.pubkey]);
-  await publish(a, relay);
-  await sync(c, relay, group.id);
-  await sync(a, relay, group.id);
+  await publish(a, network);
+  await sync(c, network, group.id);
+  await sync(a, network, group.id);
   stamp("remove");
 
   // ---- failure + retry: every relay down, then back up ----
   a.clock.advance(1000);
   await a.engine.updateGroupProfile(group.id, "after", undefined);
-  relay.down = true;
-  const failed = await publish(a, relay);
+  network.mode(RELAY, "down");
+  const failed = await publish(a, network);
   assert(
     failed.length > 0 && failed.every((resolution) => resolution === "pending"),
     "all-unavailable verdicts must stay pending",
   );
-  relay.down = false;
+  network.mode(RELAY, "normal");
   await a.engine.tick();
-  const retried = await publish(a, relay);
+  const retried = await publish(a, network);
   assert(
     retried.some((resolution) => resolution !== "pending"),
     "retry must reach a terminal resolution",

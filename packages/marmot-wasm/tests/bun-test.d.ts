@@ -6,5 +6,7 @@ declare module "bun:test" {
     toThrow: (message?: string | RegExp) => void;
     toBeGreaterThan: (expected: number) => void;
     toBeGreaterThanOrEqual: (expected: number) => void;
+    toBeLessThan: (expected: number) => void;
+    toStrictEqual: (expected: unknown) => void;
   };
 }

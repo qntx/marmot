@@ -47,3 +47,29 @@ declare global {
     }>;
   }
 }
+
+/** The `window.__marmotClient` surface the client harness bundle installs (one client per page). */
+export type ClientHarness = {
+  init: (keyBase64: string, secretBase64: string) => Promise<void>;
+  open: (relayUrl: string) => Promise<void>;
+  identity: () => Promise<void>;
+  createGroup: (
+    name: string,
+    relays: string[],
+    inviteePubkey: string,
+    lookupRelays: string[],
+  ) => Promise<string>;
+  send: (group: string, text: string) => Promise<void>;
+  transcript: () => string[];
+  received: () => string[];
+  sentMapEntries: () => Array<[string, string[]]>;
+  deliveredIds: () => string[];
+  invitesSeen: () => string[];
+  errorsSeen: () => string[];
+  snapshot: (group: string) => Promise<unknown>;
+  close: () => Promise<void>;
+};
+
+declare global {
+  var __marmotClient: ClientHarness;
+}
