@@ -16,7 +16,7 @@ import type {
   RelayResult,
   SessionEvent,
 } from "../backend/protocol.ts";
-import { blockedInvites } from "../invites/index.ts";
+import { pendingInvites } from "../invites/index.ts";
 import type { InviteEvent } from "../invites/index.ts";
 import type { CursorStore } from "../storage/driver.ts";
 import type { PlannedSubscription, RelayPort, Timer } from "../transport/index.ts";
@@ -27,6 +27,7 @@ import {
   inboxCursorKey,
   planSubscriptions,
   safeRelayUrl,
+  wireEventBytes,
 } from "../transport/index.ts";
 import { MarmotError, toMarmotError } from "./errors.ts";
 import type { ClientState } from "./state.ts";
@@ -51,13 +52,13 @@ export type DeliveryEvent = { outbound: string; resolution: PublishResolution };
 export const INGEST_BATCH_MAX = 256;
 /** Delay after the first buffered inbound event before a flush runs. */
 export const INGEST_DELAY_MS = 25;
-/** Dedicated outbox retry cadence after a publish reported `unavailable`. */
-export const OUTBOX_RETRY_TICK_MS = 5000;
 /** Delay before reconciling after a relay-initiated subscription close. */
 export const RESUBSCRIBE_DELAY_MS = 5000;
-
-type SignerVerdict = "refused" | "failed" | undefined;
-
+/**
+ * The largest commit sent to a relay whose event limit is unknown — MDK `COMMIT_SIZE_FLOOR_BYTES`
+ * (mdk#2332). The client knows no relay limits, so every relay counts as unknown-limit.
+ */
+export const COMMIT_SIZE_FLOOR_BYTES: number = 64 * 1024;
 /** What the pump needs to drive one client session. */
 export type PumpOptions = {
   engine: Engine;
@@ -68,8 +69,6 @@ export type PumpOptions = {
   state: ClientState;
   account: string;
   allowLoopback: boolean;
-  /** `observeSigner`'s `take`: the first refused/failed signer call since the last take. */
-  takeVerdict: () => SignerVerdict;
 };
 
 type ActiveSub = {
@@ -91,7 +90,6 @@ export class Pump {
   private readonly state: ClientState;
   private readonly account: string;
   private readonly allowLoopback: boolean;
-  private readonly takeVerdict: () => SignerVerdict;
 
   private readonly listeners = {
     messages: new Set<(batch: ClientMessage[]) => void | Promise<void>>(),
@@ -108,10 +106,19 @@ export class Pump {
   private readonly buffer = new Map<string, Buffered>();
   private readonly active = new Map<string, ActiveSub>();
   private wake: (() => void) | undefined;
+  /**
+   * Confirmed-commit refusal tracking (mdk#2333): `confirmed` holds outbound ids whose report
+   * resolved `confirmed`; `earlyRefusals` holds the relays that reported `rejected` while the
+   * commit was still `pending` — an `accepted` from the same relay on a later attempt reverses that
+   * refusal. Kept in memory only: a restart between the confirmation and a later refusal loses the
+   * warning (MDK persists refusals until acknowledged; we surface them per occurrence).
+   */
+  private readonly confirmedCommits = new Set<string>();
+  private readonly earlyRefusals = new Map<string, Set<string>>();
+
   private flushTimer: (() => void) | undefined;
   private reconcileTimer: (() => void) | undefined;
   private reconcileFlag = false;
-  private retryTimer: (() => void) | undefined;
   private saveScheduled = false;
   private closed = false;
   private closePromise: Promise<void> | undefined;
@@ -125,7 +132,6 @@ export class Pump {
     this.state = options.state;
     this.account = options.account;
     this.allowLoopback = options.allowLoopback;
-    this.takeVerdict = options.takeVerdict;
   }
 
   /** Reconcile subscriptions and run the first tick, so early listeners see the first drain. */
@@ -170,17 +176,16 @@ export class Pump {
   }
 
   /**
-   * Run `job` serialized; afterwards drain+dispatch, reconcile when flagged, and — when `take`
-   * resolves true — publish whatever `takeOutbound` releases. `take` is a function of the job's
-   * result for `reportPublish` (a `pending` resolution must not re-take immediately).
+   * Run `job` serialized; afterwards drain+dispatch, reconcile when flagged, and — when `take` is
+   * true — publish whatever `takeOutbound` releases. The engine itself withholds paced items from
+   * `takeOutbound`, so the take always runs.
    */
-  async run<T>(job: () => Promise<T>, take: boolean | ((result: T) => boolean) = true): Promise<T> {
+  async run<T>(job: () => Promise<T>, take = true): Promise<T> {
     const prior = this.queue;
     const run = (async () => {
       await prior;
       const result = await job();
-      const doTake = typeof take === "function" ? take(result) : take;
-      await this.afterOp(doTake);
+      await this.afterOp(take);
       return result;
     })();
     this.queue = (async () => {
@@ -206,6 +211,24 @@ export class Pump {
   }
 
   /**
+   * Close every active kind-1059 subscription and reconcile, so the inbox subscriptions reopen with
+   * `since` taken from the capped cursor (an `unavailable` ingest report caps its key at the
+   * earliest `createdAt − 1`) and the relays replay the withheld wraps. Stores no wraps.
+   */
+  async retryInvites(): Promise<void> {
+    await this.run(async () => {
+      for (const [key, sub] of this.active) {
+        if (sub.kind === GIFT_WRAP_KIND) {
+          sub.close();
+          this.active.delete(key);
+        }
+      }
+      this.reconcileFlag = true;
+      await Promise.resolve();
+    }, false);
+  }
+
+  /**
    * Close the pump: stop timers and subscriptions, drop buffered inbound (unadvanced cursors are
    * refetched later), then await queued ops, in-flight publishes and their reports, the delivery
    * chain, `whenDurable` and the last cursor save — before `engine.close()`.
@@ -221,8 +244,6 @@ export class Pump {
     this.flushTimer = undefined;
     this.reconcileTimer?.();
     this.reconcileTimer = undefined;
-    this.retryTimer?.();
-    this.retryTimer = undefined;
     for (const sub of this.active.values()) {
       sub.close();
     }
@@ -271,17 +292,6 @@ export class Pump {
     }
   }
 
-  /** After a report that contained `unavailable`: one retry tick, whatever the engine wake says. */
-  private scheduleRetry(): void {
-    if (this.retryTimer !== undefined || this.closed) {
-      return;
-    }
-    this.retryTimer = this.timer.set(OUTBOX_RETRY_TICK_MS, () => {
-      this.retryTimer = undefined;
-      this.runTick();
-    });
-  }
-
   private async publishOutbox(): Promise<void> {
     if (this.closed) {
       return;
@@ -313,28 +323,99 @@ export class Pump {
 
   /**
    * Publish one outbound item to every listed relay exactly once, concurrently, then report the
-   * verdicts in `item.relays` order. An `unavailable` verdict arms the dedicated retry timer.
+   * verdicts in `item.relays` order. A commit over `COMMIT_SIZE_FLOOR_BYTES` is never transmitted:
+   * each safe relay is probed with `connect` — a reachable one gets a local `rejected` (and one
+   * `commit_too_large` error for the item), an unreachable one a `not_sent`, so an offline device
+   * never makes a commit look too large. After the report the take always runs — the engine
+   * withholds paced items — and a `pending` resolution schedules a tick that recomputes the wake
+   * from the engine.
    */
   private async publishItem(item: Outbound): Promise<void> {
-    const results = await Promise.all(
-      item.relays.map(async (relay): Promise<RelayResult> => {
+    const overFloor =
+      item.purpose === "commit" && wireEventBytes(item.event) > COMMIT_SIZE_FLOOR_BYTES;
+    let floorRefused = false;
+    const verdicts = await Promise.all(
+      item.relays.map(async (relay): Promise<{ result: RelayResult; refused: boolean }> => {
         if (!safeRelayUrl(relay, this.allowLoopback)) {
           // Local policy prohibits the destination — no contact, terminal.
-          return { relay, status: "rejected" };
+          return { result: { relay, status: "rejected" }, refused: false };
+        }
+        if (overFloor) {
+          const reachable = await this.relays.connect(relay);
+          floorRefused ||= reachable;
+          return {
+            result: { relay, status: reachable ? "rejected" : "not_sent" },
+            refused: false,
+          };
         }
         try {
-          return { relay, status: await this.relays.publish(relay, item.event) };
+          const status = await this.relays.publish(relay, item.event);
+          return { result: { relay, status }, refused: status === "rejected" };
         } catch {
-          return { relay, status: "unavailable" };
+          return { result: { relay, status: "unavailable" }, refused: false };
         }
       }),
     );
-    await this.run(
-      async () => this.engine.reportPublish(item.id, results),
-      (resolution) => resolution !== "pending",
+    if (floorRefused) {
+      this.emitError(new MarmotError("commit_too_large"));
+    }
+    const resolution = await this.run(async () =>
+      this.engine.reportPublish(
+        item.id,
+        verdicts.map((verdict) => verdict.result),
+      ),
     );
-    if (results.some((result) => result.status === "unavailable")) {
-      this.scheduleRetry();
+    this.trackCommitRefusal(item, verdicts, resolution);
+    if (resolution === "pending") {
+      this.scheduleWake(0);
+    }
+  }
+
+  /**
+   * Track one commit item's report for `commit_refused` warnings: a relay `rejected` verdict on a
+   * commit that is — or becomes — `confirmed` warns; locally synthesized rejections (unsafe
+   * destinations, floor refusals) never do.
+   */
+  private trackCommitRefusal(
+    item: Outbound,
+    verdicts: ReadonlyArray<{ result: RelayResult; refused: boolean }>,
+    resolution: PublishResolution,
+  ): void {
+    if (item.purpose !== "commit") {
+      return;
+    }
+    const early = this.earlyRefusals.get(item.id);
+    if (early !== undefined) {
+      for (const verdict of verdicts) {
+        if (verdict.result.status === "accepted") {
+          early.delete(verdict.result.relay);
+        }
+      }
+      if (early.size === 0) {
+        this.earlyRefusals.delete(item.id);
+      }
+    }
+    const refused = verdicts.filter((verdict) => verdict.refused).map((v) => v.result.relay);
+    const warn =
+      (resolution === "confirmed" && (refused.length > 0 || this.earlyRefusals.has(item.id))) ||
+      (this.confirmedCommits.has(item.id) && refused.length > 0);
+    if (resolution === "pending" && refused.length > 0) {
+      const set = this.earlyRefusals.get(item.id) ?? new Set<string>();
+      for (const relay of refused) {
+        set.add(relay);
+      }
+      this.earlyRefusals.set(item.id, set);
+    }
+    if (resolution === "confirmed") {
+      this.confirmedCommits.add(item.id);
+      this.earlyRefusals.delete(item.id);
+    }
+    if (resolution === "rolled_back" || resolution === "complete") {
+      this.confirmedCommits.delete(item.id);
+      this.earlyRefusals.delete(item.id);
+    }
+    if (warn) {
+      this.emitError(new MarmotError("commit_refused"));
     }
   }
 
@@ -430,14 +511,9 @@ export class Pump {
     const batch = [...this.buffer.values()];
     this.buffer.clear();
     const work = this.run(async () => {
-      this.takeVerdict();
       const events = batch.map((entry) => entry.event);
       const reports = await this.engine.ingest(events);
-      const verdict = this.takeVerdict();
-      const wraps = new Set(
-        events.filter((event) => event.kind === GIFT_WRAP_KIND).map((event) => event.id),
-      );
-      for (const invite of blockedInvites(reports, wraps, verdict)) {
+      for (const invite of pendingInvites(reports)) {
         this.emitInvite(invite);
       }
       await this.engine.whenDurable();

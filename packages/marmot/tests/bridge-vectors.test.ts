@@ -5,6 +5,7 @@ import { describe, expect, test } from "vite-plus/test";
 
 import {
   decodeAttachmentResult,
+  decodeAvailability,
   decodeCallValue,
   decodeConfigValue,
   decodeGroupChange,
@@ -40,6 +41,7 @@ import {
 } from "../src/backend/codec.ts";
 import {
   ATTACHMENT_RESULT_TYPES,
+  AVAILABILITY_VALUES,
   ERROR_KINDS,
   GROUP_CHANGE_TYPES,
   GROUP_STATES,
@@ -127,6 +129,7 @@ const UNION_CASES = [
     encodeAttachmentResult,
   ),
   caseOf("relay_status", RELAY_STATUSES, decodeRelayStatus, (value) => value),
+  caseOf("availability_category", AVAILABILITY_VALUES, decodeAvailability, (value) => value),
   caseOf("outbound_purpose", OUTBOUND_PURPOSES, decodeOutboundPurpose, (value) => value),
   caseOf("group_state", GROUP_STATES, decodeGroupState, (value) => value),
   caseOf("local_state", LOCAL_STATES, decodeLocalState, (value) => value),

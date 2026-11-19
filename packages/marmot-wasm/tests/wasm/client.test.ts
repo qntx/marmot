@@ -6,8 +6,11 @@ import { describe, expect, test } from "vite-plus/test";
 import {
   scenarioCatchup,
   scenarioClockSkew,
+  scenarioInviteRetry,
   scenarioMain,
   scenarioMode,
+  scenarioOfflineCommitRollback,
+  scenarioOfflineSend,
   RELAY_1,
   RELAY_2,
 } from "../shared/client-e2e.ts";
@@ -74,6 +77,36 @@ describe("client e2e (node)", () => {
       const result = await scenarioClockSkew();
       report("skew", result);
       expect(result.delivered).toStrictEqual({ a: 40, b: 40, c: 80 });
+    },
+  );
+
+  test(
+    "invite retry: a refused welcome surfaces pending and retryInvites joins",
+    { timeout: 300_000 },
+    async () => {
+      const result = await scenarioInviteRetry();
+      report("invite-retry", result);
+      expect(result.delivered).toStrictEqual({ a: 1, b: 2, c: 1 });
+    },
+  );
+
+  test(
+    "offline send: not_sent pacing holds the message and the commit until the dial returns",
+    { timeout: 300_000 },
+    async () => {
+      const result = await scenarioOfflineSend();
+      report("offline-send", result);
+      expect(result.delivered).toStrictEqual({ a: 0, b: 1 });
+    },
+  );
+
+  test(
+    "offline commit rollback: a refused commit rolls back and the group stays usable",
+    { timeout: 300_000 },
+    async () => {
+      const result = await scenarioOfflineCommitRollback();
+      report("offline-commit-rollback", result);
+      expect(result.delivered).toStrictEqual({ a: 0, b: 1 });
     },
   );
 });

@@ -51,11 +51,13 @@ import type {
   SignerResult,
   StreamFinal,
   UnsignedEvent,
+  WireAvailability,
   WireError,
   WireInputCategory,
 } from "./protocol.ts";
 import {
   ATTACHMENT_REJECTIONS,
+  AVAILABILITY_VALUES,
   ERROR_KINDS,
   GROUP_STATES,
   INPUT_CATEGORY_VALUES,
@@ -554,6 +556,10 @@ export function decodeInputCategory(value: unknown, path = "category"): WireInpu
   return oneOf(value, path, INPUT_CATEGORY_VALUES);
 }
 
+export function decodeAvailability(value: unknown, path = "category"): WireAvailability {
+  return oneOf(value, path, AVAILABILITY_VALUES);
+}
+
 export function decodeInputOutcome(value: unknown, path = "outcome"): InputOutcome {
   const o = rec(value, path, ["type", "category", "state"]);
   const type = tag(o, path);
@@ -581,7 +587,7 @@ export function decodeInputOutcome(value: unknown, path = "outcome"): InputOutco
     case "unavailable":
       return {
         type,
-        category: decodeInputCategory(field(o, "category", path), `${path}.category`),
+        category: decodeAvailability(field(o, "category", path), `${path}.category`),
       };
     case "local":
       return {

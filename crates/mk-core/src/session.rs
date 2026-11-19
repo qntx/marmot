@@ -96,7 +96,7 @@ use crate::outbox::{
 use crate::provider::KvStorageProvider;
 use crate::signer::{
     AccountSigner, DeferringProofSigner, FixedProofSigner, RefusingProofSigner, SignerAdapter,
-    SignerError,
+    SignerError, SignerLatch, SignerVerdict,
 };
 use crate::types::{AccountId, Event, EventId, GroupId, OutboundId, UnsignedEvent};
 use cgka_traits::storage::StorageError;
@@ -309,11 +309,13 @@ impl PendingProof {
                 error: ProofError::Storage(error),
             });
         }
+        let latch = Arc::new(SignerLatch::new(self.provider.store().clone()));
         let engine = match build_engine(
             &self.provider,
             &self.signer,
             &self.clock,
             Arc::new(RefusingProofSigner::new()),
+            &latch,
         ) {
             Ok(engine) => engine,
             Err(error) => {
@@ -332,6 +334,7 @@ impl PendingProof {
             clock: Arc::clone(&self.clock),
             destination_policy: self.destination_policy,
             client_name: self.client_name.clone(),
+            signer_latch: latch,
             acked: CommitSeq::from_raw(0),
             gate: BTreeMap::new(),
             handed: HashSet::new(),
@@ -351,8 +354,9 @@ fn build_engine(
     signer: &Arc<dyn AccountSigner>,
     clock: &Arc<dyn Clock>,
     proof_signer: Arc<dyn AccountIdentityProofSigner>,
+    latch: &Arc<SignerLatch>,
 ) -> Result<Engine<KvStorageProvider>, EngineError> {
-    let adapter = Arc::new(SignerAdapter::new(Arc::clone(signer)));
+    let adapter = Arc::new(SignerAdapter::new(Arc::clone(signer), Arc::clone(latch)));
     let peeler = NostrMlsPeeler::new().with_welcome_signer_arc(adapter);
     EngineBuilder::new(provider.clone())
         .identity(signer.account().0.to_vec())
@@ -805,6 +809,10 @@ pub struct Session {
     held: HashMap<OutboundId, OutboundFanout>,
     /// Publish resolutions produced since the last `drain_events`.
     resolutions: Vec<SessionEvent>,
+    /// The signer-refusal latch shared with the engine's `SignerAdapter`:
+    /// armed around each kind-1059 ingest so a refused/failed unwrap can
+    /// roll the span back instead of poisoning it as a permanent rejection.
+    signer_latch: Arc<SignerLatch>,
 }
 
 impl std::fmt::Debug for Session {
@@ -851,7 +859,14 @@ impl Session {
         let capture = Arc::new(DeferringProofSigner::new());
         let cloned = Arc::clone(&capture);
         let proof_signer: Arc<dyn AccountIdentityProofSigner> = cloned;
-        match build_engine(&provider, &config.signer, &config.clock, proof_signer) {
+        let signer_latch = Arc::new(SignerLatch::new(provider.store().clone()));
+        match build_engine(
+            &provider,
+            &config.signer,
+            &config.clock,
+            proof_signer,
+            &signer_latch,
+        ) {
             Err(error) => {
                 let Some(request) = capture.captured() else {
                     return Err(open_error_of(&error));
@@ -874,6 +889,7 @@ impl Session {
                 clock: config.clock,
                 destination_policy: config.destination_policy,
                 client_name: config.client_name,
+                signer_latch,
                 acked: CommitSeq::from_raw(0),
                 gate: BTreeMap::new(),
                 handed: HashSet::new(),
@@ -937,6 +953,13 @@ impl Session {
     }
 
     fn take_outbound_inner(&mut self, released: &mut Vec<Outbound>) -> Result<(), SessionError> {
+        let now_ms = self.now_ms();
+        let retries: HashMap<OutboundId, crate::outbox::OutboundRetry> = self
+            .provider
+            .outbound_retries()
+            .map_err(SessionError::Storage)?
+            .into_iter()
+            .collect();
         let fanouts = self
             .engine
             .outbound_fanouts()
@@ -944,14 +967,27 @@ impl Session {
         // Drop held values whose fanout left storage or was overwritten by
         // a path that did not carry this session's marks — the equality
         // check below would never select them again.
-        let live: HashSet<OutboundId> = fanouts
+        let mut live: HashSet<OutboundId> = fanouts
             .iter()
             .filter_map(|fanout| outbound_id_of(fanout.message_id()).ok())
             .collect();
         self.held.retain(|id, _| live.contains(id));
+        let mut stale_retries: Vec<OutboundId> = retries
+            .keys()
+            .filter(|id| !live.contains(*id))
+            .copied()
+            .collect();
         for stored in fanouts {
             let id = outbound_id_of(stored.message_id())?;
             if self.handed.contains(&id) || !self.releasable(&id) {
+                continue;
+            }
+            // Backoff: a report that left the item outstanding on retryable
+            // verdicts re-offers it only after `not_before_ms`.
+            if retries
+                .get(&id)
+                .is_some_and(|retry| retry.not_before_ms > now_ms)
+            {
                 continue;
             }
             // Re-mark on the held value, not the fresh storage load: only
@@ -980,9 +1016,85 @@ impl Session {
             .session_publications()
             .map_err(SessionError::Storage)?
         {
+            let paced = OutboundId::from_hex(&publication.id).is_ok_and(|id| {
+                live.insert(id);
+                retries
+                    .get(&id)
+                    .is_some_and(|retry| retry.not_before_ms > now_ms)
+            });
+            if paced {
+                continue;
+            }
             self.take_publication(publication, released)?;
         }
-        Ok(())
+        // Cheap GC: a retry row whose item resolved elsewhere (or was never
+        // the current record's) is dead weight — delete it only when there
+        // is something to delete.
+        stale_retries.retain(|id| !live.contains(id));
+        self.delete_stale_retries(&stale_retries)
+    }
+
+    /// Drop retry rows whose item is no longer live, in one storage unit.
+    /// Writes nothing when `stale` is empty.
+    fn delete_stale_retries(&self, stale: &[OutboundId]) -> Result<(), SessionError> {
+        if stale.is_empty() {
+            return Ok(());
+        }
+        self.provider
+            .store()
+            .transact(|| -> Result<(), StorageError> {
+                for id in stale {
+                    self.provider.delete_outbound_retry(id)?;
+                }
+                Ok(())
+            })
+            .map_err(SessionError::Storage)
+    }
+
+    /// Every outbound id with a live record — engine fanouts plus session
+    /// publications — for retry-deadline scheduling.
+    fn live_outbound_ids(&self) -> Result<HashSet<OutboundId>, SessionError> {
+        let mut live: HashSet<OutboundId> = self
+            .engine
+            .outbound_fanouts()
+            .map_err(session_engine_error)?
+            .iter()
+            .filter_map(|fanout| outbound_id_of(fanout.message_id()).ok())
+            .collect();
+        for publication in self
+            .provider
+            .session_publications()
+            .map_err(SessionError::Storage)?
+        {
+            if let Ok(id) = OutboundId::from_hex(&publication.id) {
+                live.insert(id);
+            }
+        }
+        Ok(live)
+    }
+
+    /// Milliseconds until the earliest retry deadline on a live, not-handed
+    /// item — `None` when none is armed. A due item contributes nothing:
+    /// the take that follows every tick picks it up, so reporting 0 would
+    /// only spin.
+    fn retry_wake(&self) -> Result<Option<u64>, SessionError> {
+        let retries = self
+            .provider
+            .outbound_retries()
+            .map_err(SessionError::Storage)?;
+        if retries.is_empty() {
+            return Ok(None);
+        }
+        let now_ms = self.now_ms();
+        let live = self.live_outbound_ids()?;
+        let mut wake = None;
+        for (id, retry) in retries {
+            if live.contains(&id) && !self.handed.contains(&id) && retry.not_before_ms > now_ms {
+                let delay = retry.not_before_ms - now_ms;
+                wake = Some(wake.map_or(delay, |armed: u64| armed.min(delay)));
+            }
+        }
+        Ok(wake)
     }
 
     /// Re-mark retryable/possibly-exposed targets as Attempting so a relay
@@ -1146,7 +1258,9 @@ impl Session {
             *status = match result.status {
                 RelayStatus::Accepted => PubTargetStatus::Accepted,
                 RelayStatus::Rejected => PubTargetStatus::Failed,
-                RelayStatus::Unavailable => PubTargetStatus::RetryableUnavailable,
+                RelayStatus::Unavailable | RelayStatus::NotSent => {
+                    PubTargetStatus::RetryableUnavailable
+                }
                 RelayStatus::Unknown => PubTargetStatus::PossiblyExposed,
             };
         }
@@ -1154,11 +1268,31 @@ impl Session {
             .statuses
             .iter()
             .all(|status| !status.is_outstanding());
+        let accepted = results
+            .iter()
+            .any(|result| result.status == RelayStatus::Accepted);
+        let retryable = results.iter().any(|result| retryable_status(result.status));
+        let now_ms = self.now_ms();
+        self.provider
+            .store()
+            .transact(|| -> Result<(), StorageError> {
+                if complete {
+                    self.provider.delete_session_publication(id)?;
+                    self.provider.delete_outbound_retry(id)?;
+                    return Ok(());
+                }
+                self.provider.put_session_publication(&publication)?;
+                if accepted {
+                    // One accepted target resets the backoff.
+                    self.provider.delete_outbound_retry(id)?;
+                } else if retryable {
+                    self.provider.record_outbound_failure(id, now_ms)?;
+                }
+                Ok(())
+            })?;
         if complete {
-            self.provider.delete_session_publication(id)?;
             return Ok(Some(PublishResolution::Complete));
         }
-        self.provider.put_session_publication(&publication)?;
         Ok(Some(PublishResolution::Pending))
     }
 
@@ -1199,11 +1333,13 @@ impl Session {
                                 kind: endpoint_failure_kind(status),
                                 rejection_category: None,
                                 size_class: None,
-                                // A relay-reported failure can never prove
-                                // nothing left: `Unavailable` covers
-                                // timeouts and silent drops, where a frame
-                                // may have reached the relay.
-                                pre_send: false,
+                                // `NotSent` proves no frame left: the
+                                // target stays retryable without exposure.
+                                // Every other relay-reported failure can
+                                // never prove nothing left — `Unavailable`
+                                // covers timeouts and silent drops, where
+                                // a frame may have reached the relay.
+                                pre_send: matches!(status, RelayStatus::NotSent),
                             },
                         )
                         .map_err(|_| SessionError::Internal("fanout failure"))?;
@@ -1272,24 +1408,64 @@ impl Session {
             }
         }
         if fanout.outcome().fanout_complete {
-            self.engine
-                .delete_outbound_fanout(fanout.message_id())
-                .map_err(session_engine_error)?;
+            self.provider
+                .store()
+                .transact(|| -> Result<(), SessionError> {
+                    self.engine
+                        .delete_outbound_fanout(fanout.message_id())
+                        .map_err(session_engine_error)?;
+                    self.provider
+                        .delete_outbound_retry(&id)
+                        .map_err(SessionError::Storage)?;
+                    Ok(())
+                })?;
             self.gate.remove(&id);
             self.held.remove(&id);
             if resolution == PublishResolution::Pending {
                 resolution = PublishResolution::Complete;
             }
         } else {
-            self.engine
-                .put_outbound_fanout(&fanout)
-                .map_err(session_engine_error)?;
+            self.persist_retry_record(&fanout, &id, results)?;
             // The in-flight fanout stays outstanding: keep the held value —
             // which still marks every unreported current attempt — current
             // with what was persisted (mdk#2332).
             self.held.insert(id, fanout.clone());
         }
         Ok(resolution)
+    }
+
+    /// Persist the still-outstanding fanout plus this report's retry pacing
+    /// in one storage unit: one accepted target resets the backoff; an
+    /// all-retryable report records another failure.
+    fn persist_retry_record(
+        &self,
+        fanout: &OutboundFanout,
+        id: &OutboundId,
+        results: &[RelayResult],
+    ) -> Result<(), SessionError> {
+        let accepted = results
+            .iter()
+            .any(|result| result.status == RelayStatus::Accepted);
+        let retryable = results.iter().any(|result| retryable_status(result.status));
+        let now_ms = self.now_ms();
+        self.provider
+            .store()
+            .transact(|| -> Result<(), SessionError> {
+                self.engine
+                    .put_outbound_fanout(fanout)
+                    .map_err(session_engine_error)?;
+                if accepted {
+                    // One accepted target resets the backoff.
+                    self.provider
+                        .delete_outbound_retry(id)
+                        .map_err(SessionError::Storage)?;
+                } else if retryable {
+                    self.provider
+                        .record_outbound_failure(id, now_ms)
+                        .map_err(SessionError::Storage)?;
+                }
+                Ok(())
+            })
     }
 
     /// Confirm the fanout's own-commit obligation with the engine once at
@@ -2266,6 +2442,36 @@ impl Session {
                 category: crate::events::InputCategory::InvalidEncoding,
             });
         };
+        if event.kind == 1059 {
+            // A refused or failed gift-wrap unwrap is retryable, never a
+            // permanent rejection: the adapter's latch records the first
+            // signer verdict and fences every write after it, so the ingest
+            // ends in an engine error before the dedup epilogue can remember
+            // the id — and the savepoint discards whatever it did write.
+            self.signer_latch.arm();
+            let savepoint = self
+                .provider
+                .store()
+                .begin_savepoint()
+                .map_err(SessionError::Storage)?;
+            let result = self.engine.ingest(message).await;
+            self.signer_latch.disarm();
+            if let Some(verdict) = self.signer_latch.verdict() {
+                drop(savepoint);
+                return Ok(InputOutcome::Unavailable {
+                    category: match verdict {
+                        SignerVerdict::Refused => crate::events::Availability::SignerRefused,
+                        SignerVerdict::Failed => crate::events::Availability::SignerFailed,
+                    },
+                });
+            }
+            // No verdict: commit the span even when the engine errored —
+            // pre-latch behaviour kept those writes (a rejected input's
+            // dedup marker is still the point of the ingest).
+            savepoint.commit().map_err(SessionError::Storage)?;
+            let outcome = result.map_err(session_engine_error)?;
+            return Ok(input_outcome(&outcome));
+        }
         let outcome = self
             .engine
             .ingest(message)
@@ -2392,6 +2598,8 @@ impl Session {
                 .map_err(session_engine_error)?;
             fold(peel_delay, &mut next);
         }
+        // Fold each live, not-handed item's retry deadline into the wake.
+        fold(self.retry_wake()?, &mut next);
         self.drive().await?;
         Ok(TickReport { next_wake_ms: next })
     }
@@ -2719,11 +2927,22 @@ fn fanout_outbound(fanout: &OutboundFanout, id: OutboundId) -> Option<Outbound> 
 const fn endpoint_failure_kind(status: RelayStatus) -> TransportEndpointFailureKind {
     match status {
         RelayStatus::Rejected => TransportEndpointFailureKind::TerminalRejected,
-        RelayStatus::Unavailable => TransportEndpointFailureKind::RetryableUnavailable,
+        RelayStatus::Unavailable | RelayStatus::NotSent => {
+            TransportEndpointFailureKind::RetryableUnavailable
+        }
         RelayStatus::Unknown | RelayStatus::Accepted => {
             TransportEndpointFailureKind::PossiblyExposed
         }
     }
+}
+
+/// Whether a reported status leaves the item retryable — the statuses that
+/// pace a re-offer through the session's backoff rows.
+const fn retryable_status(status: RelayStatus) -> bool {
+    matches!(
+        status,
+        RelayStatus::Unavailable | RelayStatus::NotSent | RelayStatus::Unknown
+    )
 }
 
 #[cfg(test)]
@@ -2775,7 +2994,8 @@ mod proof_tests {
         let capture = Arc::new(DeferringProofSigner::new());
         let cloned = Arc::clone(&capture);
         let proof_signer: Arc<dyn AccountIdentityProofSigner> = cloned;
-        let result = build_engine(&provider, &signer, &clock, proof_signer);
+        let latch = Arc::new(SignerLatch::new(provider.store().clone()));
+        let result = build_engine(&provider, &signer, &clock, proof_signer, &latch);
         assert!(
             matches!(result, Err(EngineError::Other(_))),
             "pinned deferred-build variant must be EngineError::Other"
@@ -2810,7 +3030,8 @@ mod proof_tests {
         let refusing = Arc::new(RefusingProofSigner::new());
         let refusing_cloned = Arc::clone(&refusing);
         let refusing_dyn: Arc<dyn AccountIdentityProofSigner> = refusing_cloned;
-        let engine = build_engine(&provider, &signer, &clock, refusing_dyn);
+        let latch = Arc::new(SignerLatch::new(provider.store().clone()));
+        let engine = build_engine(&provider, &signer, &clock, refusing_dyn, &latch);
         assert!(
             engine.is_ok(),
             "stored binding must rebuild without signing"

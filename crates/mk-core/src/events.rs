@@ -163,6 +163,57 @@ impl Disposition {
     }
 }
 
+/// Why an input is not currently processable: the availability cause behind
+/// `InputOutcome::Unavailable`.
+///
+/// `TransportDeferred`/`ResourceRefused` are the spec's own categories; the
+/// `signer_*` causes are session-local and report under the spec's
+/// `resource_refused` umbrella (spec `transports/nostr.md` resource-refused
+/// rule).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Availability {
+    /// `transport_deferred` — undecodable now, recoverable later.
+    TransportDeferred,
+    /// `resource_refused` — a local bound refused it.
+    ResourceRefused,
+    /// `signer_refused` — the account signer declined the unwrap.
+    SignerRefused,
+    /// `signer_failed` — the account signer failed the unwrap.
+    SignerFailed,
+}
+
+impl Availability {
+    /// Every variant, in declaration order.
+    pub const ALL: [Self; 4] = [
+        Self::TransportDeferred,
+        Self::ResourceRefused,
+        Self::SignerRefused,
+        Self::SignerFailed,
+    ];
+
+    /// The stable `snake_case` name of this cause.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::TransportDeferred => "transport_deferred",
+            Self::ResourceRefused => "resource_refused",
+            Self::SignerRefused => "signer_refused",
+            Self::SignerFailed => "signer_failed",
+        }
+    }
+
+    /// The spec category this cause reports under.
+    const fn spec_category(self) -> InputCategory {
+        match self {
+            Self::TransportDeferred => InputCategory::TransportDeferred,
+            Self::ResourceRefused | Self::SignerRefused | Self::SignerFailed => {
+                InputCategory::ResourceRefused
+            }
+        }
+    }
+}
+
 /// A canonical local ingest condition (MDK `LocalIngestState`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
@@ -197,10 +248,11 @@ pub enum InputOutcome {
         category: InputCategory,
     },
     /// Not currently processable for an availability reason (transport
-    /// decode/decrypt or a local resource bound); not a protocol verdict.
+    /// decode/decrypt, a local resource bound, or a signer refusal); not a
+    /// protocol verdict.
     Unavailable {
         /// Why it is unavailable.
-        category: InputCategory,
+        category: Availability,
     },
     /// A canonical local condition blocked processing.
     Local(LocalState),
@@ -231,9 +283,8 @@ impl InputOutcome {
         match self {
             Self::Accepted | Self::Local(_) | Self::RecoveryOffered => None,
             Self::Deferred { category } => category,
-            Self::Stale { category }
-            | Self::Rejected { category }
-            | Self::Unavailable { category } => Some(category),
+            Self::Stale { category } | Self::Rejected { category } => Some(category),
+            Self::Unavailable { category } => Some(category.spec_category()),
         }
     }
 }
@@ -331,10 +382,10 @@ pub(crate) const fn input_outcome(outcome: &IngestOutcome) -> InputOutcome {
         },
         IngestOutcome::LocalState { state } => InputOutcome::Local(local_state(*state)),
         IngestOutcome::TransportDeferred { .. } => InputOutcome::Unavailable {
-            category: InputCategory::TransportDeferred,
+            category: Availability::TransportDeferred,
         },
         IngestOutcome::ResourceRefused { .. } => InputOutcome::Unavailable {
-            category: InputCategory::ResourceRefused,
+            category: Availability::ResourceRefused,
         },
         IngestOutcome::Stale { reason } => stale_outcome(reason),
         IngestOutcome::Rejected { category } => InputOutcome::Rejected {
@@ -974,7 +1025,7 @@ mod tests {
                     lineage: DeferralLineage::Uncontested,
                 },
                 InputOutcome::Unavailable {
-                    category: InputCategory::TransportDeferred,
+                    category: Availability::TransportDeferred,
                 },
             ),
             (
@@ -983,7 +1034,7 @@ mod tests {
                     resource: InboundResourceLimit::TransportDeferredCapacity,
                 },
                 InputOutcome::Unavailable {
-                    category: InputCategory::ResourceRefused,
+                    category: Availability::ResourceRefused,
                 },
             ),
         ];

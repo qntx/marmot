@@ -25,8 +25,8 @@ use std::sync::{Arc, Mutex};
 
 use mk_core::testing::{LocalSigner, ManualClock, RecordingHost};
 use mk_core::{
-    AccountSigner, DestinationPolicy, Event, GroupId, Opened, Outbound, RelayResult, RelayStatus,
-    Session, SessionConfig, SessionEvent,
+    AccountId, AccountSigner, DestinationPolicy, Event, GroupId, Opened, Outbound, RelayResult,
+    RelayStatus, Session, SessionConfig, SessionEvent, SignerError, SignerFuture, UnsignedEvent,
 };
 
 /// An in-process relay set: published events per URL, tag/kind filtered
@@ -148,9 +148,82 @@ pub fn inbox_relays_of(relay: &FakeRelay, url: &str, account_hex: &str) -> Vec<S
         .unwrap_or_default()
 }
 
+/// A `LocalSigner` whose `nip44_decrypt` can be switched to refuse or
+/// fail — for the welcome-unwrap retry path.
+#[derive(Debug)]
+pub struct GatedSigner {
+    inner: LocalSigner,
+    mode: Mutex<DecryptGate>,
+}
+
+/// What [`GatedSigner::nip44_decrypt`] answers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DecryptGate {
+    /// Decrypt normally.
+    Working,
+    /// Report `SignerError::Refused`.
+    Refused,
+    /// Report `SignerError::Failed`.
+    Failed,
+}
+
+impl GatedSigner {
+    /// A gated signer over a fresh keypair, decrypting normally.
+    pub fn new() -> Self {
+        Self {
+            inner: LocalSigner::new(),
+            mode: Mutex::new(DecryptGate::Working),
+        }
+    }
+
+    /// Switch the `nip44_decrypt` answer.
+    pub fn set(&self, mode: DecryptGate) {
+        *self.mode.lock().unwrap() = mode;
+    }
+}
+
+impl Default for GatedSigner {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl AccountSigner for GatedSigner {
+    fn account(&self) -> AccountId {
+        self.inner.account()
+    }
+
+    fn sign_event(&self, unsigned: UnsignedEvent) -> SignerFuture<'_, Result<Event, SignerError>> {
+        self.inner.sign_event(unsigned)
+    }
+
+    fn nip44_encrypt<'a>(
+        &'a self,
+        peer: &'a AccountId,
+        plaintext: &'a str,
+    ) -> SignerFuture<'a, Result<String, SignerError>> {
+        self.inner.nip44_encrypt(peer, plaintext)
+    }
+
+    fn nip44_decrypt<'a>(
+        &'a self,
+        peer: &'a AccountId,
+        ciphertext: &'a str,
+    ) -> SignerFuture<'a, Result<String, SignerError>> {
+        let mode = *self.mode.lock().unwrap();
+        match mode {
+            DecryptGate::Working => self.inner.nip44_decrypt(peer, ciphertext),
+            DecryptGate::Refused => Box::pin(async { Err(SignerError::Refused) }),
+            DecryptGate::Failed => {
+                Box::pin(async { Err(SignerError::Failed("gate closed".to_owned())) })
+            }
+        }
+    }
+}
+
 /// One account-device session under test.
 pub struct Member {
-    pub signer: Arc<LocalSigner>,
+    pub signer: Arc<dyn AccountSigner>,
     pub clock: Arc<ManualClock>,
     pub host: Arc<RecordingHost>,
     pub session: Session,
@@ -169,7 +242,7 @@ impl Member {
 
 /// The shared `SessionConfig` used by [`open_member`] / [`reopen_member`].
 pub fn session_config(
-    signer: Arc<LocalSigner>,
+    signer: Arc<dyn AccountSigner>,
     clock: Arc<ManualClock>,
     host: Arc<RecordingHost>,
     rows: Vec<(Vec<u8>, Vec<u8>)>,
@@ -186,9 +259,14 @@ pub fn session_config(
     }
 }
 
-/// Open a fresh member, completing the account-proof handshake.
+/// Open a fresh member over a new `LocalSigner`.
 pub async fn open_member() -> Member {
-    let signer = Arc::new(LocalSigner::new());
+    open_member_with(Arc::new(LocalSigner::new())).await
+}
+
+/// Open a fresh member over `signer`, completing the account-proof
+/// handshake.
+pub async fn open_member_with(signer: Arc<dyn AccountSigner>) -> Member {
     let clock = Arc::new(ManualClock::new());
     let host = Arc::new(RecordingHost::new());
     let opened = Session::open(session_config(

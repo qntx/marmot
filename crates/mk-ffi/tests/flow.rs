@@ -155,6 +155,8 @@ fn two_member_flow_reopen_rotate_and_retry() {
         "unreachable relays must stay pending: {attempted:?}"
     );
     relay.unavailable = false;
+    // The paced retry is withheld until its first backoff deadline (1 s).
+    alice.advance(1_001);
     let retried = alice.publish(&mut relay);
     assert!(
         retried

@@ -8,7 +8,6 @@ import {
 } from "../src/backend/codec.ts";
 import type { Json } from "../src/backend/codec.ts";
 import type { Signer } from "../src/backend/engine.ts";
-import { SignerRefusedError } from "../src/backend/engine.ts";
 import { encodeKvBatch } from "../src/backend/kv.ts";
 import type { Backend, BridgeHandle, BridgeHost } from "../src/backend/port.ts";
 import type {
@@ -21,11 +20,11 @@ import type {
   NostrEvent,
   Outbound,
   PublishResolution,
-  SignerOp,
 } from "../src/backend/protocol.ts";
 import { utf8Decode, utf8Encode } from "../src/backend/utf8.ts";
 import { MarmotClient } from "../src/client/client.ts";
 import type { MarmotError } from "../src/client/errors.ts";
+import { COMMIT_SIZE_FLOOR_BYTES } from "../src/client/pump.ts";
 import { decodeClientState, encodeClientState } from "../src/client/state.ts";
 import { manualClock } from "../src/testing/clock.ts";
 import { memoryCursorStore } from "../src/testing/cursors.ts";
@@ -33,6 +32,7 @@ import { memoryKv } from "../src/testing/memory.ts";
 import { fakeRelay } from "../src/testing/relay.ts";
 import { manualTimer } from "../src/testing/timer.ts";
 import type { ManualTimer } from "../src/testing/timer.ts";
+import { wireEventBytes } from "../src/transport/nostr.ts";
 import { groupCursorKey, inboxCursorKey } from "../src/transport/plan.ts";
 import type { RelayFilter, RelayPort } from "../src/transport/port.ts";
 
@@ -99,6 +99,12 @@ type Script = {
   outbound: Outbound[];
   /** FIFO `report_publish` resolutions; falls back to `complete`. */
   resolutions: PublishResolution[];
+  /**
+   * Items the engine holds live after a `pending`/`confirmed` report — withheld from
+   * `take_outbound` until its own deadline. A test pushes them back into `outbound` to model the
+   * deadline arriving.
+   */
+  deferred: Outbound[];
   /** `groups` answer. */
   groups: GroupSnapshot[];
   /** `tick` answer (ms until wake). */
@@ -107,15 +113,12 @@ type Script = {
   sent: BridgeResponse;
   /** Emit `host.commit` (seq ascending) when these request types run. */
   commitOn: Array<BridgeRequest["type"]>;
-  /** Suspend the next `ingest` on this signer op; the reply returns the reports. */
-  suspendOnIngest: SignerOp | undefined;
   calls: BridgeRequest[];
 };
 
 function scriptedBackend(script: Script): { backend: Backend; closed: () => boolean } {
   let closed = false;
   let seq = 0n;
-  let stashed: BridgeResponse | undefined;
   const inflight = new Map<string, Outbound>();
   const done = (): BridgeResponse => DONE;
   const backend: Backend = {
@@ -132,11 +135,6 @@ function scriptedBackend(script: Script): { backend: Backend; closed: () => bool
           await Promise.resolve();
           const { request } = decodeCallValue(JSON.parse(utf8Decode(bytes)) as Json);
           script.calls.push(request);
-          if (request.type === "signer_reply" && stashed !== undefined) {
-            const response = stashed;
-            stashed = undefined;
-            return utf8Encode(JSON.stringify(encodeResponse(response)));
-          }
           const response = ((): BridgeResponse => {
             switch (request.type) {
               case "tick":
@@ -156,15 +154,6 @@ function scriptedBackend(script: Script): { backend: Backend; closed: () => bool
                   type: "ok",
                   result: { type: "ingested", reports },
                 };
-                const suspend = script.suspendOnIngest;
-                if (suspend !== undefined) {
-                  script.suspendOnIngest = undefined;
-                  stashed = ingested;
-                  return {
-                    type: "signer_pending",
-                    requests: [{ id: 1, op: suspend }],
-                  };
-                }
                 return ingested;
               }
               case "take_outbound": {
@@ -177,15 +166,15 @@ function scriptedBackend(script: Script): { backend: Backend; closed: () => bool
               }
               case "report_publish": {
                 const resolution = script.resolutions.shift() ?? "complete";
-                // A pending item stays in the outbox: the next take re-serves it.
-                if (resolution === "pending") {
-                  const item = inflight.get(request.id);
-                  if (item !== undefined) {
-                    inflight.delete(item.id);
-                    script.outbound.push(item);
-                  }
-                } else {
-                  inflight.delete(request.id);
+                const item = inflight.get(request.id);
+                inflight.delete(request.id);
+                // A pending or confirmed-but-outstanding fanout stays live in the engine,
+                // withheld from `take_outbound` until its own deadline.
+                if (
+                  item !== undefined &&
+                  (resolution === "pending" || resolution === "confirmed")
+                ) {
+                  script.deferred.push(item);
                 }
                 return {
                   type: "ok",
@@ -290,11 +279,11 @@ function freshScript(): Script {
     reports: "auto",
     outbound: [],
     resolutions: [],
+    deferred: [],
     groups: [],
     nextWake: undefined,
     sent: { type: "ok", result: { type: "send_outcome", outcome: { type: "queued" } } },
     commitOn: [],
-    suspendOnIngest: undefined,
     calls: [],
   };
 }
@@ -324,6 +313,7 @@ async function open(script: Script, blob?: Uint8Array, sign?: Signer): Promise<F
   const inner = network.port("c");
   const port: RelayPort = {
     publish: async (relay, event) => inner.publish(relay, event),
+    connect: async (relay) => inner.connect(relay),
     subscribe: (relay, filters, handlers) => {
       subs.push({ relay, filters });
       return inner.subscribe(relay, filters, handlers);
@@ -514,37 +504,11 @@ describe("MarmotClient", () => {
     await fixture.client.close();
   });
 
-  test("an unavailable verdict keeps the item pending and a later tick retries it", async () => {
+  test("a pending publish waits for the engine wake; there is no fixed retry tick", async () => {
     const script = freshScript();
-    script.resolutions.push("pending", "complete");
-    const outbound: Outbound = {
-      id: `0b${"1".repeat(62)}`,
-      event: event({ id: "44".repeat(32), kind: 445, tags: [["h", ROUTE]] }),
-      relays: [RELAY],
-      purpose: "application_message",
-    };
-    script.outbound = [outbound];
-    const fixture = await open(script, encodeClientState({ cursors: {}, inbox: [RELAY] }));
-    fixture.network.mode(RELAY, "down");
-    await settle(fixture.timer, 0);
-    // Down: the publish still ran (the port answers unavailable), reported pending.
-    expect(callsOf(script, "report_publish")).toHaveLength(1);
-    expect(fixture.network.published()).toHaveLength(1);
-    // The dedicated retry timer is 5 s out — nothing before it.
-    await settle(fixture.timer, 4999);
-    expect(fixture.network.published()).toHaveLength(1);
-    // At the tick the engine re-serves the pending item and the publish lands.
-    fixture.network.mode(RELAY, "normal");
-    await settle(fixture.timer, 5000);
-    expect(fixture.network.published()).toHaveLength(2);
-    expect(callsOf(script, "take_outbound").length).toBeGreaterThanOrEqual(2);
-    await fixture.client.close();
-  });
-
-  test("an unavailable publish retries on its own timer, not the engine wake", async () => {
-    const script = freshScript();
-    // The engine asks for a wake a minute out — the outbox retry must not wait for it.
+    // The engine paces the retry itself — the pump's only wake is `nextWakeMs`.
     script.nextWake = 60_000n;
+    script.resolutions.push("pending", "complete");
     const outbound: Outbound = {
       id: `0e${"0".repeat(62)}`,
       event: event({ id: "88".repeat(32), kind: 445, tags: [["h", ROUTE]] }),
@@ -555,14 +519,20 @@ describe("MarmotClient", () => {
     const fixture = await open(script, encodeClientState({ cursors: {}, inbox: [RELAY] }));
     fixture.network.mode(RELAY, "down");
     await settle(fixture.timer, 0);
-    const takes = callsOf(script, "take_outbound").length;
-    expect(takes).toBeGreaterThan(0);
-    // Nothing due before the 5 s retry timer — the 60 s wake does not pre-empt it.
-    await settle(fixture.timer, 4999);
-    expect(callsOf(script, "take_outbound")).toHaveLength(takes);
+    // Down: the publish ran (unavailable) and reported pending; the engine parks the
+    // item, so the take that follows every report finds nothing to re-serve.
+    expect(callsOf(script, "report_publish")).toHaveLength(1);
+    expect(fixture.network.published()).toHaveLength(1);
+    expect(callsOf(script, "take_outbound").length).toBeGreaterThanOrEqual(2);
+    // The wake is armed at the engine's 60 s — the old fixed 5 s retry tick is gone.
     fixture.network.mode(RELAY, "normal");
     await settle(fixture.timer, 5000);
-    expect(callsOf(script, "take_outbound").length).toBeGreaterThan(takes);
+    expect(fixture.network.published()).toHaveLength(1);
+    // The engine re-serves the item; the armed wake's tick takes and publishes it.
+    script.outbound.push(...script.deferred.splice(0));
+    await settle(fixture.timer, 60_000);
+    expect(fixture.network.published()).toHaveLength(2);
+    expect(callsOf(script, "report_publish")).toHaveLength(2);
     await fixture.client.close();
   });
 
@@ -672,10 +642,10 @@ describe("MarmotClient", () => {
     await fixture.client.close();
   });
 
-  test("a pending resolution never re-takes immediately; the retry comes on the armed wake", async () => {
+  test("a pending resolution is withheld until the engine re-serves it at the armed wake", async () => {
     const script = freshScript();
     script.nextWake = 5000n;
-    script.resolutions.push("pending");
+    script.resolutions.push("pending", "complete");
     const outbound: Outbound = {
       id: `0d${"0".repeat(62)}`,
       event: event({ id: "66".repeat(32), kind: 445, tags: [["h", ROUTE]] }),
@@ -684,16 +654,207 @@ describe("MarmotClient", () => {
     };
     script.outbound = [outbound];
     const fixture = await open(script, encodeClientState({ cursors: {}, inbox: [RELAY] }));
-    // Zero-delay open tick: take, publish, report → pending. No re-take afterwards.
+    // Zero-delay open tick: take, publish, report → pending. The re-take that follows
+    // every report finds nothing: the engine withholds the item until its deadline.
     await settle(fixture.timer, 0);
     await settle(fixture.timer, 0);
-    expect(callsOf(script, "take_outbound")).toHaveLength(1);
+    expect(callsOf(script, "take_outbound").length).toBeGreaterThanOrEqual(2);
+    expect(fixture.network.published()).toHaveLength(1);
     // The armed wake is 5 s out — nothing fires before it.
     await settle(fixture.timer, 4999);
-    expect(callsOf(script, "take_outbound")).toHaveLength(1);
-    // The wake tick runs the outbox pass again.
+    expect(fixture.network.published()).toHaveLength(1);
+    // The engine re-serves the item; the wake tick's take publishes it.
+    script.outbound.push(...script.deferred.splice(0));
     await settle(fixture.timer, 5000);
-    expect(callsOf(script, "take_outbound").length).toBeGreaterThan(1);
+    expect(fixture.network.published()).toHaveLength(2);
+    await fixture.client.close();
+  });
+
+  test("a refused dial reports not_sent to the engine", async () => {
+    const script = freshScript();
+    script.resolutions.push("pending");
+    const outbound: Outbound = {
+      id: `0c${"0".repeat(62)}`,
+      event: event({ id: "55".repeat(32), kind: 445, tags: [["h", ROUTE]] }),
+      relays: [RELAY],
+      purpose: "application_message",
+    };
+    script.outbound = [outbound];
+    const fixture = await open(script, encodeClientState({ cursors: {}, inbox: [RELAY] }));
+    fixture.network.mode(RELAY, "refuse");
+    await settle(fixture.timer, 0);
+    const reports = callsOf(script, "report_publish");
+    expect(reports).toHaveLength(1);
+    expect(reports[0]).toMatchObject({
+      results: [{ relay: RELAY, status: "not_sent" }],
+    });
+    await fixture.client.close();
+  });
+
+  test("a commit over the size floor is refused locally on a reachable relay", async () => {
+    const script = freshScript();
+    script.resolutions.push("rolled_back");
+    const outbound: Outbound = {
+      id: `0f${"0".repeat(62)}`,
+      event: event({
+        id: "99".repeat(32),
+        kind: 445,
+        tags: [["h", ROUTE]],
+        content: "x".repeat(COMMIT_SIZE_FLOOR_BYTES),
+      }),
+      relays: [RELAY],
+      purpose: "commit",
+    };
+    script.outbound = [outbound];
+    const fixture = await open(script, encodeClientState({ cursors: {}, inbox: [RELAY] }));
+    const errors: MarmotError[] = [];
+    fixture.client.onError((error) => {
+      errors.push(error);
+    });
+    await settle(fixture.timer, 5000);
+    // Nothing was transmitted — the connect probe answered and the commit was refused locally.
+    expect(fixture.network.published()).toHaveLength(0);
+    const reports = callsOf(script, "report_publish");
+    expect(reports).toHaveLength(1);
+    expect(reports[0]).toMatchObject({
+      results: [{ relay: RELAY, status: "rejected" }],
+    });
+    expect(errors.map((e) => e.kind)).toStrictEqual(["commit_too_large"]);
+    expect(errors[0]?.message).not.toContain(RELAY);
+    await fixture.client.close();
+  });
+
+  test("an over-floor commit on an unreachable relay reports not_sent without the size error", async () => {
+    const script = freshScript();
+    script.resolutions.push("pending");
+    const outbound: Outbound = {
+      id: `10${"0".repeat(62)}`,
+      event: event({
+        id: "98".repeat(32),
+        kind: 445,
+        tags: [["h", ROUTE]],
+        content: "x".repeat(COMMIT_SIZE_FLOOR_BYTES),
+      }),
+      relays: [RELAY],
+      purpose: "commit",
+    };
+    script.outbound = [outbound];
+    const fixture = await open(script, encodeClientState({ cursors: {}, inbox: [RELAY] }));
+    const errors: MarmotError[] = [];
+    fixture.client.onError((error) => {
+      errors.push(error);
+    });
+    fixture.network.mode(RELAY, "refuse");
+    await settle(fixture.timer, 0);
+    expect(fixture.network.published()).toHaveLength(0);
+    const reports = callsOf(script, "report_publish");
+    expect(reports).toHaveLength(1);
+    expect(reports[0]).toMatchObject({
+      results: [{ relay: RELAY, status: "not_sent" }],
+    });
+    expect(errors.map((e) => e.kind)).not.toContain("commit_too_large");
+    await fixture.client.close();
+  });
+
+  test("a commit at exactly the size floor publishes normally", async () => {
+    const script = freshScript();
+    const base = event({ id: "97".repeat(32), kind: 445, tags: [["h", ROUTE]] });
+    const pad = COMMIT_SIZE_FLOOR_BYTES - wireEventBytes(base);
+    const outbound: Outbound = {
+      id: `11${"0".repeat(62)}`,
+      event: { ...base, content: "x".repeat(pad) },
+      relays: [RELAY],
+      purpose: "commit",
+    };
+    expect(wireEventBytes(outbound.event)).toBe(COMMIT_SIZE_FLOOR_BYTES);
+    script.outbound = [outbound];
+    const fixture = await open(script, encodeClientState({ cursors: {}, inbox: [RELAY] }));
+    await settle(fixture.timer, 5000);
+    expect(fixture.network.published()).toStrictEqual([
+      { client: "c", relay: RELAY, event: outbound.event },
+    ]);
+    const reports = callsOf(script, "report_publish");
+    expect(reports).toHaveLength(1);
+    expect(reports[0]).toMatchObject({
+      results: [{ relay: RELAY, status: "accepted" }],
+    });
+    await fixture.client.close();
+  });
+
+  test("a relay rejection after a commit confirms warns commit_refused", async () => {
+    const script = freshScript();
+    script.resolutions.push("confirmed", "pending");
+    const outbound: Outbound = {
+      id: `12${"0".repeat(62)}`,
+      event: event({ id: "96".repeat(32), kind: 445, tags: [["h", ROUTE]] }),
+      relays: [RELAY],
+      purpose: "commit",
+    };
+    script.outbound = [outbound];
+    const fixture = await open(script, encodeClientState({ cursors: {}, inbox: [RELAY] }));
+    const errors: MarmotError[] = [];
+    fixture.client.onError((error) => {
+      errors.push(error);
+    });
+    await settle(fixture.timer, 0);
+    expect(errors.map((e) => e.kind)).not.toContain("commit_refused");
+    // The engine re-serves the still-outstanding fanout; the relay now refuses it.
+    fixture.network.mode(RELAY, "reject");
+    script.outbound.push(...script.deferred.splice(0));
+    await fixture.client.groups();
+    await settle(fixture.timer, 5000);
+    expect(callsOf(script, "report_publish")).toHaveLength(2);
+    expect(errors.map((e) => e.kind)).toContain("commit_refused");
+    await fixture.client.close();
+  });
+
+  test("an early rejection a relay later reverses does not warn", async () => {
+    const script = freshScript();
+    script.resolutions.push("pending", "confirmed");
+    const outbound: Outbound = {
+      id: `13${"0".repeat(62)}`,
+      event: event({ id: "95".repeat(32), kind: 445, tags: [["h", ROUTE]] }),
+      relays: [RELAY],
+      purpose: "commit",
+    };
+    script.outbound = [outbound];
+    const fixture = await open(script, encodeClientState({ cursors: {}, inbox: [RELAY] }));
+    const errors: MarmotError[] = [];
+    fixture.client.onError((error) => {
+      errors.push(error);
+    });
+    fixture.network.mode(RELAY, "reject");
+    await settle(fixture.timer, 0);
+    expect(callsOf(script, "report_publish")).toHaveLength(1);
+    // The retry reaches the same relay and is accepted — the refusal is reversed.
+    fixture.network.mode(RELAY, "normal");
+    script.outbound.push(...script.deferred.splice(0));
+    await fixture.client.groups();
+    await settle(fixture.timer, 5000);
+    expect(callsOf(script, "report_publish")).toHaveLength(2);
+    expect(errors.map((e) => e.kind)).not.toContain("commit_refused");
+    await fixture.client.close();
+  });
+
+  test("a rolled-back commit never warns", async () => {
+    const script = freshScript();
+    script.resolutions.push("rolled_back");
+    const outbound: Outbound = {
+      id: `14${"0".repeat(62)}`,
+      event: event({ id: "94".repeat(32), kind: 445, tags: [["h", ROUTE]] }),
+      relays: [RELAY],
+      purpose: "commit",
+    };
+    script.outbound = [outbound];
+    const fixture = await open(script, encodeClientState({ cursors: {}, inbox: [RELAY] }));
+    const errors: MarmotError[] = [];
+    fixture.client.onError((error) => {
+      errors.push(error);
+    });
+    fixture.network.mode(RELAY, "reject");
+    await settle(fixture.timer, 0);
+    expect(callsOf(script, "report_publish")).toHaveLength(1);
+    expect(errors.map((e) => e.kind)).not.toContain("commit_refused");
     await fixture.client.close();
   });
 
@@ -921,45 +1082,55 @@ describe("MarmotClient", () => {
     expect(fixture.network.openSubscriptions()).toBe(0);
   });
 
-  test.each([
-    {
-      verdict: "refused",
-      reason: "signer_refused",
-      fail: () => {
-        throw new SignerRefusedError();
-      },
+  test.each([{ reason: "signer_refused" as const }, { reason: "signer_failed" as const }])(
+    "a $reason wrap ingest emits a retryable pending invite",
+    async ({ reason }) => {
+      const script = freshScript();
+      const wrapId = "9a".repeat(32);
+      script.reports = [{ event: wrapId, outcome: { type: "unavailable", category: reason } }];
+      const fixture = await open(script, encodeClientState({ cursors: {}, inbox: [RELAY] }));
+      const invites: unknown[] = [];
+      fixture.client.onInvite((invite) => {
+        invites.push(invite);
+      });
+      await fixture.network.port("peer").publish(RELAY, wrap(wrapId));
+      await settle(fixture.timer, 25);
+      // Pending carries no wrap id — the client stores no wraps; redelivery is a replay.
+      expect(invites).toStrictEqual([{ type: "pending", reason }]);
+      await fixture.client.close();
     },
-    {
-      verdict: "failed",
-      reason: "signer_failed",
-      fail: () => {
-        throw new Error("signer broke");
-      },
-    },
-  ])("a $verdict signer during wrap ingest emits a blocked invite", async ({ reason, fail }) => {
-    const sign = signer();
-    sign.nip44Decrypt = async () => {
-      fail();
-      return Promise.resolve("plain");
-    };
+  );
+
+  test("retryInvites closes and reopens the inbox subscription at the capped cursor", async () => {
     const script = freshScript();
-    const wrapId = "9a".repeat(32);
+    const wrapId = "9b".repeat(32);
+    const fixture = await open(
+      script,
+      encodeClientState({ cursors: { [inboxCursorKey(RELAY)]: 200_000 }, inbox: [RELAY] }),
+    );
+    await settle(fixture.timer, 5000);
+    expect(fixture.network.openSubscriptions("c")).toBe(1);
+    // The unavailable report caps the inbox cursor at the wrap's createdAt − 1.
     script.reports = [
-      { event: wrapId, outcome: { type: "rejected", category: "invalid_encoding" } },
+      { event: wrapId, outcome: { type: "unavailable", category: "signer_refused" } },
     ];
-    script.suspendOnIngest = {
-      type: "nip44_decrypt",
-      peer: "bb".repeat(32),
-      ciphertext: "x",
-    };
-    const fixture = await open(script, encodeClientState({ cursors: {}, inbox: [RELAY] }), sign);
-    const invites: unknown[] = [];
-    fixture.client.onInvite((invite) => {
-      invites.push(invite);
-    });
-    await fixture.network.port("peer").publish(RELAY, wrap(wrapId));
-    await settle(fixture.timer, 25);
-    expect(invites).toStrictEqual([{ type: "blocked", reason, wrap: wrapId }]);
+    await fixture.network
+      .port("peer")
+      .publish(
+        RELAY,
+        event({ id: wrapId, kind: 1059, createdAt: 190_000n, tags: [["p", ACCOUNT]] }),
+      );
+    await settle(fixture.timer, 5000);
+    expect(decodeClientState(fixture.cursors.bytes()).cursors[inboxCursorKey(RELAY)]).toBe(189_999);
+    await fixture.client.retryInvites();
+    await settle(fixture.timer, 5000);
+    const inboxSubs = fixture.subs.filter((sub) =>
+      sub.filters.some((filter) => filter.kinds?.includes(1059) === true),
+    );
+    // Closed and reopened once, at the capped cursor minus the gift-wrap overlap.
+    expect(inboxSubs).toHaveLength(2);
+    expect(inboxSubs[1]?.filters[0]?.since).toBe(189_999 - 172_800);
+    expect(fixture.network.openSubscriptions("c")).toBe(1);
     await fixture.client.close();
   });
 

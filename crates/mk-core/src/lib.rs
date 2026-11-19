@@ -68,7 +68,7 @@ mod types;
 pub use clock::{Clock, Time};
 pub use error::{MetaRow, OpenError};
 pub use events::{
-    Disposition, GroupChange, InputCategory, InputOutcome, InputReport, LocalState,
+    Availability, Disposition, GroupChange, InputCategory, InputOutcome, InputReport, LocalState,
     ReceivedMessage, SessionEvent,
 };
 pub use kv::{BatchCodecError, CommitSeq, KvBatch, KvHost, KvOp};

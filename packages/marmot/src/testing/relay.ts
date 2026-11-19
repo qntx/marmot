@@ -13,7 +13,7 @@ import type {
   SubscriptionHandlers,
 } from "../transport/port.ts";
 
-export type FakeRelayMode = "normal" | "drop" | "reject" | "down" | "shuffle";
+export type FakeRelayMode = "normal" | "drop" | "reject" | "down" | "refuse" | "shuffle";
 
 /** An in-memory relay network with per-relay verdict switches and per-client counters. */
 export type FakeRelayNetwork = {
@@ -22,8 +22,10 @@ export type FakeRelayNetwork = {
   /**
    * Set a relay's verdict mode. `drop`: publish answers accepted but stores/delivers nothing.
    * `reject`: answers rejected, stores nothing. `down`: answers unavailable; open subscriptions get
-   * `closed("down")` and new ones close immediately. `shuffle`: stored replay is served in
-   * seeded-random order with every event delivered twice; live events are delivered twice too.
+   * `closed("down")` and new ones close immediately. `refuse`: the dial is refused — `connect`
+   * answers false and publish answers `not_sent`; open subscriptions get `closed("refuse")` and new
+   * ones close immediately. `shuffle`: stored replay is served in seeded-random order with every
+   * event delivered twice; live events are delivered twice too.
    */
   mode: (relay: string, mode: FakeRelayMode) => void;
   /** Hold publish answers (pending promises) until `release`. */
@@ -196,6 +198,9 @@ export function fakeRelay(seed = 1): FakeRelayNetwork {
     }
     all.push({ client, relay, event });
     const mode = modeOf(relay);
+    if (mode === "refuse") {
+      return "not_sent";
+    }
     if (mode === "down") {
       return "unavailable";
     }
@@ -226,9 +231,10 @@ export function fakeRelay(seed = 1): FakeRelayNetwork {
     if (dead.has(client)) {
       return () => undefined;
     }
-    if (modeOf(relay) === "down") {
+    const mode = modeOf(relay);
+    if (mode === "down" || mode === "refuse") {
       queueMicrotask(() => {
-        handlers.closed("down");
+        handlers.closed(mode);
       });
       return () => undefined;
     }
@@ -289,19 +295,23 @@ export function fakeRelay(seed = 1): FakeRelayNetwork {
     port(client) {
       return {
         publish: async (relay, event) => publish(client, relay, event),
+        connect: async (relay) => {
+          await Promise.resolve();
+          return !dead.has(client) && modeOf(relay) !== "refuse";
+        },
         subscribe: (relay, filters, handlers) => subscribe(client, relay, filters, handlers),
       };
     },
 
     mode(relay, mode) {
       modes.set(relay, mode);
-      if (mode === "down") {
+      if (mode === "down" || mode === "refuse") {
         for (const sub of subs) {
           if (sub.relay === relay && sub.open) {
             sub.open = false;
             subs.delete(sub);
             queueMicrotask(() => {
-              sub.handlers.closed("down");
+              sub.handlers.closed(mode);
             });
           }
         }

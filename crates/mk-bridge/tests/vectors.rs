@@ -175,6 +175,15 @@ fn input_outcome_variants() {
 }
 
 #[test]
+fn availability_category_variants() {
+    check::<AvailabilityCategory>(
+        "availability_category.json",
+        "type",
+        Value::String("\u{0}".to_owned()),
+    );
+}
+
+#[test]
 fn group_change_variants() {
     check::<GroupChange>("group_change.json", "type", tagged_probe());
 }

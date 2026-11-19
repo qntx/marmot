@@ -1,8 +1,10 @@
 /**
- * `invites` — invite-facing helpers: the typed `InviteEvent`, the `observeSigner` wrapper that
- * records signer refusals/failures, and `blockedInvites`, which attributes rejected gift wraps to a
- * refusing signer. A refused or failed wrap is terminal at the engine (redelivery is a `duplicate`,
- * never retried), so the client surfaces a `blocked` event rather than keeping it.
+ * `invites` — invite-facing helpers: the typed `InviteEvent`, `pendingInvites`, which surfaces
+ * signer-refused/failed gift-wrap unwraps as retryable `pending` events, and `observeSigner`, which
+ * records signer refusals/failures so client ops map them to typed errors. A refused or failed
+ * unwrap is `unavailable` in the engine — rolled back and retryable — so the client emits `pending`
+ * and offers `retryInvites`, which reopens the inbox subscriptions at the capped cursor and lets
+ * the relays replay the wraps.
  */
 
 import { SignerRefusedError } from "../backend/engine.ts";
@@ -11,7 +13,7 @@ import type { InputReport } from "../backend/protocol.ts";
 
 export type InviteEvent =
   | { type: "joined"; group: string }
-  | { type: "blocked"; reason: "signer_refused" | "signer_failed"; wrap: string };
+  | { type: "pending"; reason: "signer_refused" | "signer_failed" };
 
 /**
  * Wrap `signer` so the first refused/failed call since the last `take()` is recorded.
@@ -49,28 +51,20 @@ export function observeSigner(signer: Signer): {
 }
 
 /**
- * The blocked invites of one ingest batch: every input that is a gift wrap (`wraps` holds the
- * kind-1059 ids of the batch) reported `rejected: invalid_encoding` while the signer refused or
- * failed. A `undefined` verdict means the rejections cannot be attributed to the signer.
+ * One `pending` invite per distinct signer-unavailable reason among `reports`. The wraps stay
+ * undelivered — any `unavailable` report caps its cursor at its earliest `createdAt − 1`, so a
+ * reopened subscription replays them.
  */
-export function blockedInvites(
-  reports: InputReport[],
-  wraps: ReadonlySet<string>,
-  verdict: "refused" | "failed" | undefined,
-): InviteEvent[] {
-  if (verdict === undefined) {
-    return [];
-  }
-  const reason = verdict === "refused" ? "signer_refused" : "signer_failed";
-  const blocked: InviteEvent[] = [];
+export function pendingInvites(reports: InputReport[]): InviteEvent[] {
+  const reasons = new Set<"signer_refused" | "signer_failed">();
   for (const report of reports) {
+    const { outcome } = report;
     if (
-      report.outcome.type === "rejected" &&
-      report.outcome.category === "invalid_encoding" &&
-      wraps.has(report.event)
+      outcome.type === "unavailable" &&
+      (outcome.category === "signer_refused" || outcome.category === "signer_failed")
     ) {
-      blocked.push({ type: "blocked", reason, wrap: report.event });
+      reasons.add(outcome.category);
     }
   }
-  return blocked;
+  return [...reasons].map((reason) => ({ type: "pending", reason }));
 }

@@ -6,6 +6,7 @@
  */
 
 import type { Backend, Clock, Signer, GroupSnapshot } from "@qntx/marmot/backend";
+import { SignerRefusedError } from "@qntx/marmot/backend";
 import {
   GROUP_OVERLAP_SECS,
   MAX_RELAYS,
@@ -16,6 +17,7 @@ import {
 } from "@qntx/marmot/client";
 import type {
   ClientMessage,
+  DeliveryEvent,
   GroupEvent,
   InviteEvent,
   MarmotErrorKind,
@@ -85,6 +87,7 @@ export type ClientHandle = {
   received: ClientMessage[];
   invites: InviteEvent[];
   groupChanges: GroupEvent[];
+  deliveries: DeliveryEvent[];
   errors: MarmotError[];
   /** Contents sent via `send`, for (sent ∪ received) set assertions. */
   sent: Set<string>;
@@ -123,6 +126,7 @@ export async function startClient(options: StartOptions): Promise<ClientHandle> 
     received: [],
     invites: [],
     groupChanges: [],
+    deliveries: [],
     errors: [],
     sent: new Set(),
     port: options.port,
@@ -155,6 +159,9 @@ async function openInstance(handle: HandleSeed): Promise<MarmotClient> {
   });
   client.onGroupChange((event) => {
     handle.groupChanges.push(event);
+  });
+  client.onDelivery((event) => {
+    handle.deliveries.push(event);
   });
   client.onError((error) => {
     handle.errors.push(error);
@@ -766,5 +773,194 @@ export async function scenarioClockSkew(): Promise<ScenarioReport> {
     peaks: peaksOf([a, b, c], network),
   };
   await closeAll([a, b, c], network);
+  return report;
+}
+
+/** A `testSigner` whose first `nip44Decrypt` answers `SignerRefusedError`, then works. */
+function refusingSigner(): Signer {
+  const inner = testSigner();
+  let refused = false;
+  return {
+    pubkey: inner.pubkey,
+    signEvent: inner.signEvent,
+    nip44Encrypt: inner.nip44Encrypt,
+    nip44Decrypt: async (peer, ciphertext) => {
+      if (!refused) {
+        refused = true;
+        throw new SignerRefusedError();
+      }
+      return inner.nip44Decrypt(peer, ciphertext);
+    },
+  };
+}
+
+/**
+ * A `RelayPort` whose dials are refused while `gate.refused` holds: `connect` answers false and
+ * `publish` answers `not_sent` without touching the network; subscriptions pass through.
+ */
+function gatedPort(inner: RelayPort, gate: { refused: boolean }): RelayPort {
+  return {
+    publish: async (relay, event) => (gate.refused ? "not_sent" : inner.publish(relay, event)),
+    connect: async (relay) => (gate.refused ? false : inner.connect(relay)),
+    subscribe: (relay, filters, handlers) => inner.subscribe(relay, filters, handlers),
+  };
+}
+
+/**
+ * Scenario 7: C's signer refuses its first Welcome decrypt — `pending{signer_refused}` — then
+ * `retryInvites()` replays the wrap and C joins; messages flow both ways afterwards.
+ */
+export async function scenarioInviteRetry(): Promise<ScenarioReport> {
+  const start = Date.now();
+  const network = fakeRelay(53);
+  const a = await startClient({ name: "a", network });
+  const b = await startClient({ name: "b", network });
+  const c = await startClient({ name: "c", network, signer: refusingSigner() });
+  await identity(a);
+  await identity(b);
+  await identity(c);
+  const invitees = [
+    ...(await a.client.lookupInvitees(b.signer.pubkey, [LOOKUP])),
+    ...(await a.client.lookupInvitees(c.signer.pubkey, [LOOKUP])),
+  ];
+  const snapshot = await a.client.createGroup({
+    name: "invite-retry",
+    description: "",
+    relays: [RELAY_1, RELAY_2],
+    invitees,
+  });
+  const group = snapshot.id;
+  await waitFor(
+    () => b.invites.some((event) => event.type === "joined" && event.group === group),
+    "b joined invite",
+  );
+  await waitFor(
+    () => c.invites.some((event) => event.type === "pending" && event.reason === "signer_refused"),
+    "c pending invite",
+  );
+  await c.client.retryInvites();
+  await waitFor(
+    () => c.invites.some((event) => event.type === "joined" && event.group === group),
+    "c joined invite",
+  );
+  await waitFor(async () => (await c.client.group(group)) !== undefined, "c group snapshot");
+  await send(a, group, "a>c");
+  await waitFor(() => contents(c, group).includes("a>c"), "c received a>c");
+  await send(c, group, "c>a");
+  await waitFor(() => contents(a, group).includes("c>a"), "a received c>a");
+  const expected = new Set(["a>c", "c>a"]);
+  await assertConverged([a, b, c], group, expected);
+  assertQuiet([a, b, c]);
+  assertPeaks([a, b, c], network);
+  const report = {
+    ms: Date.now() - start,
+    delivered: deliveredOf([a, b, c], group),
+    peaks: peaksOf([a, b, c], network),
+  };
+  await closeAll([a, b, c], network);
+  return report;
+}
+
+/**
+ * Scenario 8: A's port refuses every dial — an app message and a commit stay `pending` and nothing
+ * is transmitted; back online the message is delivered exactly once and the commit's profile change
+ * lands.
+ */
+export async function scenarioOfflineSend(): Promise<ScenarioReport> {
+  const start = Date.now();
+  const network = fakeRelay(67);
+  const gate = { refused: false };
+  const { a, b, group } = await openPair(network, {
+    a: { port: gatedPort(network.port("a"), gate) },
+  });
+  gate.refused = true;
+  const publishedBefore = network.published().length;
+  await send(a, group, "offline-msg");
+  await a.client.updateGroupProfile(group, { name: "renamed", description: "" });
+  // Both items report pending and keep retrying; no publish reaches the relay network.
+  await waitFor(() => {
+    const pending = a.deliveries.filter((entry) => entry.resolution === "pending");
+    return new Set(pending.map((entry) => entry.outbound)).size >= 2;
+  }, "a pending outbound");
+  if (network.published().length !== publishedBefore) {
+    throw new Error("an event was transmitted while dials were refused");
+  }
+  if (contents(b, group).includes("offline-msg")) {
+    throw new Error("offline-msg reached b while a was offline");
+  }
+  gate.refused = false;
+  await waitFor(() => contents(b, group).includes("offline-msg"), "b received offline-msg");
+  await waitFor(async () => {
+    const snapshot = await b.client.group(group);
+    return snapshot?.name === "renamed";
+  }, "commit applied");
+  await waitFor(
+    () => a.deliveries.some((entry) => entry.resolution === "confirmed"),
+    "a confirmed delivery",
+  );
+  if (contents(b, group).filter((entry) => entry === "offline-msg").length !== 1) {
+    throw new Error("offline-msg delivered more than once");
+  }
+  await assertConverged([a, b], group, new Set(["offline-msg"]));
+  assertQuiet([a, b]);
+  assertPeaks([a, b], network);
+  const report = {
+    ms: Date.now() - start,
+    delivered: deliveredOf([a, b], group),
+    peaks: peaksOf([a, b], network),
+  };
+  await closeAll([a, b], network);
+  return report;
+}
+
+/**
+ * Scenario 9: a commit staged while the port refuses dials meets a rejecting relay when the dials
+ * recover — `rolled_back`, the profile is unchanged, and a later send still lands.
+ */
+export async function scenarioOfflineCommitRollback(): Promise<ScenarioReport> {
+  const start = Date.now();
+  const network = fakeRelay(71);
+  const gate = { refused: false };
+  const { a, b, group } = await openPair(network, {
+    a: { port: gatedPort(network.port("a"), gate) },
+  });
+  gate.refused = true;
+  const publishedBefore = network.published().length;
+  const snapshotBefore = await a.client.group(group);
+  const epochBefore = snapshotBefore?.epoch;
+  await a.client.selfUpdate(group);
+  await waitFor(
+    () => a.deliveries.some((entry) => entry.resolution === "pending"),
+    "a pending outbound",
+  );
+  if (network.published().length !== publishedBefore) {
+    throw new Error("an event was transmitted while dials were refused");
+  }
+  gate.refused = false;
+  // The dial recovers but the relays refuse the commit — every target is terminal, so the
+  // commit rolls back instead of hanging on retry.
+  network.mode(RELAY_1, "reject");
+  network.mode(RELAY_2, "reject");
+  await waitFor(
+    () => a.deliveries.some((entry) => entry.resolution === "rolled_back"),
+    "a rolled_back delivery",
+  );
+  network.mode(RELAY_1, "normal");
+  network.mode(RELAY_2, "normal");
+  const aSnapshot = await a.client.group(group);
+  if (aSnapshot?.epoch !== epochBefore) {
+    throw new Error("rolled-back commit did not return the group to its prior epoch");
+  }
+  await send(a, group, "after-rollback");
+  await waitFor(() => contents(b, group).includes("after-rollback"), "b received after-rollback");
+  await assertConverged([a, b], group, new Set(["after-rollback"]));
+  assertQuiet([a, b]);
+  assertPeaks([a, b], network);
+  const report = {
+    ms: Date.now() - start,
+    delivered: deliveredOf([a, b], group),
+    peaks: peaksOf([a, b], network),
+  };
+  await closeAll([a, b], network);
   return report;
 }

@@ -295,7 +295,9 @@ export async function runFlow(env: FlowEnv): Promise<FlowTimings> {
     "all-unavailable verdicts must stay pending",
   );
   network.mode(RELAY, "normal");
-  await a.engine.tick();
+  const nextWakeMs = await a.engine.tick();
+  // The engine withholds the paced item until its backoff deadline — advance to the wake first.
+  a.clock.advance(Number(nextWakeMs ?? 0n));
   const retried = await publish(a, network);
   assert(
     retried.some((resolution) => resolution !== "pending"),

@@ -24,6 +24,7 @@ tagged `"type"` (the error enum uses `"kind"`), fieldless enums are plain
 | `send_outcome.json` | `SendOutcome` |
 | `publish_resolution.json` | `PublishResolution` |
 | `input_outcome.json` | `InputOutcome` |
+| `availability_category.json` | `AvailabilityCategory` |
 | `group_change.json` | `GroupChange` |
 | `relay_status.json` | `RelayStatus` |
 | `outbound_purpose.json` | `OutboundPurpose` |

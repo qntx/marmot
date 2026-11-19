@@ -124,7 +124,7 @@ fn deferred_peel_flow() {
         ingested.reports.iter().any(|report| matches!(
             report.outcome,
             InputOutcome::Unavailable {
-                category: InputCategory::TransportDeferred,
+                category: AvailabilityCategory::TransportDeferred,
             }
         )),
         "the forged event must defer: {ingested:?}"

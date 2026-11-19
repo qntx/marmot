@@ -7,6 +7,7 @@
 import type { Event, Filter, Pool } from "@qntx/nostr";
 
 import type { NostrEvent } from "../backend/protocol.ts";
+import { utf8Encode } from "../backend/utf8.ts";
 import type { PublishStatus, RelayFilter, RelayPort, SubscriptionHandlers } from "./port.ts";
 
 function toWire(event: NostrEvent): Event {
@@ -44,10 +45,21 @@ function toFilter(filter: RelayFilter): Filter {
   };
 }
 
+/** The event's NIP-01 wire-JSON UTF-8 size — the measure relay size limits are classed by. */
+export function wireEventBytes(event: NostrEvent): number {
+  return utf8Encode(JSON.stringify(toWire(event))).length;
+}
+
 /** Adapt `pool` to the `RelayPort` contract: publish never rejects, `closed` is relay-initiated. */
 export function nostrRelayPort(pool: Pool): RelayPort {
   return {
     publish: async (relay, event): Promise<PublishStatus> => {
+      try {
+        await pool.ensureRelay(relay);
+      } catch {
+        // The pool never established the connection, so nothing was transmitted.
+        return "not_sent";
+      }
       try {
         const [result] = await pool.publish([relay], toWire(event));
         if (result?.status === "ok") {
@@ -56,9 +68,18 @@ export function nostrRelayPort(pool: Pool): RelayPort {
         if (result?.status === "rejected") {
           return "rejected";
         }
+        // `failed` and throws mean the frame may already be on the wire.
         return "unavailable";
       } catch {
         return "unavailable";
+      }
+    },
+    connect: async (relay): Promise<boolean> => {
+      try {
+        await pool.ensureRelay(relay);
+        return true;
+      } catch {
+        return false;
       }
     },
     subscribe: (relay, filters, handlers: SubscriptionHandlers) => {
