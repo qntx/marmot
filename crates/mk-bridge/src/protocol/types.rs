@@ -1307,6 +1307,7 @@ impl From<core::SessionEvent> for SessionEvent {
                 actor,
                 change,
                 origin_commit,
+                row_id: _,
             } => Self::GroupStateChanged {
                 group: group.0,
                 epoch,

@@ -483,7 +483,12 @@ impl<H: Host> Bridge<H> {
         let group = core::GroupId(args.group);
         self.run(
             op_send(move |session| {
-                Box::pin(async move { session.send_media(&group, message).await })
+                Box::pin(async move {
+                    session
+                        .send_media(&group, message)
+                        .await
+                        .map(|sent| sent.outcome)
+                })
             }),
             handles,
         )
@@ -950,7 +955,14 @@ fn op_update_app_components(
 fn op_send_message(args: SendMessageRequest) -> impl FnOnce(Box<Session>) -> OpFuture {
     let group = core::GroupId(args.group);
     let message: core::AppMessage = args.message.into();
-    op_send(move |session| Box::pin(async move { session.send_message(&group, message).await }))
+    op_send(move |session| {
+        Box::pin(async move {
+            session
+                .send_message(&group, message)
+                .await
+                .map(|sent| sent.outcome)
+        })
+    })
 }
 
 /// Validate one signer reply against the pending set.
