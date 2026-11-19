@@ -122,9 +122,14 @@ function scriptedBackend(script: Script): { backend: Backend; closed: () => bool
     name: "scripted",
     create: (host: BridgeHost) => {
       const handle: BridgeHandle = {
-        open: () =>
-          utf8Encode(JSON.stringify(encodeOpenResponse({ type: "ready", account: ACCOUNT }))),
-        call: (bytes) => {
+        open: async () => {
+          await Promise.resolve();
+          return utf8Encode(
+            JSON.stringify(encodeOpenResponse({ type: "ready", account: ACCOUNT })),
+          );
+        },
+        call: async (bytes) => {
+          await Promise.resolve();
           const { request } = decodeCallValue(JSON.parse(utf8Decode(bytes)) as Json);
           script.calls.push(request);
           if (request.type === "signer_reply" && stashed !== undefined) {
@@ -242,14 +247,17 @@ function scriptedBackend(script: Script): { backend: Backend; closed: () => bool
           }
           return utf8Encode(JSON.stringify(encodeResponse(response)));
         },
-        drain: () =>
-          utf8Encode(
+        drain: async () => {
+          await Promise.resolve();
+          return utf8Encode(
             JSON.stringify(
               encodeDrainResponse(script.drains.shift() ?? { type: "events", events: [] }),
             ),
-          ),
-        close: () => {
+          );
+        },
+        close: async () => {
           closed = true;
+          await Promise.resolve();
         },
       };
       return handle;
