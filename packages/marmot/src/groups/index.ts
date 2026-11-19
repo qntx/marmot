@@ -9,11 +9,13 @@ import type {
   AppMessage,
   AttachmentInput,
   ComponentUpdate,
+  GroupAvatar,
   GroupSnapshot,
   Invitee,
   Locator,
   MediaAttachmentRef,
   SendOutcome,
+  SentMessage,
 } from "../backend/protocol.ts";
 
 export async function createGroup(
@@ -67,8 +69,117 @@ export async function sendMessage(
   engine: Engine,
   group: string,
   message: AppMessage,
-): Promise<SendOutcome> {
+): Promise<SentMessage> {
   return engine.sendMessage(group, message);
+}
+
+/** Send a chat message; `replyTo` adds the `e`/`q` reply pair. */
+export async function sendChat(
+  engine: Engine,
+  group: string,
+  content: string,
+  replyTo?: string,
+): Promise<SentMessage> {
+  return engine.sendIntent(group, { type: "chat", content, replyTo });
+}
+
+/** React to `target` with `emoji`. */
+export async function react(
+  engine: Engine,
+  group: string,
+  target: string,
+  emoji: string,
+): Promise<SentMessage> {
+  return engine.sendIntent(group, { type: "reaction", target, emoji });
+}
+
+/** Withdraw own reactions by event id. */
+export async function unreact(
+  engine: Engine,
+  group: string,
+  reactions: string[],
+): Promise<SentMessage> {
+  return engine.sendIntent(group, { type: "unreact", reactions });
+}
+
+/** Replace `target`'s content. */
+export async function editMessage(
+  engine: Engine,
+  group: string,
+  target: string,
+  content: string,
+): Promise<SentMessage> {
+  return engine.sendIntent(group, { type: "edit", target, content });
+}
+
+/** Delete `target` (admin removal shape when the sender is an admin). */
+export async function deleteMessage(
+  engine: Engine,
+  group: string,
+  target: string,
+): Promise<SentMessage> {
+  return engine.sendIntent(group, { type: "delete", target });
+}
+
+/** Admin removal of `target`. */
+export async function removeMessage(
+  engine: Engine,
+  group: string,
+  target: string,
+): Promise<SentMessage> {
+  return engine.sendIntent(group, { type: "remove", target });
+}
+
+/** Grant or revoke `account`'s admin flag. */
+export async function setAdmin(
+  engine: Engine,
+  group: string,
+  account: string,
+  admin: boolean,
+): Promise<SendOutcome> {
+  return engine.setAdmin(group, account, admin);
+}
+
+/** Step down: revoke this account's own admin flag. */
+export async function stepDown(
+  engine: Engine,
+  group: string,
+  account: string,
+): Promise<SendOutcome> {
+  return engine.setAdmin(group, account, false);
+}
+
+/** Set or clear the group's avatar; `undefined` clears. */
+export async function setGroupAvatar(
+  engine: Engine,
+  group: string,
+  avatar: GroupAvatar | undefined,
+): Promise<SendOutcome> {
+  return engine.setGroupAvatar(group, avatar);
+}
+
+/** Set the group's message retention seconds; `0` disables. */
+export async function setRetention(
+  engine: Engine,
+  group: string,
+  seconds: bigint,
+): Promise<SendOutcome> {
+  return engine.setRetention(group, seconds);
+}
+
+/** Request the group's terminal disband. */
+export async function disband(engine: Engine, group: string): Promise<SendOutcome> {
+  return engine.disband(group);
+}
+
+/** Require the lifecycle component on a group that predates it. */
+export async function enableDisbanding(engine: Engine, group: string): Promise<SendOutcome> {
+  return engine.enableDisbanding(group);
+}
+
+/** Forget the group locally. */
+export async function forgetGroup(engine: Engine, group: string): Promise<void> {
+  return engine.forgetGroup(group);
 }
 
 /** One blob upload: ciphertext plus the metadata the store needs; resolves with its locators. */
@@ -158,7 +269,7 @@ export async function sendSealedMedia(
   caption: string,
   refs: MediaAttachmentRef[],
   tags: string[][] = [],
-): Promise<SendOutcome> {
+): Promise<SentMessage> {
   return engine.sendMedia(group, caption, refs, tags);
 }
 

@@ -22,7 +22,9 @@ import type {
   ClockReading,
   ComponentUpdate,
   DrainResponse,
+  DropReason,
   EncryptedMediaPolicy,
+  GroupAvatar,
   GroupChange,
   GroupSnapshot,
   GroupState,
@@ -34,6 +36,7 @@ import type {
   MediaAttachmentRef,
   MediaReference,
   MemberSnapshot,
+  MessageIntent,
   NostrEvent,
   OpResult,
   OpenResponse,
@@ -43,7 +46,9 @@ import type {
   ReceivedMessage,
   RelayResult,
   RelayStatus,
+  Semantics,
   SendOutcome,
+  SentEvent,
   SessionEvent,
   SignerOp,
   SignerReply,
@@ -58,6 +63,7 @@ import type {
 import {
   ATTACHMENT_REJECTIONS,
   AVAILABILITY_VALUES,
+  DROP_REASONS,
   ERROR_KINDS,
   GROUP_STATES,
   INPUT_CATEGORY_VALUES,
@@ -499,6 +505,146 @@ export function encodeMediaAttachmentRef(ref: MediaAttachmentRef): Json {
 
 const RELAY_RESULT_KEYS = ["relay", "status"];
 
+const AVATAR_KEYS = ["url", "dim", "thumbhash"];
+
+export function decodeGroupAvatar(value: unknown, path = "avatar"): GroupAvatar {
+  const o = rec(value, path, AVATAR_KEYS);
+  return {
+    url: str(field(o, "url", path), `${path}.url`),
+    dim: optStr(o["dim"], `${path}.dim`),
+    thumbhash: optStr(o["thumbhash"], `${path}.thumbhash`),
+  };
+}
+
+export function encodeGroupAvatar(avatar: GroupAvatar): Json {
+  return {
+    url: avatar.url,
+    dim: avatar.dim ?? null,
+    thumbhash: avatar.thumbhash ?? null,
+  };
+}
+
+const INTENT_KEYS = ["type", "content", "reply_to", "target", "emoji", "reactions"];
+
+export function decodeMessageIntent(value: unknown, path = "intent"): MessageIntent {
+  const o = rec(value, path, INTENT_KEYS);
+  const type = tag(o, path);
+  switch (type) {
+    case "chat":
+      return {
+        type,
+        content: str(field(o, "content", path), `${path}.content`),
+        replyTo: optHex32(o["reply_to"], `${path}.reply_to`),
+      };
+    case "reaction":
+      return {
+        type,
+        target: hex32(field(o, "target", path), `${path}.target`),
+        emoji: str(field(o, "emoji", path), `${path}.emoji`),
+      };
+    case "unreact":
+      return {
+        type,
+        reactions: arr(field(o, "reactions", path), `${path}.reactions`, (item, p) =>
+          hex32(item, p),
+        ),
+      };
+    case "edit":
+      return {
+        type,
+        target: hex32(field(o, "target", path), `${path}.target`),
+        content: str(field(o, "content", path), `${path}.content`),
+      };
+    case "delete":
+    case "remove":
+      return { type, target: hex32(field(o, "target", path), `${path}.target`) };
+    default:
+      return fail(`${path}.type`, "value");
+  }
+}
+
+export function encodeMessageIntent(intent: MessageIntent): Json {
+  return match(intent, {
+    chat: (intent) => ({
+      type: "chat",
+      content: intent.content,
+      reply_to: intent.replyTo ?? null,
+    }),
+    reaction: (intent) => ({ type: "reaction", target: intent.target, emoji: intent.emoji }),
+    unreact: (intent) => ({ type: "unreact", reactions: intent.reactions }),
+    edit: (intent) => ({ type: "edit", target: intent.target, content: intent.content }),
+    delete: (intent) => ({ type: "delete", target: intent.target }),
+    remove: (intent) => ({ type: "remove", target: intent.target }),
+  });
+}
+
+const SENT_EVENT_KEYS = ["id", "pubkey", "created_at", "kind", "tags", "content"];
+
+export function decodeSentEvent(value: unknown, path = "message"): SentEvent {
+  const o = rec(value, path, SENT_EVENT_KEYS);
+  return {
+    id: str(field(o, "id", path), `${path}.id`),
+    pubkey: hex32(field(o, "pubkey", path), `${path}.pubkey`),
+    createdAt: u64(field(o, "created_at", path), `${path}.created_at`),
+    kind: uint(field(o, "kind", path), `${path}.kind`),
+    tags: tags(field(o, "tags", path), `${path}.tags`),
+    content: str(field(o, "content", path), `${path}.content`),
+  };
+}
+
+export function encodeSentEvent(event: SentEvent): Json {
+  return {
+    id: event.id,
+    pubkey: event.pubkey,
+    created_at: event.createdAt.toString(),
+    kind: event.kind,
+    tags: event.tags,
+    content: event.content,
+  };
+}
+
+const SEMANTICS_KEYS = ["type", "reply_to", "target", "emoji"];
+
+export function decodeSemantics(value: unknown, path = "semantics"): Semantics {
+  const o = rec(value, path, SEMANTICS_KEYS);
+  const type = tag(o, path);
+  switch (type) {
+    case "chat":
+      return { type, replyTo: optHex32(o["reply_to"], `${path}.reply_to`) };
+    case "reaction":
+      return {
+        type,
+        target: hex32(field(o, "target", path), `${path}.target`),
+        emoji: str(field(o, "emoji", path), `${path}.emoji`),
+      };
+    case "removal":
+      return { type, target: hex32(field(o, "target", path), `${path}.target`) };
+    case "other":
+    case "unmapped":
+      return { type };
+    default:
+      return fail(`${path}.type`, "value");
+  }
+}
+
+export function encodeSemantics(semantics: Semantics): Json {
+  return match(semantics, {
+    chat: (semantics) => ({ type: "chat", reply_to: semantics.replyTo ?? null }),
+    reaction: (semantics) => ({
+      type: "reaction",
+      target: semantics.target,
+      emoji: semantics.emoji,
+    }),
+    removal: (semantics) => ({ type: "removal", target: semantics.target }),
+    other: (semantics) => ({ type: semantics.type }),
+    unmapped: (semantics) => ({ type: semantics.type }),
+  });
+}
+
+export function decodeDropReason(value: unknown, path = "reason"): DropReason {
+  return oneOf(value, path, DROP_REASONS);
+}
+
 export function decodeRelayResult(value: unknown, path = "result"): RelayResult {
   const o = rec(value, path, RELAY_RESULT_KEYS);
   return {
@@ -662,6 +808,8 @@ const MESSAGE_KEYS = [
   "transport_id",
   "attachments",
   "stream_final",
+  "semantics",
+  "expires_at",
 ];
 
 export function decodeReceivedMessage(value: unknown, path = "message"): ReceivedMessage {
@@ -681,6 +829,8 @@ export function decodeReceivedMessage(value: unknown, path = "message"): Receive
       streamFinal === null || streamFinal === undefined
         ? undefined
         : decodeStreamFinal(streamFinal, `${path}.stream_final`),
+    semantics: decodeSemantics(field(o, "semantics", path), `${path}.semantics`),
+    expiresAt: optU64(o["expires_at"], `${path}.expires_at`),
   };
 }
 
@@ -696,6 +846,8 @@ export function encodeReceivedMessage(message: ReceivedMessage): Json {
     transport_id: message.transportId,
     attachments: message.attachments.map(encodeAttachmentResult),
     stream_final: message.streamFinal === undefined ? null : encodeStreamFinal(message.streamFinal),
+    semantics: encodeSemantics(message.semantics),
+    expires_at: message.expiresAt === undefined ? null : message.expiresAt.toString(),
   };
 }
 
@@ -801,6 +953,7 @@ const SESSION_EVENT_KEYS = [
   "reason",
   "outbound",
   "resolution",
+  "row_id",
 ];
 
 export function decodeSessionEvent(value: unknown, path = "event"): SessionEvent {
@@ -848,6 +1001,7 @@ export function decodeSessionEvent(value: unknown, path = "event"): SessionEvent
         actor: optHex32(o["actor"], `${path}.actor`),
         change: decodeGroupChange(field(o, "change", path), `${path}.change`),
         originCommit: optHex32(o["origin_commit"], `${path}.origin_commit`),
+        rowId: str(field(o, "row_id", path), `${path}.row_id`),
       };
     case "group_state_invalidated":
     case "group_state_revalidated":
@@ -883,6 +1037,12 @@ export function decodeSessionEvent(value: unknown, path = "event"): SessionEvent
         type,
         outbound: hex32(field(o, "outbound", path), `${path}.outbound`),
         resolution: decodePublishResolution(field(o, "resolution", path), `${path}.resolution`),
+      };
+    case "app_event_dropped":
+      return {
+        type,
+        group: group(path),
+        reason: decodeDropReason(field(o, "reason", path), `${path}.reason`),
       };
     case "unmapped":
       return { type };
@@ -927,6 +1087,7 @@ export function encodeSessionEvent(event: SessionEvent): Json {
       actor: event.actor ?? null,
       change: encodeGroupChange(event.change),
       origin_commit: event.originCommit ?? null,
+      row_id: event.rowId,
     }),
     group_state_invalidated: (event) => ({
       type: event.type,
@@ -967,6 +1128,11 @@ export function encodeSessionEvent(event: SessionEvent): Json {
       outbound: event.outbound,
       resolution: event.resolution,
     }),
+    app_event_dropped: (event) => ({
+      type: "app_event_dropped",
+      group: event.group,
+      reason: event.reason,
+    }),
     unmapped: () => ({ type: "unmapped" }),
   });
 }
@@ -997,12 +1163,17 @@ const SNAPSHOT_KEYS = [
   "own_account_admin",
   "encrypted_media",
   "agent_text_stream",
+  "avatar",
+  "retention_seconds",
+  "disband_enabled",
+  "disbanding",
 ];
 
 export function decodeGroupSnapshot(value: unknown, path = "group"): GroupSnapshot {
   const o = rec(value, path, SNAPSHOT_KEYS);
   const media = field(o, "encrypted_media", path);
   const stream = field(o, "agent_text_stream", path);
+  const avatar = field(o, "avatar", path);
   return {
     id: hexEncode(hex(field(o, "id", path), `${path}.id`)),
     name: str(field(o, "name", path), `${path}.name`),
@@ -1021,6 +1192,13 @@ export function decodeGroupSnapshot(value: unknown, path = "group"): GroupSnapsh
       stream === null || stream === undefined
         ? undefined
         : decodeStreamPolicy(stream, `${path}.agent_text_stream`),
+    avatar:
+      avatar === null || avatar === undefined
+        ? undefined
+        : decodeGroupAvatar(avatar, `${path}.avatar`),
+    retentionSeconds: u64(field(o, "retention_seconds", path), `${path}.retention_seconds`),
+    disbandEnabled: bool(field(o, "disband_enabled", path), `${path}.disband_enabled`),
+    disbanding: bool(field(o, "disbanding", path), `${path}.disbanding`),
   };
 }
 
@@ -1039,6 +1217,10 @@ export function encodeGroupSnapshot(snapshot: GroupSnapshot): Json {
       snapshot.encryptedMedia === undefined ? null : encodeMediaPolicy(snapshot.encryptedMedia),
     agent_text_stream:
       snapshot.agentTextStream === undefined ? null : encodeStreamPolicy(snapshot.agentTextStream),
+    avatar: snapshot.avatar === undefined ? null : encodeGroupAvatar(snapshot.avatar),
+    retention_seconds: snapshot.retentionSeconds.toString(),
+    disband_enabled: snapshot.disbandEnabled,
+    disbanding: snapshot.disbanding,
   };
 }
 
@@ -1145,6 +1327,7 @@ export function decodeSendOutcome(value: unknown, path = "outcome"): SendOutcome
     case "queued":
     case "no_change":
     case "leave_requested":
+    case "disband_requested":
     case "unmapped":
       return { type };
     default:
@@ -1158,6 +1341,7 @@ export function encodeSendOutcome(outcome: SendOutcome): Json {
     queued: (outcome) => ({ type: outcome.type }),
     no_change: (outcome) => ({ type: outcome.type }),
     leave_requested: (outcome) => ({ type: outcome.type }),
+    disband_requested: (outcome) => ({ type: outcome.type }),
     unmapped: (outcome) => ({ type: outcome.type }),
   });
 }
@@ -1273,6 +1457,11 @@ export function decodeRequest(value: unknown, path = "request"): BridgeRequest {
     "events",
     "ids",
     "replies",
+    "intent",
+    "account",
+    "admin",
+    "avatar",
+    "seconds",
   ]);
   const type = tag(o, path);
   const group = (p: string) => hexEncode(hex(field(o, "group", p), `${p}.group`));
@@ -1335,6 +1524,40 @@ export function decodeRequest(value: unknown, path = "request"): BridgeRequest {
         group: group(path),
         message: decodeAppMessage(field(o, "message", path), `${path}.message`),
       };
+    case "send_intent":
+      return {
+        type,
+        group: group(path),
+        intent: decodeMessageIntent(field(o, "intent", path), `${path}.intent`),
+      };
+    case "set_admin":
+      return {
+        type,
+        group: group(path),
+        account: hex32(field(o, "account", path), `${path}.account`),
+        admin: bool(field(o, "admin", path), `${path}.admin`),
+      };
+    case "set_group_avatar": {
+      const avatar = field(o, "avatar", path);
+      return {
+        type,
+        group: group(path),
+        avatar:
+          avatar === null || avatar === undefined
+            ? undefined
+            : decodeGroupAvatar(avatar, `${path}.avatar`),
+      };
+    }
+    case "set_retention":
+      return {
+        type,
+        group: group(path),
+        seconds: u64(field(o, "seconds", path), `${path}.seconds`),
+      };
+    case "disband":
+    case "enable_disbanding":
+    case "forget_group":
+      return { type, group: group(path) };
     case "seal_attachment":
       return {
         type,
@@ -1437,6 +1660,30 @@ export function encodeRequest(request: BridgeRequest): Json {
       group: request.group,
       message: encodeAppMessage(request.message),
     }),
+    send_intent: (request) => ({
+      type: "send_intent",
+      group: request.group,
+      intent: encodeMessageIntent(request.intent),
+    }),
+    set_admin: (request) => ({
+      type: "set_admin",
+      group: request.group,
+      account: request.account,
+      admin: request.admin,
+    }),
+    set_group_avatar: (request) => ({
+      type: "set_group_avatar",
+      group: request.group,
+      avatar: request.avatar === undefined ? null : encodeGroupAvatar(request.avatar),
+    }),
+    set_retention: (request) => ({
+      type: "set_retention",
+      group: request.group,
+      seconds: request.seconds.toString(),
+    }),
+    disband: (request) => ({ type: request.type, group: request.group }),
+    enable_disbanding: (request) => ({ type: request.type, group: request.group }),
+    forget_group: (request) => ({ type: request.type, group: request.group }),
     seal_attachment: (request) => ({
       type: "seal_attachment",
       group: request.group,
@@ -1490,6 +1737,7 @@ export function decodeOpResult(value: unknown, path = "result"): OpResult {
     "plaintext",
     "reports",
     "next_wake_ms",
+    "message",
   ]);
   const type = tag(o, path);
   switch (type) {
@@ -1531,6 +1779,12 @@ export function decodeOpResult(value: unknown, path = "result"): OpResult {
       return {
         type,
         outcome: decodeSendOutcome(field(o, "outcome", path), `${path}.outcome`),
+      };
+    case "message_sent":
+      return {
+        type,
+        outcome: decodeSendOutcome(field(o, "outcome", path), `${path}.outcome`),
+        message: decodeSentEvent(field(o, "message", path), `${path}.message`),
       };
     case "sealed_attachment":
       return {
@@ -1596,6 +1850,11 @@ export function encodeOpResult(result: OpResult): Json {
     send_outcome: (result) => ({
       type: "send_outcome",
       outcome: encodeSendOutcome(result.outcome),
+    }),
+    message_sent: (result) => ({
+      type: "message_sent",
+      outcome: encodeSendOutcome(result.outcome),
+      message: encodeSentEvent(result.message),
     }),
     sealed_attachment: (result) => ({
       type: "sealed_attachment",

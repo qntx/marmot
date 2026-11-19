@@ -1,5 +1,5 @@
 /**
- * TypeScript mirror of the mk-bridge JSON wire protocol (`PROTOCOL_VERSION` 2). Decoded
+ * TypeScript mirror of the mk-bridge JSON wire protocol (`PROTOCOL_VERSION` 3). Decoded
  * representation: `u64` fields arrive as decimal strings and decode to `bigint`; identifiers (event
  * ids, pubkeys, group ids, nostr group ids, signatures, outbound ids, hashes, nonces) decode to
  * validated lowercase hex `string`s; payload blobs (`key_package`, component `data`, attachment
@@ -17,7 +17,7 @@ import type { InputCategory } from "../core/errors.ts";
 export type Complete<T extends never> = T;
 
 /** Wire protocol version. Bumped on any breaking schema change. */
-export const PROTOCOL_VERSION = 2;
+export const PROTOCOL_VERSION = 3;
 
 /** One reading of the injected clock (decimal strings on the wire). */
 export type ClockReading = {
@@ -166,12 +166,85 @@ export type MediaAttachmentRef = {
   locators: Locator[];
 };
 
+/** The group's `0x8007` avatar-url component fields. */
+export type GroupAvatar = {
+  url: string;
+  /** Optional `WxH` hint. */
+  dim: string | undefined;
+  /** Optional thumbhash hint. */
+  thumbhash: string | undefined;
+};
+
+/** A typed application-message intent (`send_intent`). */
+export type MessageIntent =
+  | { type: "chat"; content: string; replyTo: string | undefined }
+  | { type: "reaction"; target: string; emoji: string }
+  | { type: "unreact"; reactions: string[] }
+  | { type: "edit"; target: string; content: string }
+  | { type: "delete"; target: string }
+  | { type: "remove"; target: string };
+
+export const MESSAGE_INTENT_TYPES = [
+  "chat",
+  "reaction",
+  "unreact",
+  "edit",
+  "delete",
+  "remove",
+] as const;
+
+export type _MessageIntentComplete = Complete<
+  Exclude<MessageIntent["type"], (typeof MESSAGE_INTENT_TYPES)[number]>
+>;
+
+/** The inner app event a send produced, including its canonical id. */
+export type SentEvent = {
+  /** Canonical inner event id, hex. */
+  id: string;
+  /** Signer's account key, hex. */
+  pubkey: string;
+  /** Unix seconds. */
+  createdAt: bigint;
+  /** Nostr kind. */
+  kind: number;
+  tags: string[][];
+  content: string;
+};
+
+/** The typed meaning of a received application message. */
+export type Semantics =
+  | { type: "chat"; replyTo: string | undefined }
+  | { type: "reaction"; target: string; emoji: string }
+  | { type: "removal"; target: string }
+  | { type: "other" }
+  | { type: "unmapped" };
+
+export const SEMANTICS_TYPES = ["chat", "reaction", "removal", "other", "unmapped"] as const;
+
+export type _SemanticsComplete = Complete<
+  Exclude<Semantics["type"], (typeof SEMANTICS_TYPES)[number]>
+>;
+
+/** Why a received application event was dropped instead of delivered. */
+export type DropReason = "expired" | "unauthorized" | "unverifiable" | "malformed" | "unmapped";
+
+export const DROP_REASONS = [
+  "expired",
+  "unauthorized",
+  "unverifiable",
+  "malformed",
+  "unmapped",
+] as const;
+
+export type _DropReasonComplete = Complete<Exclude<DropReason, (typeof DROP_REASONS)[number]>>;
+
 /** What a send produced. */
 export type SendOutcome =
   | { type: "staged"; ids: string[] }
   | { type: "queued" }
   | { type: "no_change" }
   | { type: "leave_requested" }
+  | { type: "disband_requested" }
   | { type: "unmapped" };
 
 export const SEND_OUTCOME_TYPES = [
@@ -179,6 +252,7 @@ export const SEND_OUTCOME_TYPES = [
   "queued",
   "no_change",
   "leave_requested",
+  "disband_requested",
   "unmapped",
 ] as const;
 
@@ -409,6 +483,10 @@ export type ReceivedMessage = {
   /** One entry per `imeta` tag, in tag order. */
   attachments: AttachmentResult[];
   streamFinal: StreamFinal | undefined;
+  /** The typed meaning of the inner event. */
+  semantics: Semantics;
+  /** Source-epoch retention expiry. */
+  expiresAt: bigint | undefined;
 };
 
 /** The anchors of a delivered agent text stream start (kind 1200). */
@@ -469,6 +547,8 @@ export type SessionEvent =
       actor: string | undefined;
       change: GroupChange;
       originCommit: string | undefined;
+      /** Canonical system-row id, deterministic across members. */
+      rowId: string;
     }
   | { type: "group_state_invalidated"; group: string; epoch: bigint; commit: string }
   | { type: "group_state_revalidated"; group: string; epoch: bigint; commit: string }
@@ -486,6 +566,7 @@ export type SessionEvent =
   | { type: "pending_commit_recovered"; group: string; epoch: bigint }
   | { type: "group_unrecoverable"; group: string }
   | { type: "publish_resolved"; outbound: string; resolution: PublishResolution }
+  | { type: "app_event_dropped"; group: string; reason: DropReason }
   | { type: "unmapped" };
 
 export const SESSION_EVENT_TYPES = [
@@ -506,6 +587,7 @@ export const SESSION_EVENT_TYPES = [
   "pending_commit_recovered",
   "group_unrecoverable",
   "publish_resolved",
+  "app_event_dropped",
   "unmapped",
 ] as const;
 
@@ -547,6 +629,14 @@ export type GroupSnapshot = {
   ownAccountAdmin: boolean;
   encryptedMedia: EncryptedMediaPolicy | undefined;
   agentTextStream: AgentStreamPolicy | undefined;
+  /** The group's avatar component, when set. */
+  avatar: GroupAvatar | undefined;
+  /** Message retention seconds (`0` = disabled). */
+  retentionSeconds: bigint;
+  /** Whether the group requires the `0x800c` lifecycle component. */
+  disbandEnabled: boolean;
+  /** Whether a disband is in progress. */
+  disbanding: boolean;
 };
 
 /** An account-signer operation the host must perform. */
@@ -617,6 +707,13 @@ export type BridgeRequest =
     }
   | { type: "update_app_components"; group: string; updates: ComponentUpdate[] }
   | { type: "send_message"; group: string; message: AppMessage }
+  | { type: "send_intent"; group: string; intent: MessageIntent }
+  | { type: "set_admin"; group: string; account: string; admin: boolean }
+  | { type: "set_group_avatar"; group: string; avatar: GroupAvatar | undefined }
+  | { type: "set_retention"; group: string; seconds: bigint }
+  | { type: "disband"; group: string }
+  | { type: "enable_disbanding"; group: string }
+  | { type: "forget_group"; group: string }
   | { type: "seal_attachment"; group: string; attachment: AttachmentInput }
   | {
       type: "send_media";
@@ -646,7 +743,10 @@ export const REQUEST_TYPES = [
   "acknowledge_messages",
   "awaiting_durability",
   "create_group",
+  "disband",
   "discard_attachment",
+  "enable_disbanding",
+  "forget_group",
   "group",
   "groups",
   "ingest",
@@ -659,8 +759,12 @@ export const REQUEST_TYPES = [
   "report_publish",
   "seal_attachment",
   "self_update",
+  "send_intent",
   "send_media",
   "send_message",
+  "set_admin",
+  "set_group_avatar",
+  "set_retention",
   "signer_reply",
   "submit_proof",
   "take_outbound",
@@ -688,6 +792,12 @@ export type SealedAttachmentResult = {
   handle: number;
 };
 
+/** What a `send_*` call produced: the outcome plus the sender's inner event. */
+export type SentMessage = {
+  outcome: SendOutcome;
+  message: SentEvent;
+};
+
 /** The typed result of a successful `call`, internally tagged by `type`. */
 export type OpResult =
   | { type: "ready"; account: string }
@@ -705,6 +815,7 @@ export type OpResult =
   | { type: "inbox_relays"; outboundId: string }
   | { type: "group_created"; group: GroupSnapshot }
   | { type: "send_outcome"; outcome: SendOutcome }
+  | { type: "message_sent"; outcome: SendOutcome; message: SentEvent }
   | { type: "sealed_attachment"; ciphertext: Uint8Array; ciphertextSha256: string; handle: number }
   | { type: "attachment"; plaintext: Uint8Array }
   | { type: "ingested"; reports: InputReport[] }
@@ -722,6 +833,7 @@ export const RESULT_TYPES = [
   "inbox_relays",
   "group_created",
   "send_outcome",
+  "message_sent",
   "sealed_attachment",
   "attachment",
   "ingested",
@@ -742,7 +854,9 @@ export type PlainErrorKind =
   | "clock_regressed"
   | "closed"
   | "confirm_conflict"
+  | "disbanding_not_enabled"
   | "group_busy"
+  | "group_disbanding"
   | "host_failed"
   | "host_rows_invalid"
   | "invalid_relay_url"
@@ -792,8 +906,10 @@ export const ERROR_KINDS = [
   "clock_regressed",
   "closed",
   "confirm_conflict",
+  "disbanding_not_enabled",
   "engine",
   "group_busy",
+  "group_disbanding",
   "host_failed",
   "host_rows_invalid",
   "internal",

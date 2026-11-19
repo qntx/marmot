@@ -6,7 +6,7 @@
 export * from "./client.ts";
 export * from "./errors.ts";
 export * from "./state.ts";
-export type { ClientMessage, DeliveryEvent, GroupEvent } from "./pump.ts";
+export type { ClientMessage, DeliveryEvent, DropEvent, GroupEvent } from "./pump.ts";
 export {
   COMMIT_SIZE_FLOOR_BYTES,
   INGEST_BATCH_MAX,
