@@ -31,7 +31,7 @@ import { join, resolve } from "node:path";
 
 import { finalizeEvent, generateSecretKey } from "nostr-tools";
 
-import type { AppMessage, Backend } from "@qntx/marmot/backend";
+import type { Backend } from "@qntx/marmot/backend";
 import { MarmotClient, nostrRelayPort } from "@qntx/marmot/client";
 import type {
   ClientMessage,
@@ -888,44 +888,36 @@ async function run(): Promise<void> {
       observeMs: QUERY_MS,
     });
 
-    // Step 9 — C sends raw inner events in wn's shapes; wn's list/timeline show how they render.
-    const cSend = async (message: AppMessage): Promise<unknown> => {
-      const outcome = await client.sendMessage(state.gid1, message);
-      return jsonable(outcome);
-    };
+    // Step 9 — C sends via the typed app-surface calls (the reserved raw kinds are refused by
+    // `sendMessage`); wn's list/timeline show how the wire shapes render. The inner id C needs for
+    // follow-ups is `sent.message.id` — the canonical wire id.
+    const cSend = async (send: () => Promise<unknown>): Promise<unknown> => jsonable(await send());
     const cViews = async (): Promise<Record<string, unknown>> => ({
       a: await messageViews(rigA, state.gid1),
       b: await messageViews(rigB, state.gid1),
     });
+
+    /** The canonical inner event id from a `message_sent` reply, else "". */
+    const innerId = (reply: unknown): string => {
+      const sent = isRecord(reply) ? reply["message"] : undefined;
+      const id = isRecord(sent) ? sent["id"] : undefined;
+      return typeof id === "string" ? id : "";
+    };
 
     let cReplyId = "";
     await step({
       name: "c.reply-kind9",
       actor: "C",
       command: () => ({
-        call: "client.sendMessage",
+        call: "client.sendChat",
         group: state.gid1,
-        message: {
-          kind: 9,
-          tags: [
-            ["e", state.m1],
-            ["q", state.m1],
-          ],
-          content: "c reply to m1",
-        },
+        message: { content: "c reply to m1", replyTo: state.m1 },
       }),
       run: async () => {
-        const reply = await cSend({
-          kind: 9,
-          tags: [
-            ["e", state.m1],
-            ["q", state.m1],
-          ],
-          content: "c reply to m1",
-        });
-        if (isRecord(reply) && reply["type"] === "staged" && Array.isArray(reply["ids"])) {
-          cReplyId = String(reply["ids"][0] ?? "");
-        }
+        const reply = await cSend(async () =>
+          client.sendChat(state.gid1, "c reply to m1", state.m1),
+        );
+        cReplyId = innerId(reply);
         return reply;
       },
       observeMs: OBSERVE_MS,
@@ -937,15 +929,13 @@ async function run(): Promise<void> {
       name: "c.react-kind7",
       actor: "C",
       command: () => ({
-        call: "client.sendMessage",
+        call: "client.react",
         group: state.gid1,
-        message: { kind: 7, tags: [["e", state.m1]], content: "👍" },
+        message: { target: state.m1, emoji: "👍" },
       }),
       run: async () => {
-        const reply = await cSend({ kind: 7, tags: [["e", state.m1]], content: "👍" });
-        if (isRecord(reply) && reply["type"] === "staged" && Array.isArray(reply["ids"])) {
-          state.cReact = String(reply["ids"][0] ?? "");
-        }
+        const reply = await cSend(async () => client.react(state.gid1, state.m1, "👍"));
+        state.cReact = innerId(reply);
         return reply;
       },
       observeMs: OBSERVE_MS,
@@ -957,11 +947,11 @@ async function run(): Promise<void> {
       name: "c.unreact-kind5",
       actor: "C",
       command: () => ({
-        call: "client.sendMessage",
+        call: "client.unreact",
         group: state.gid1,
-        message: { kind: 5, tags: [["e", state.cReact]], content: "" },
+        reactions: [state.cReact],
       }),
-      run: async () => cSend({ kind: 5, tags: [["e", state.cReact]], content: "" }),
+      run: async () => cSend(async () => client.unreact(state.gid1, [state.cReact])),
       observeMs: OBSERVE_MS,
       views: cViews,
     });
@@ -970,11 +960,12 @@ async function run(): Promise<void> {
       name: "c.edit-own-kind1009",
       actor: "C",
       command: () => ({
-        call: "client.sendMessage",
+        call: "client.editMessage",
         group: state.gid1,
-        message: { kind: 1009, tags: [["e", cReplyId]], content: "c reply edited" },
+        message: { target: cReplyId, content: "c reply edited" },
       }),
-      run: async () => cSend({ kind: 1009, tags: [["e", cReplyId]], content: "c reply edited" }),
+      run: async () =>
+        cSend(async () => client.editMessage(state.gid1, cReplyId, "c reply edited")),
       observeMs: OBSERVE_MS,
       views: cViews,
     });
@@ -983,11 +974,11 @@ async function run(): Promise<void> {
       name: "c.delete-own-kind5",
       actor: "C",
       command: () => ({
-        call: "client.sendMessage",
+        call: "client.deleteMessage",
         group: state.gid1,
-        message: { kind: 5, tags: [["e", cReplyId]], content: "" },
+        message: { target: cReplyId },
       }),
-      run: async () => cSend({ kind: 5, tags: [["e", cReplyId]], content: "" }),
+      run: async () => cSend(async () => client.deleteMessage(state.gid1, cReplyId)),
       observeMs: OBSERVE_MS,
       views: cViews,
     });
@@ -996,11 +987,11 @@ async function run(): Promise<void> {
       name: "c.edit-m1-unauthorized-kind1009",
       actor: "C",
       command: () => ({
-        call: "client.sendMessage",
+        call: "client.editMessage",
         group: state.gid1,
-        message: { kind: 1009, tags: [["e", state.m1]], content: "C edits A" },
+        message: { target: state.m1, content: "C edits A" },
       }),
-      run: async () => cSend({ kind: 1009, tags: [["e", state.m1]], content: "C edits A" }),
+      run: async () => cSend(async () => client.editMessage(state.gid1, state.m1, "C edits A")),
       observeMs: OBSERVE_MS,
       views: cViews,
     });
@@ -1010,20 +1001,11 @@ async function run(): Promise<void> {
       name: "c.remove-r1-nonadmin-kind4891",
       actor: "C",
       command: () => ({
-        call: "client.sendMessage",
+        call: "client.removeMessage",
         group: state.gid1,
-        message: {
-          kind: 4891,
-          tags: [["e", state.r1]],
-          content: JSON.stringify({ v: 1, action: "remove" }),
-        },
+        message: { target: state.r1 },
       }),
-      run: async () =>
-        cSend({
-          kind: 4891,
-          tags: [["e", state.r1]],
-          content: JSON.stringify({ v: 1, action: "remove" }),
-        }),
+      run: async () => cSend(async () => client.removeMessage(state.gid1, state.r1)),
       observeMs: OBSERVE_MS,
       views: cViews,
     });
@@ -1057,20 +1039,11 @@ async function run(): Promise<void> {
       name: "c.remove-b-msg-2-admin-kind4891",
       actor: "C",
       command: () => ({
-        call: "client.sendMessage",
+        call: "client.removeMessage",
         group: state.gid1,
-        message: {
-          kind: 4891,
-          tags: [["e", state.bMsg2]],
-          content: JSON.stringify({ v: 1, action: "remove" }),
-        },
+        message: { target: state.bMsg2 },
       }),
-      run: async () =>
-        cSend({
-          kind: 4891,
-          tags: [["e", state.bMsg2]],
-          content: JSON.stringify({ v: 1, action: "remove" }),
-        }),
+      run: async () => cSend(async () => client.removeMessage(state.gid1, state.bMsg2)),
       observeMs: OBSERVE_MS,
       views: cViews,
     });
