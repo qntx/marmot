@@ -1435,11 +1435,7 @@ mod app_surface_tests {
             ),
             "second op while a commit is in flight"
         );
-        assert_eq!(
-            a.host.batches().len(),
-            before,
-            "busy op writes no KV batch"
-        );
+        assert_eq!(a.host.batches().len(), before, "busy op writes no KV batch");
         if let Some(seq) = a.session.awaiting_durability() {
             a.session.acknowledge_durable(seq);
         }
