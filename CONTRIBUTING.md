@@ -15,7 +15,7 @@
   `xcodebuild` and the iOS SDK clang).
 - **rustup targets** — only for `build:native`:
   `rustup target add aarch64-apple-ios aarch64-apple-ios-sim
-  aarch64-linux-android x86_64-linux-android`
+  aarch64-linux-android armv7-linux-androideabi x86_64-linux-android`
 - **Rust nightly + cargo-fuzz 0.13** — only for fuzzing
   (`cargo install cargo-fuzz`).
 - **wasm-bindgen-cli** — only for `build:wasm`; the version must equal
@@ -70,7 +70,8 @@ fuzz/                 standalone cargo-fuzz project (excluded); corpus/ is
                       gitignored — seeds are generated (see Fuzzing below)
 vectors/              recorded copies frozen at the pinned revs (see
                       vectors/README.md): spec/ spec text, mdk/ MDK vectors
-upstream.json         the one pins file: spec rev + MDK tag/rev and their
+upstream.json         the one pins file: spec rev + MDK tag/rev (and the
+                      separate `wn` pin for White Noise) and their
                       3rdparty/ checkout paths
 3rdparty/             local upstream checkouts — gitignored, never committed
 scripts/              repo tooling (check-version, sync-versions,
@@ -125,7 +126,7 @@ in-process NIP-01 WebSocket relay (`nostr-sdk`'s `LocalRelay` from the
 reaped by the test; a missing or wrong-version binary under `--ignored` is
 a hard failure, never a silent skip.
 
-Build `wn`/`wnd` from the pinned MDK rev (`upstream.json` → `mdk.tag`/`rev`;
+Build `wn`/`wnd` from the pinned MDK rev (`upstream.json` → `wn.rev`;
 `marmot-markdown` needs the pinned Odin above):
 
 ```sh
@@ -136,7 +137,26 @@ ODIN=<path-to-odin> cargo install --locked \
 ```
 
 `cargo install` takes ~12 min cold; `wn --version` must report `wn 0.17.0`
-(the test asserts it against `upstream.json` `mdk.tag`).
+(the test asserts it against `upstream.json` `wn.tag`). In CI the `wn` job
+builds the pair from the pin and `interop-rust`/`interop-wasm` run the
+scenarios on every PR with the binaries cached per pin; the advisory
+`interop-nightly.yml` workflow repins to MDK master
+(`scripts/repin-mdk.ts`) and runs them there too.
+
+The TypeScript side of the same scenarios runs from `packages/marmot-wasm`
+(after `build:wasm`):
+
+```sh
+WN_BIN=<path>/wn WND_BIN=<path>/wnd \
+  bun run --cwd packages/marmot-wasm test:interop
+```
+
+`INTEROP_RELAY=nip11` (the default) has the in-process relay answer NIP-11
+with `limitation.max_limit` 500, as production relays do; `INTEROP_RELAY=bare`
+serves no NIP-11 — wnd's post-join history sweep then cannot prove a slice
+complete and S2 loses our message in a large share of runs (9/20 on wn
+0.17.0 locally; a White Noise defect, measured by the non-required CI job
+`interop-known-upstream`).
 
 ```sh
 cd crates/interop
@@ -179,14 +199,16 @@ corpus — no seeds needed there.
 `bun run build:native [--ios] [--android] [--host]` (no flag = `--ios
 --android`) builds the `mk-ffi` staticlib with `--profile native`
 (panic=unwind — the FFI boundary's `catch_unwind` needs it; `release` is
-panic=abort) and relinks each shared artifact itself:
+panic=abort) and relinks each shared artifact itself. `--ios` and
+`--android` also run in CI (`.github/workflows/native.yml`, both
+platforms):
 
 - `--ios` (macOS + Xcode): `aarch64-apple-ios` and `aarch64-apple-ios-sim`
   only → two dynamic `MarmotFfi.framework`s (install name
   `@rpath/MarmotFfi.framework/MarmotFfi`, min iOS 15.1) →
   `xcodebuild -create-xcframework` →
   `packages/marmot-native/ios/MarmotFfi.xcframework`.
-- `--android` (NDK `27.1.12297006`): `arm64-v8a` and `x86_64` →
+- `--android` (NDK `27.1.12297006`): `arm64-v8a`, `armeabi-v7a` and `x86_64` →
   `libmarmot_ffi.so` under `android/src/main/jniLibs/<abi>/`, linked with
   `-z max-page-size=16384` and `-soname,libmarmot_ffi.so`, then
   `llvm-strip --strip-unneeded`. The script fails unless SONAME is set and
@@ -283,18 +305,45 @@ breaking changes.
 ## Versioning and release
 
 npm packages and the Cargo workspace are versioned lockstep:
-`[workspace.package].version` equals every package.json version.
-`bump.config.ts` bumps `packages/marmot/package.json` and `Cargo.toml`
-(`[workspace.package].version` plus any internal `=<version>` pins) and runs
-`bun scripts/sync-versions.ts`, which syncs internal `@qntx/*` ranges and
-refreshes `bun.lock` (and `Cargo.lock` once it exists). `release` runs
-`bumpp`, which pushes a `release/vX.Y.Z` branch and opens the release pull
-request via `gh`. After the release PR merges, tag the merge commit and push
-the tag:
+`[workspace.package].version` equals every package.json version, and
+internal `@qntx/*` ranges are `^<version>` in `dependencies`/
+`peerDependencies` and `<version>` in `devDependencies`.
+
+1. `bun run release` — bumpp bumps all three package.json files and
+   `Cargo.toml` (`[workspace.package].version` plus any internal
+   `=<version>` pins), `bun scripts/sync-versions.ts` refreshes the
+   internal ranges and the `bun.lock`/`Cargo.lock` lockfiles, and bumpp
+   pushes a `release/vX.Y.Z` branch and opens the release pull request
+   via `gh`.
+2. Merge the release PR.
+3. Tag the merge commit and push the tag:
+
+   ```sh
+   git tag -a vX.Y.Z <merge-sha> -m vX.Y.Z && git push origin vX.Y.Z
+   ```
+
+4. The Publish workflow (`publish-npm.yml`) does the rest: verify (the
+   tag equals every version, the commit is on main, lockstep holds),
+   `native.yml` iOS + Android release builds from cache-free sources
+   with the exported-symbol gates and attestation, the wasm built twice
+   and compared byte for byte, `check:size`/`check:generated`, three
+   `npm publish --provenance` jobs via `qntx/workflows`, then the GitHub
+   release whose notes gain the wasm/native/tarball sha256 table.
+
+Dry-run the pipeline from any branch:
 
 ```sh
-git tag -a vX.Y.Z <merge-sha> -m vX.Y.Z && git push origin vX.Y.Z
+gh workflow run publish-npm.yml --ref <branch>
 ```
+
+(it also runs on PRs touching the pipeline).
+
+The first release of a package that does not exist on npm yet: trusted
+publishing needs the package to exist, so an owner publishes the
+CI-built tarball from that run's `npm-pack-packages-<name>` artifact
+once (`npm publish <tgz> --access public`), then adds the Trusted
+Publisher (`qntx/marmot`, workflow `publish-npm.yml`). Nothing is built
+locally.
 
 `scripts/check-version.ts` fails the lint gate when the internal `@qntx/*`
 ranges, the Cargo workspace version, member `version.workspace = true`
