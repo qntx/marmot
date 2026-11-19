@@ -5,8 +5,11 @@ import { fileURLToPath } from "node:url";
 import {
   scenarioCatchup,
   scenarioClockSkew,
+  scenarioInviteRetry,
   scenarioMain,
   scenarioMode,
+  scenarioOfflineCommitRollback,
+  scenarioOfflineSend,
   RELAY_1,
   RELAY_2,
 } from "../shared/client-e2e.ts";
@@ -62,5 +65,23 @@ describe("client e2e (bun)", () => {
     const result = await scenarioClockSkew();
     report("skew", result);
     expect(result.delivered).toStrictEqual({ a: 40, b: 40, c: 80 });
+  }, 300_000);
+
+  test("invite retry: a refused welcome surfaces pending and retryInvites joins", async () => {
+    const result = await scenarioInviteRetry();
+    report("invite-retry", result);
+    expect(result.delivered).toStrictEqual({ a: 1, b: 2, c: 1 });
+  }, 300_000);
+
+  test("offline send: not_sent pacing holds the message and the commit until the dial returns", async () => {
+    const result = await scenarioOfflineSend();
+    report("offline-send", result);
+    expect(result.delivered).toStrictEqual({ a: 0, b: 1 });
+  }, 300_000);
+
+  test("offline commit rollback: a refused commit rolls back and the group stays usable", async () => {
+    const result = await scenarioOfflineCommitRollback();
+    report("offline-commit-rollback", result);
+    expect(result.delivered).toStrictEqual({ a: 0, b: 1 });
   }, 300_000);
 });

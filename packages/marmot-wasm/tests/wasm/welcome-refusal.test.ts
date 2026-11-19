@@ -2,9 +2,9 @@
  * Welcome-refusal — what `ingest` reports when the signer's `nip44Decrypt` refuses (or fails) a
  * gift wrap, and whether redelivery of the same wrap recovers, in-session and across a reopen.
  *
- * Observed contract (release artifact): the wrap is rejected `invalid_encoding` on the refused
- * ingest, recorded as seen, and every redelivery is `rejected: duplicate` without another signer
- * call — a refused or failed welcome is terminal for that event, even after a reopen.
+ * Contract (release artifact): the refused/failed unwrap is `unavailable` with `signer_refused` or
+ * `signer_failed`, rolled back in a store savepoint and retryable — a re-ingest with a working
+ * signer unwraps and joins, in-session and after a reopen.
  */
 
 import { generateSecretKey } from "nostr-tools";
@@ -155,8 +155,7 @@ async function inviteB(pair: Pair): Promise<NostrEvent[]> {
 
 describe("welcome refusal (release wasm)", () => {
   test(
-    "a refused welcome is rejected invalid_encoding and redelivery is deduplicated — " +
-      "never retried in-session",
+    "a refused welcome is unavailable signer_refused and a working signer re-ingests and joins",
     { timeout: 120_000 },
     async () => {
       const pair = await openPair("refused");
@@ -166,7 +165,7 @@ describe("welcome refusal (release wasm)", () => {
       pair.probe.state.refuse = true;
       const first = await snapshot(pair.b, await pair.b.ingest(wraps), pair.probe.state.calls);
       expect(first.reports).toStrictEqual([
-        { event: wraps[0]?.id, outcome: { type: "rejected", category: "invalid_encoding" } },
+        { event: wraps[0]?.id, outcome: { type: "unavailable", category: "signer_refused" } },
       ]);
       expect(first.events).toStrictEqual([]);
       expect(first.groups).toBe(0);
@@ -180,16 +179,16 @@ describe("welcome refusal (release wasm)", () => {
         pair.probe.state.calls - callsBefore,
       );
       expect(second.reports).toStrictEqual([
-        { event: wraps[0]?.id, outcome: { type: "rejected", category: "duplicate" } },
+        { event: wraps[0]?.id, outcome: { type: "accepted" } },
       ]);
-      expect(second.events).toStrictEqual([]);
-      expect(second.groups).toBe(0);
-      expect(second.decryptCalls).toBe(0);
+      expect(second.events.some((event) => event.type === "group_joined")).toBe(true);
+      expect(second.groups).toBe(1);
+      expect(second.decryptCalls).toBeGreaterThan(0);
     },
   );
 
   test(
-    "a refused welcome stays rejected as duplicate after close and reopen",
+    "a refused welcome re-ingests and joins after close and reopen on the same kv",
     {
       timeout: 120_000,
     },
@@ -201,7 +200,7 @@ describe("welcome refusal (release wasm)", () => {
       pair.probe.state.refuse = true;
       const first = await snapshot(pair.b, await pair.b.ingest(wraps), pair.probe.state.calls);
       expect(first.reports).toStrictEqual([
-        { event: wraps[0]?.id, outcome: { type: "rejected", category: "invalid_encoding" } },
+        { event: wraps[0]?.id, outcome: { type: "unavailable", category: "signer_refused" } },
       ]);
       expect(first.groups).toBe(0);
       expect(first.decryptCalls).toBe(1);
@@ -210,7 +209,7 @@ describe("welcome refusal (release wasm)", () => {
       const reopenedProbe = refusalProbe(testSigner(pair.bSecret), "refused");
       const b2 = await Engine.open({
         backend: await releaseBackend(),
-        kv: pair.kvB,
+        kv: memoryKv(pair.kvB.rows()),
         clock: manualClock(),
         signer: reopenedProbe.signer,
         allowLoopback: true,
@@ -218,40 +217,43 @@ describe("welcome refusal (release wasm)", () => {
       await b2.drain();
       const second = await snapshot(b2, await b2.ingest(wraps), reopenedProbe.state.calls);
       expect(second.reports).toStrictEqual([
-        { event: wraps[0]?.id, outcome: { type: "rejected", category: "duplicate" } },
+        { event: wraps[0]?.id, outcome: { type: "accepted" } },
       ]);
-      expect(second.events).toStrictEqual([]);
-      expect(second.groups).toBe(0);
-      expect(second.decryptCalls).toBe(0);
+      expect(second.groups).toBe(1);
+      expect(second.decryptCalls).toBeGreaterThan(0);
+      await b2.close();
     },
   );
 
-  test("a signer failure rejects identically to a refusal", { timeout: 120_000 }, async () => {
-    const pair = await openPair("failed");
-    const wraps = await inviteB(pair);
-    expect(wraps).toHaveLength(1);
+  test(
+    "a signer failure is unavailable signer_failed and retries identically",
+    { timeout: 120_000 },
+    async () => {
+      const pair = await openPair("failed");
+      const wraps = await inviteB(pair);
+      expect(wraps).toHaveLength(1);
 
-    pair.probe.state.refuse = true;
-    const first = await snapshot(pair.b, await pair.b.ingest(wraps), pair.probe.state.calls);
-    expect(first.reports).toStrictEqual([
-      { event: wraps[0]?.id, outcome: { type: "rejected", category: "invalid_encoding" } },
-    ]);
-    expect(first.events).toStrictEqual([]);
-    expect(first.groups).toBe(0);
-    expect(first.decryptCalls).toBe(1);
+      pair.probe.state.refuse = true;
+      const first = await snapshot(pair.b, await pair.b.ingest(wraps), pair.probe.state.calls);
+      expect(first.reports).toStrictEqual([
+        { event: wraps[0]?.id, outcome: { type: "unavailable", category: "signer_failed" } },
+      ]);
+      expect(first.events).toStrictEqual([]);
+      expect(first.groups).toBe(0);
+      expect(first.decryptCalls).toBe(1);
 
-    pair.probe.state.refuse = false;
-    const callsBefore = pair.probe.state.calls;
-    const second = await snapshot(
-      pair.b,
-      await pair.b.ingest(wraps),
-      pair.probe.state.calls - callsBefore,
-    );
-    expect(second.reports).toStrictEqual([
-      { event: wraps[0]?.id, outcome: { type: "rejected", category: "duplicate" } },
-    ]);
-    expect(second.events).toStrictEqual([]);
-    expect(second.groups).toBe(0);
-    expect(second.decryptCalls).toBe(0);
-  });
+      pair.probe.state.refuse = false;
+      const callsBefore = pair.probe.state.calls;
+      const second = await snapshot(
+        pair.b,
+        await pair.b.ingest(wraps),
+        pair.probe.state.calls - callsBefore,
+      );
+      expect(second.reports).toStrictEqual([
+        { event: wraps[0]?.id, outcome: { type: "accepted" } },
+      ]);
+      expect(second.groups).toBe(1);
+      expect(second.decryptCalls).toBeGreaterThan(0);
+    },
+  );
 });
