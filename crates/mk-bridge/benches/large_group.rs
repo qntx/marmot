@@ -55,8 +55,8 @@ mod support;
 use std::time::Instant;
 
 use mk_bridge::protocol::{
-    AppMessage, CreateGroupRequest, IngestRequest, Invitee, NoArgs, OpResult, Request,
-    MessageSentResult, SendMessageRequest, SendOutcome, SessionEvent, TickedResult,
+    AppMessage, CreateGroupRequest, IngestRequest, Invitee, MessageSentResult, NoArgs, OpResult,
+    Request, SendMessageRequest, SendOutcome, SessionEvent, TickedResult,
 };
 use mk_core::testing::openmls_group_loads;
 use serde_json::{Value, json};
