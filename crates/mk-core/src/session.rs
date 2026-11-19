@@ -49,13 +49,20 @@ use cgka_traits::agent_text_stream::{
     AGENT_TEXT_STREAM_QUIC_RECEIVE_FEATURE,
 };
 use cgka_traits::app_components::{
-    ACCOUNT_DEVICES_COMPONENT_ID, AppComponentData, GROUP_ADMIN_POLICY_COMPONENT_ID,
+    ACCOUNT_DEVICES_COMPONENT_ID, APP_COMPONENTS_COMPONENT_ID, AppComponentData,
+    GROUP_ADMIN_POLICY_COMPONENT_ID, GROUP_AVATAR_URL_COMPONENT_ID,
     GROUP_ENCRYPTED_MEDIA_EXPORTER_CACHE_KEY, GROUP_ENCRYPTED_MEDIA_V2_COMPONENT_ID,
-    NOSTR_ROUTING_COMPONENT_ID, NostrRoutingV1, decode_nostr_routing_v1, decode_quic_varint,
-    default_group_components, is_loopback_host, is_public_ip, validate_nostr_relay_url,
+    GROUP_LIFECYCLE_COMPONENT_ID, GROUP_MESSAGE_RETENTION_COMPONENT_ID, GroupAvatarUrlV1,
+    GroupLifecycleV1, NOSTR_ROUTING_COMPONENT_ID, NostrRoutingV1, decode_components_list,
+    decode_group_avatar_url_v1, decode_group_lifecycle_v1, decode_nostr_routing_v1,
+    decode_quic_varint, default_group_components, encode_group_avatar_url_v1, encode_quic_varint,
+    is_loopback_host, is_public_ip, validate_and_normalize_group_avatar_url,
+    validate_nostr_relay_url,
 };
 use cgka_traits::app_event::{
-    MARMOT_APP_EVENT_KIND_AGENT_STREAM_START, MARMOT_APP_EVENT_KIND_CHAT, STREAM_START_TAG,
+    MARMOT_APP_EVENT_KIND_AGENT_STREAM_START, MARMOT_APP_EVENT_KIND_CHAT,
+    MARMOT_APP_EVENT_KIND_DELETE, MARMOT_APP_EVENT_KIND_EDIT, MARMOT_APP_EVENT_KIND_GROUP_SYSTEM,
+    MARMOT_APP_EVENT_KIND_REACTION, MARMOT_APP_EVENT_KIND_REMOVE, STREAM_START_TAG,
 };
 use cgka_traits::capabilities::{Capability, CapabilityRequirement, Feature, RequirementLevel};
 use cgka_traits::engine::{
@@ -94,6 +101,7 @@ use crate::outbox::{
     SessionPubPurpose, SessionPublication,
 };
 use crate::provider::KvStorageProvider;
+use crate::semantics::{self, MessageIntent};
 use crate::signer::{
     AccountSigner, DeferringProofSigner, FixedProofSigner, RefusingProofSigner, SignerAdapter,
     SignerError, SignerLatch, SignerVerdict,
@@ -486,6 +494,14 @@ pub enum SessionError {
     /// set.
     #[error("missing required capabilities")]
     MissingRequiredCapabilities,
+    /// The group does not require `marmot.group.lifecycle.v1`; call
+    /// [`Session::enable_disbanding`] first.
+    #[error("disbanding not enabled")]
+    DisbandingNotEnabled,
+    /// The group is being forgotten or a disband is in progress;
+    /// `forget_group` refuses while `disbanding_in_progress` holds.
+    #[error("group is disbanding")]
+    GroupDisbanding,
     /// The group is busy: an own commit is in flight or convergence input
     /// is unresolved. Retry after [`Session::tick`].
     #[error("group unsettled")]
@@ -548,9 +564,11 @@ fn session_engine_error(error: EngineError) -> SessionError {
             SessionError::AdminDepletion
         }
         EngineError::LeaveAlreadyRequested { .. } => SessionError::LeaveAlreadyRequested,
-        EngineError::MissingRequiredCapabilities { .. } => {
+        EngineError::MissingRequiredCapabilities { .. }
+        | EngineError::DisbandingUnsupportedMembers { .. } => {
             SessionError::MissingRequiredCapabilities
         }
+        EngineError::DisbandingNotEnabled { .. } => SessionError::DisbandingNotEnabled,
         EngineError::UnsupportedCiphersuite { got, required } => {
             SessionError::UnsupportedCiphersuite { got, required }
         }
@@ -627,6 +645,18 @@ pub struct AppMessage {
     pub content: String,
 }
 
+/// What a send produced, plus the inner event the host renders for its
+/// own message. `message.id()` is the wire inner id receivers see — NOT
+/// the staged outbound id.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SentMessage {
+    /// The send's outcome.
+    pub outcome: SendOutcome,
+    /// The host-rendered inner event (id, pubkey, `created_at`, kind, tags,
+    /// content).
+    pub message: UnsignedEvent,
+}
+
 /// What a send produced.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
@@ -642,6 +672,10 @@ pub enum SendOutcome {
     /// The leave request is durable; the engine stages step-down and
     /// `SelfRemove` as convergence permits.
     LeaveRequested,
+    /// The disband request is durable; the engine prepares the terminal
+    /// Commit asynchronously after any staged publish and the convergence
+    /// gate permit it.
+    DisbandRequested,
 }
 
 /// One attachment to seal: plaintext plus the metadata the `imeta`
@@ -778,6 +812,27 @@ pub struct GroupSnapshot {
     /// The group's `0x8006` agent text stream policy, when the component is
     /// present and decodes.
     pub agent_text_stream: Option<AgentStreamPolicy>,
+    /// The group's `0x8007` avatar, present only for a non-empty URL.
+    pub avatar: Option<GroupAvatar>,
+    /// The group's `0x8005` message-retention seconds; `0` means disabled.
+    pub retention_seconds: u64,
+    /// Whether the group requires `0x800c` and its lifecycle component is
+    /// `Active`.
+    pub disband_enabled: bool,
+    /// Whether a disband is in progress
+    /// (`engine.disbanding_in_progress`).
+    pub disbanding: bool,
+}
+
+/// The group's `0x8007` avatar-url component, decoded.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GroupAvatar {
+    /// The normalized avatar URL (https-only, no userinfo, no fragment).
+    pub url: String,
+    /// Optional `WxH` hint.
+    pub dim: Option<String>,
+    /// Optional thumbhash hint.
+    pub thumbhash: Option<String>,
 }
 
 /// The account-device session.
@@ -1666,6 +1721,7 @@ impl Session {
         group: &GroupId,
         invitees: Vec<Invitee>,
     ) -> Result<SendOutcome, SessionError> {
+        self.require_admin(group)?;
         let key_packages = invitees
             .iter()
             .map(|invitee| self.invitee_key_package(invitee))
@@ -1691,6 +1747,7 @@ impl Session {
         group: &GroupId,
         members: &[AccountId],
     ) -> Result<SendOutcome, SessionError> {
+        self.require_admin(group)?;
         let result = self
             .engine
             .send(SendIntent::RemoveMembers {
@@ -1747,6 +1804,7 @@ impl Session {
         name: Option<String>,
         description: Option<String>,
     ) -> Result<SendOutcome, SessionError> {
+        self.require_admin(group)?;
         let result = self
             .engine
             .send(SendIntent::UpdateGroupData {
@@ -1770,6 +1828,7 @@ impl Session {
         group: &GroupId,
         updates: Vec<ComponentUpdate>,
     ) -> Result<SendOutcome, SessionError> {
+        self.require_admin(group)?;
         check_agent_stream_roles(&updates)?;
         let result = self
             .engine
@@ -1788,7 +1847,222 @@ impl Session {
         self.finish_send(result)
     }
 
+    /// Grant or revoke group admin for `account` (MIP-03 admin policy,
+    /// component `0x8003`).
+    ///
+    /// # Errors
+    /// [`SessionError::NotGroupAdmin`] when this account is not a current
+    /// admin; [`SessionError::AdminDepletion`] when the change would empty
+    /// the admin set; [`SessionError::InvalidInput`] (`"admin"`) when
+    /// promoting an account that is not a member; [`SessionError`]
+    /// otherwise. An unchanged set returns [`SendOutcome::NoChange`].
+    pub async fn set_admin(
+        &mut self,
+        group: &GroupId,
+        account: AccountId,
+        admin: bool,
+    ) -> Result<SendOutcome, SessionError> {
+        let group_id = engine_gid(group);
+        let mut admins = self.admin_set(&group_id)?;
+        if !admins.contains(&self.account().0) {
+            return Err(SessionError::NotGroupAdmin);
+        }
+        if admins.contains(&account.0) == admin {
+            return Ok(SendOutcome::NoChange);
+        }
+        if admin {
+            let member = self
+                .engine
+                .members(&group_id)
+                .map_err(session_engine_error)?
+                .iter()
+                .any(|member| member.id.as_slice() == account.0);
+            if !member {
+                return Err(SessionError::InvalidInput("admin"));
+            }
+            admins.push(account.0);
+        } else {
+            admins.retain(|key| *key != account.0);
+            if admins.is_empty() {
+                return Err(SessionError::AdminDepletion);
+            }
+        }
+        admins.sort_unstable();
+        admins.dedup();
+        let mut data = Vec::new();
+        encode_quic_varint((admins.len() * 32) as u64, &mut data);
+        for key in &admins {
+            data.extend_from_slice(key);
+        }
+        self.update_app_components(
+            group,
+            vec![ComponentUpdate {
+                component_id: GROUP_ADMIN_POLICY_COMPONENT_ID,
+                data,
+            }],
+        )
+        .await
+    }
+
+    /// Set or clear the group's avatar (component `0x8007`). `None`
+    /// encodes the canonical cleared state.
+    ///
+    /// # Errors
+    /// [`SessionError::InvalidInput`] (`"avatar"`) for a refused URL
+    /// (`http://`, userinfo, fragment, over 2048 bytes);
+    /// [`SessionError::NotGroupAdmin`] for a non-admin;
+    /// [`SessionError`] otherwise.
+    pub async fn set_group_avatar(
+        &mut self,
+        group: &GroupId,
+        avatar: Option<GroupAvatar>,
+    ) -> Result<SendOutcome, SessionError> {
+        let component = match avatar {
+            Some(avatar) => GroupAvatarUrlV1 {
+                url: validate_and_normalize_group_avatar_url(&avatar.url)
+                    .map_err(|_| SessionError::InvalidInput("avatar"))?,
+                dim: avatar.dim.unwrap_or_default().into_bytes(),
+                thumbhash: avatar.thumbhash.unwrap_or_default().into_bytes(),
+            },
+            None => GroupAvatarUrlV1 {
+                url: String::new(),
+                dim: Vec::new(),
+                thumbhash: Vec::new(),
+            },
+        };
+        let data = encode_group_avatar_url_v1(&component)
+            .map_err(|_| SessionError::InvalidInput("avatar"))?;
+        self.update_app_components(
+            group,
+            vec![ComponentUpdate {
+                component_id: GROUP_AVATAR_URL_COMPONENT_ID,
+                data,
+            }],
+        )
+        .await
+    }
+
+    /// Set the group's message-retention seconds (component `0x8005`,
+    /// 8-byte big-endian); `0` disables expiry.
+    ///
+    /// # Errors
+    /// [`SessionError::NotGroupAdmin`] for a non-admin; [`SessionError`]
+    /// otherwise.
+    pub async fn set_retention(
+        &mut self,
+        group: &GroupId,
+        seconds: u64,
+    ) -> Result<SendOutcome, SessionError> {
+        self.update_app_components(
+            group,
+            vec![ComponentUpdate {
+                component_id: GROUP_MESSAGE_RETENTION_COMPONENT_ID,
+                data: seconds.to_be_bytes().to_vec(),
+            }],
+        )
+        .await
+    }
+
+    /// Request the group's terminal disband (`SendIntent::Disband`). The
+    /// engine prepares the terminal Commit asynchronously once any staged
+    /// publish lands and convergence permits.
+    ///
+    /// # Errors
+    /// [`SessionError::NotGroupAdmin`] for a non-admin;
+    /// [`SessionError::DisbandingNotEnabled`] when the group does not
+    /// require `0x800c` (see [`Self::enable_disbanding`]);
+    /// [`SessionError::MissingRequiredCapabilities`] when a member does
+    /// not advertise the lifecycle component; [`SessionError`] otherwise.
+    pub async fn disband(&mut self, group: &GroupId) -> Result<SendOutcome, SessionError> {
+        self.require_admin(group)?;
+        let result = self
+            .engine
+            .send(SendIntent::Disband {
+                group_id: engine_gid(group),
+            })
+            .await
+            .map_err(session_engine_error)?;
+        self.finish_send(result)
+    }
+
+    /// Require `marmot.group.lifecycle.v1` on a group that predates it
+    /// (`SendIntent::EnableDisbanding`): one admin Commit installing the
+    /// component as `Active`.
+    ///
+    /// # Errors
+    /// [`SessionError::NotGroupAdmin`] for a non-admin;
+    /// [`SessionError::MissingRequiredCapabilities`] when a member does
+    /// not advertise `0x800c`; [`SessionError`] otherwise.
+    pub async fn enable_disbanding(
+        &mut self,
+        group: &GroupId,
+    ) -> Result<SendOutcome, SessionError> {
+        self.require_admin(group)?;
+        let result = self
+            .engine
+            .send(SendIntent::EnableDisbanding {
+                group_id: engine_gid(group),
+            })
+            .await
+            .map_err(session_engine_error)?;
+        self.finish_send(result)
+    }
+
+    /// Forget the group locally: `engine.forget_group_local` drops the
+    /// engine's rows (leaving its `ForgottenGroup` tombstone so old
+    /// Welcomes stay rejected), then one storage unit releases this
+    /// session's own group rows — queued-intent links, media-secret rows,
+    /// and retry rows whose outbound no longer exists.
+    ///
+    /// # Errors
+    /// [`SessionError::GroupDisbanding`] while a disband is in progress;
+    /// [`SessionError`] otherwise.
+    pub fn forget_group(&mut self, group: &GroupId) -> Result<(), SessionError> {
+        let group_id = engine_gid(group);
+        if self
+            .engine
+            .disbanding_in_progress(&group_id)
+            .map_err(session_engine_error)?
+        {
+            return Err(SessionError::GroupDisbanding);
+        }
+        self.engine
+            .forget_group_local(&group_id)
+            .map_err(session_engine_error)?;
+        let live = self.live_outbound_ids()?;
+        let stale: Vec<OutboundId> = self
+            .provider
+            .outbound_retries()
+            .map_err(SessionError::Storage)?
+            .into_iter()
+            .map(|(id, _)| id)
+            .filter(|id| !live.contains(id))
+            .collect();
+        let links = self
+            .provider
+            .queued_intent_links_for_group(&group_id)
+            .map_err(SessionError::Storage)?;
+        self.provider
+            .store()
+            .transact(|| -> Result<(), StorageError> {
+                for message_id in &links {
+                    self.provider.delete_queued_intent_link(message_id)?;
+                }
+                self.provider.delete_media_secrets_for_group(&group_id)?;
+                for id in &stale {
+                    self.provider.delete_outbound_retry(id)?;
+                }
+                Ok(())
+            })
+            .map_err(SessionError::Storage)
+    }
+
     /// Send an application message into a group.
+    ///
+    /// The typed surface is [`Self::send_intent`]; this raw path refuses
+    /// the event kinds it owns (5, 7, 1009, 1210, 4891) and a kind 9
+    /// carrying `e`/`q` tags with [`SessionError::ReservedAppEvent`], in
+    /// addition to the existing kind-1200/`imeta`/`stream-start` refusals.
     ///
     /// # Errors
     /// [`SessionError`] for engine failures.
@@ -1796,8 +2070,22 @@ impl Session {
         &mut self,
         group: &GroupId,
         message: AppMessage,
-    ) -> Result<SendOutcome, SessionError> {
-        if u64::from(message.kind) == MARMOT_APP_EVENT_KIND_AGENT_STREAM_START
+    ) -> Result<SentMessage, SessionError> {
+        let kind = u64::from(message.kind);
+        if kind == MARMOT_APP_EVENT_KIND_AGENT_STREAM_START
+            || matches!(
+                kind,
+                MARMOT_APP_EVENT_KIND_DELETE
+                    | MARMOT_APP_EVENT_KIND_REACTION
+                    | MARMOT_APP_EVENT_KIND_EDIT
+                    | MARMOT_APP_EVENT_KIND_GROUP_SYSTEM
+                    | MARMOT_APP_EVENT_KIND_REMOVE
+            )
+            || (kind == MARMOT_APP_EVENT_KIND_CHAT
+                && message
+                    .tags
+                    .iter()
+                    .any(|tag| matches!(tag.first().map(String::as_str), Some("e" | "q"))))
             || message.tags.iter().any(|tag| {
                 matches!(
                     tag.first().map(String::as_str),
@@ -1807,12 +2095,55 @@ impl Session {
         {
             return Err(SessionError::ReservedAppEvent);
         }
+        self.send_app_event(group, kind, message.tags, message.content, None)
+            .await
+    }
+
+    /// Send a typed application message ([`MessageIntent`]) into a group.
+    ///
+    /// # Errors
+    /// [`SessionError::InvalidInput`] for a failed validation;
+    /// [`SessionError::NotGroupAdmin`] for `Remove` by a non-admin;
+    /// [`SessionError`] for engine failures.
+    pub async fn send_intent(
+        &mut self,
+        group: &GroupId,
+        intent: MessageIntent,
+    ) -> Result<SentMessage, SessionError> {
+        // Delete picks its kind from, and Remove refuses on, the current
+        // admin set — read before anything is built.
+        let sender_is_admin = match &intent {
+            MessageIntent::Delete { .. } | MessageIntent::Remove { .. } => {
+                let admins = self.admin_set(&engine_gid(group))?;
+                let admin = admins.contains(&self.account().0);
+                if matches!(&intent, MessageIntent::Remove { .. }) && !admin {
+                    return Err(SessionError::NotGroupAdmin);
+                }
+                admin
+            }
+            _ => false,
+        };
+        let (kind, tags, content) =
+            semantics::build_parts(&intent, sender_is_admin).map_err(SessionError::InvalidInput)?;
+        self.send_app_event(group, kind, tags, content, None).await
+    }
+
+    /// Build the inner event, send it, and wrap the outcome with the
+    /// host-rendered [`UnsignedEvent`].
+    async fn send_app_event(
+        &mut self,
+        group: &GroupId,
+        kind: u64,
+        tags: Vec<Vec<String>>,
+        content: String,
+        expected_epoch: Option<EpochPin>,
+    ) -> Result<SentMessage, SessionError> {
         let app_event = cgka_traits::app_event::MarmotAppEvent::new(
             self.account().to_hex(),
             self.clock.now().unix_ms / 1_000,
-            u64::from(message.kind),
-            message.tags,
-            message.content,
+            kind,
+            tags,
+            content,
         );
         let payload = app_event
             .encode()
@@ -1822,16 +2153,19 @@ impl Session {
             .send(SendIntent::AppMessage {
                 group_id: engine_gid(group),
                 payload,
-                expected_epoch: None,
+                expected_epoch,
             })
             .await
             .map_err(session_engine_error)?;
-        self.finish_send(result)
+        let outcome = self.finish_send(result)?;
+        let message = unsigned_of_app_event(&app_event)?;
+        Ok(SentMessage { outcome, message })
     }
 
     fn finish_send(&mut self, result: SendResult) -> Result<SendOutcome, SessionError> {
         let queued = matches!(result, SendResult::Queued { .. });
         let leave = matches!(result, SendResult::LeaveRequested { .. });
+        let disband = matches!(result, SendResult::DisbandRequested { .. });
         let artifacts = self.drain_engine_artifacts();
         let staged = self.stage_send_results(std::iter::once(result).chain(artifacts))?;
         if queued {
@@ -1839,6 +2173,9 @@ impl Session {
         }
         if leave {
             return Ok(SendOutcome::LeaveRequested);
+        }
+        if disband {
+            return Ok(SendOutcome::DisbandRequested);
         }
         if staged.is_empty() {
             return Ok(SendOutcome::NoChange);
@@ -1968,7 +2305,7 @@ impl Session {
         &mut self,
         group: &GroupId,
         message: MediaMessage,
-    ) -> Result<SendOutcome, SessionError> {
+    ) -> Result<SentMessage, SessionError> {
         let group_id = engine_gid(group);
         let policy = self
             .media_policy(&group_id)?
@@ -2045,6 +2382,7 @@ impl Session {
             None
         };
         let outcome = self.finish_send(result)?;
+        let unsigned = unsigned_of_app_event(&app_event)?;
         if let Some(message_id) = sent_message_id {
             let secret = self.media_secret(&group_id)?;
             self.provider
@@ -2055,7 +2393,10 @@ impl Session {
                 })
                 .map_err(SessionError::Storage)?;
         }
-        Ok(outcome)
+        Ok(SentMessage {
+            outcome,
+            message: unsigned,
+        })
     }
 
     /// Decrypt one attachment of a delivered message: loads the
@@ -2622,15 +2963,23 @@ impl Session {
     /// their secret rows were not persisted (the unit commits atomically or
     /// not at all).
     pub fn drain_events(&mut self) -> Result<Vec<SessionEvent>, SessionError> {
+        let now_secs = self.clock.now().unix_ms / 1_000;
         let mapped: Vec<crate::events::MappedEvent> = self
             .engine
             .drain_events()
             .into_iter()
-            .filter_map(session_event)
+            .filter_map(|event| session_event(event, now_secs))
+            .collect();
+        let dropped: Vec<MessageId> = mapped
+            .iter()
+            .filter_map(|item| item.drop_pending.clone())
             .collect();
         self.provider
             .store()
-            .transact(|| -> Result<(), StorageError> { self.persist_media_secret_effects(&mapped) })
+            .transact(|| -> Result<(), StorageError> {
+                self.persist_media_secret_effects(&mapped)?;
+                self.provider.delete_pending_application_events(&dropped)
+            })
             .map_err(SessionError::Storage)?;
         let mut out: Vec<SessionEvent> = mapped.into_iter().map(|item| item.event).collect();
         out.extend(std::mem::take(&mut self.resolutions));
@@ -2696,6 +3045,39 @@ impl Session {
             Err(EngineError::UnknownGroup(_)) => return Ok(None),
             Err(error) => return Err(session_engine_error(error)),
         };
+        // A disbanded copy keeps its durable record (name, epoch, the
+        // former roster) but the engine has deleted the live MLS state, so
+        // member/component reads below would fail — the tombstone answers
+        // everything the snapshot can still say.
+        if record.disbanded.is_some() {
+            return Ok(Some(GroupSnapshot {
+                id: id.clone(),
+                name: record.name,
+                description: record.description,
+                epoch: record.epoch.0,
+                state: GroupState::Disbanded,
+                members: record
+                    .members
+                    .iter()
+                    .filter_map(|member| {
+                        let bytes: [u8; 32] = member.id.as_slice().try_into().ok()?;
+                        Some(MemberSnapshot {
+                            account: AccountId(bytes),
+                            admin: false,
+                        })
+                    })
+                    .collect(),
+                relays: Vec::new(),
+                nostr_group_id: [0; 32],
+                own_account_admin: false,
+                encrypted_media: None,
+                agent_text_stream: None,
+                avatar: None,
+                retention_seconds: 0,
+                disband_enabled: false,
+                disbanding: false,
+            }));
+        }
         let members = self.engine.members(&gid).map_err(session_engine_error)?;
         let admins = self.admin_set(&gid)?;
         let state = match self.engine.epoch_state(&gid) {
@@ -2722,6 +3104,34 @@ impl Session {
         let nostr_group_id = routing.map_or([0; 32], |routing| routing.nostr_group_id);
         let epoch = record.epoch.0;
         let account = self.account();
+        let avatar = self
+            .engine
+            .app_component(&gid, GROUP_AVATAR_URL_COMPONENT_ID)
+            .map_err(session_engine_error)?
+            .and_then(|bytes| decode_group_avatar_url_v1(&bytes).ok())
+            .and_then(group_avatar);
+        let retention_seconds = self
+            .engine
+            .app_component(&gid, GROUP_MESSAGE_RETENTION_COMPONENT_ID)
+            .map_err(session_engine_error)?
+            .and_then(|bytes| <[u8; 8]>::try_from(bytes.as_slice()).ok())
+            .map_or(0, u64::from_be_bytes);
+        let lifecycle_active = self
+            .engine
+            .app_component(&gid, GROUP_LIFECYCLE_COMPONENT_ID)
+            .map_err(session_engine_error)?
+            .is_some_and(|bytes| decode_group_lifecycle_v1(&bytes) == Ok(GroupLifecycleV1::Active));
+        let disband_enabled = self
+            .engine
+            .app_component(&gid, APP_COMPONENTS_COMPONENT_ID)
+            .map_err(session_engine_error)?
+            .and_then(|bytes| decode_components_list(&bytes).ok())
+            .is_some_and(|required| required.contains(&GROUP_LIFECYCLE_COMPONENT_ID))
+            && lifecycle_active;
+        let disbanding = self
+            .engine
+            .disbanding_in_progress(&gid)
+            .map_err(session_engine_error)?;
         Ok(Some(GroupSnapshot {
             id: id.clone(),
             name: record.name,
@@ -2743,12 +3153,29 @@ impl Session {
             own_account_admin: admins.contains(&account.0),
             encrypted_media: self.media_policy(&gid)?,
             agent_text_stream: self.agent_stream_policy(&gid)?,
+            avatar,
+            retention_seconds,
+            disband_enabled,
+            disbanding,
         }))
     }
 
     /// The admin-policy component decoded: a QUIC-varint count followed by
     /// that many sorted 32-byte member keys (cgka-engine
     /// `app_components::decode_admin_policy`).
+    /// `NotGroupAdmin` when this account is not a current admin — the
+    /// session-side gate for admin ops so a refused call stages nothing
+    /// (the engine may validate a commit only after staging it).
+    fn require_admin(&self, group: &GroupId) -> Result<(), SessionError> {
+        if !self
+            .admin_set(&engine_gid(group))?
+            .contains(&self.account().0)
+        {
+            return Err(SessionError::NotGroupAdmin);
+        }
+        Ok(())
+    }
+
     fn admin_set(&self, group_id: &EngineGroupId) -> Result<Vec<[u8; 32]>, SessionError> {
         let Some(bytes) = self
             .engine
@@ -2860,6 +3287,49 @@ fn outbound_id_of(message_id: &MessageId) -> Result<OutboundId, SessionError> {
         .try_into()
         .map_err(|_| SessionError::Internal("outbound id length"))?;
     Ok(OutboundId(bytes))
+}
+
+/// The host-rendered inner event a send produced. `UnsignedEvent::id()`
+/// recomputes the NIP-01 id and must equal the engine-committed
+/// `app_event.id`; a mismatch is an internal invariant failure.
+fn unsigned_of_app_event(
+    app_event: &cgka_traits::app_event::MarmotAppEvent,
+) -> Result<UnsignedEvent, SessionError> {
+    let pubkey = hex::decode(&app_event.pubkey)
+        .ok()
+        .and_then(|bytes| <[u8; 32]>::try_from(bytes.as_slice()).ok())
+        .map(AccountId)
+        .ok_or(SessionError::Internal("app event pubkey"))?;
+    let unsigned = UnsignedEvent {
+        pubkey,
+        created_at: app_event.created_at,
+        kind: u16::try_from(app_event.kind)
+            .map_err(|_| SessionError::Internal("app event kind"))?,
+        tags: app_event.tags.clone(),
+        content: app_event.content.clone(),
+    };
+    if hex::encode(unsigned.id().0) != app_event.id {
+        return Err(SessionError::Internal("app event id"));
+    }
+    Ok(unsigned)
+}
+
+/// The snapshot's avatar view of a decoded `0x8007` component: present
+/// only for a non-empty URL, hints as UTF-8 strings.
+fn group_avatar(decoded: GroupAvatarUrlV1) -> Option<GroupAvatar> {
+    if decoded.url.is_empty() {
+        return None;
+    }
+    let hint = |bytes: Vec<u8>| {
+        String::from_utf8(bytes)
+            .ok()
+            .filter(|text| !text.is_empty())
+    };
+    Some(GroupAvatar {
+        url: decoded.url,
+        dim: hint(decoded.dim),
+        thumbhash: hint(decoded.thumbhash),
+    })
 }
 
 fn open_error_of(error: &EngineError) -> OpenError {

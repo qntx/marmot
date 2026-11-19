@@ -56,6 +56,7 @@ pub mod media;
 mod mls;
 mod outbox;
 mod provider;
+mod semantics;
 mod ser;
 mod session;
 mod signer;
@@ -75,12 +76,13 @@ pub use kv::{BatchCodecError, CommitSeq, KvBatch, KvHost, KvOp};
 pub use mls::KvOpenMlsStorage;
 pub use outbox::{Outbound, OutboundPurpose, PublishResolution, RelayResult, RelayStatus};
 pub use provider::{INGRESS_DEDUP_MARKER_CAPACITY, KvStorageProvider};
+pub use semantics::{DropReason, MessageIntent, Semantics};
 pub use session::OpenError as SessionOpenError;
 pub use session::{
-    AppMessage, AttachmentInput, ComponentUpdate, CreateGroup, DestinationPolicy, GroupSnapshot,
-    GroupState, Invitee, MediaMessage, MemberSnapshot, Opened, PendingAttachment, PendingProof,
-    ProofError, ProofRejected, SealedAttachment, SendOutcome, Session, SessionConfig, SessionError,
-    TickReport,
+    AppMessage, AttachmentInput, ComponentUpdate, CreateGroup, DestinationPolicy, GroupAvatar,
+    GroupSnapshot, GroupState, Invitee, MediaMessage, MemberSnapshot, Opened, PendingAttachment,
+    PendingProof, ProofError, ProofRejected, SealedAttachment, SendOutcome, SentMessage, Session,
+    SessionConfig, SessionError, TickReport,
 };
 pub use signer::{AccountSigner, SignerError, SignerFuture};
 pub use types::{AccountId, Event, EventError, EventId, GroupId, OutboundId, UnsignedEvent};
