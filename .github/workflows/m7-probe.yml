@@ -12,66 +12,12 @@ permissions:
   contents: read
 
 jobs:
-  upstream-loop:
-    runs-on: ubuntu-latest
-    timeout-minutes: 120
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
-        with:
-          toolchain: "1.99.1"
-      - name: Unbounded control (LIBSQLITE3_FLAGS cleared)
-        env:
-          LIBSQLITE3_FLAGS: ""
-        run: |
-          set -uo pipefail
-          ulimit -l
-          bin="$(cargo test -p mk-core --all-features --test upstream --no-run --message-format=json \
-            | jq -r 'select(.reason == "compiler-artifact" and .target.name == "upstream" and .executable != null) | .executable')"
-          "$bin" --exact colliding_checkpoints_differ_only_in_added_at --test-threads=1 >control.log 2>&1
-          echo "control exit $?"
-          echo "control bytes $(wc -c <control.log) lines $(wc -l <control.log) mlock-warn $(grep -c 'sqlcipher_mlock' control.log)"
-          tail -n 20 control.log
-      - name: 200 runs, bounded
-        run: |
-          set -uo pipefail
-          bin="$(cargo test -p mk-core --all-features --test upstream --no-run --message-format=json \
-            | jq -r 'select(.reason == "compiler-artifact" and .target.name == "upstream" and .executable != null) | .executable')"
-          mkdir -p loop
-          fail=0
-          max=0
-          for i in $(seq 1 200); do
-            if ! "$bin" --exact colliding_checkpoints_differ_only_in_added_at --test-threads=1 >"loop/run-$i.log" 2>&1; then
-              fail=$((fail + 1))
-            else
-              size="$(wc -c <"loop/run-$i.log")"
-              [ "$size" -gt "$max" ] && max="$size"
-              rm "loop/run-$i.log"
-            fi
-          done
-          echo "failures ${fail}/200; largest passing log ${max} bytes" | tee -a "$GITHUB_STEP_SUMMARY"
-          ls -l loop
-          for f in loop/*.log; do [ -f "$f" ] && { echo "== $f"; cat "$f"; }; done
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        if: always()
-        with:
-          name: upstream-loop-logs
-          path: |
-            control.log
-            loop
-          retention-days: 7
-
-  native-sizes:
+  suite-log:
     strategy:
       fail-fast: false
       matrix:
-        opt: ["3", "s", "z"]
-        platform: [ios, android]
-    runs-on: ${{ matrix.platform == 'ios' && 'macos-latest' || 'ubuntu-24.04' }}
+        flags: ["cleared", "config"]
+    runs-on: ubuntu-latest
     timeout-minutes: 90
     permissions:
       contents: read
@@ -79,33 +25,27 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
-        with:
-          bun-version: "1.4"
-      - uses: nttld/setup-ndk@ed92fe6cadad69be94a966a7ee3271275e62f779 # v1.6.0
-        if: matrix.platform == 'android'
-        id: ndk
-        with:
-          ndk-version: r27b
-          add-to-path: false
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
           toolchain: "1.99.1"
-          targets: ${{ matrix.platform == 'ios' && 'aarch64-apple-ios, aarch64-apple-ios-sim' || 'aarch64-linux-android, armv7-linux-androideabi, x86_64-linux-android' }}
-      - run: bun install --frozen-lockfile
-      - run: bun run build:native --${{ matrix.platform }} | tee sizes.txt
+      - name: cargo test -p mk-core --all-features (as rust / ci runs it)
         env:
-          CARGO_PROFILE_NATIVE_OPT_LEVEL: ${{ matrix.opt }}
-          ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
-      - name: gzip -9 per artifact
+          FLAGS: ${{ matrix.flags }}
         run: |
-          set -euo pipefail
-          for f in $(find packages/marmot-native/ios packages/marmot-native/android/src/main/jniLibs \
-              -type f \( -name MarmotFfi -o -name libmarmot_ffi.so \) 2>/dev/null | sort); do
-            echo "$f raw=$(wc -c <"$f") gzip9=$(gzip -9 -c "$f" | wc -c)"
-          done | tee -a sizes.txt
+          set -uo pipefail
+          if [ "$FLAGS" = cleared ]; then export LIBSQLITE3_FLAGS=""; fi
+          ulimit -l
+          cargo test -p mk-core --all-features --no-run
+          cargo test -p mk-core --all-features >suite.out 2>suite.err
+          echo "exit $?"
+          echo "stdout bytes $(wc -c <suite.out) stderr bytes $(wc -c <suite.err) mlock-warn lines $(grep -c 'sqlcipher_mlock' suite.err)" | tee -a "$GITHUB_STEP_SUMMARY"
+          grep -E '^test result|FAILED|panicked' suite.out | head -40
+          gzip -9 suite.err
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
         with:
-          name: native-sizes-${{ matrix.platform }}-${{ matrix.opt }}
-          path: sizes.txt
+          name: suite-log-${{ matrix.flags }}
+          path: |
+            suite.out
+            suite.err.gz
           retention-days: 7
