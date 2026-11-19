@@ -399,7 +399,10 @@ export class Pump {
       ),
     );
     this.trackCommitRefusal(item, verdicts, resolution);
-    if (resolution === "pending") {
+    // `pending` re-offers immediately; a `confirmed` commit merge can arm a new
+    // convergence/lifecycle deadline that only a tick can observe — without the
+    // wake the deferred work (e.g. an own disband) never advances.
+    if (resolution === "pending" || (resolution === "confirmed" && item.purpose === "commit")) {
       this.scheduleWake(0);
     }
   }
