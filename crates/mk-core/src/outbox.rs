@@ -453,24 +453,6 @@ impl KvStorageProvider {
             &[group_id.as_slice(), transport_id.as_slice()],
         ))
     }
-
-    /// Delete every media-secret row a group holds — `forget_group`
-    /// releases them with the group.
-    pub(crate) fn delete_media_secrets_for_group(
-        &self,
-        group_id: &cgka_traits::GroupId,
-    ) -> Result<(), StorageError> {
-        let keys: Vec<Vec<u8>> = self
-            .store()
-            .scan(&keys::key(Table::MediaSecret, &[group_id.as_slice()]))?
-            .into_iter()
-            .map(|(key, _)| key)
-            .collect();
-        for key in keys {
-            self.store().delete(&key)?;
-        }
-        Ok(())
-    }
 }
 
 /// Session meta row holding the stable random `d` slot id for kind-30443

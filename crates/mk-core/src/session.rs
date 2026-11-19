@@ -498,8 +498,8 @@ pub enum SessionError {
     /// [`Session::enable_disbanding`] first.
     #[error("disbanding not enabled")]
     DisbandingNotEnabled,
-    /// The group is being forgotten or a disband is in progress;
-    /// `forget_group` refuses while `disbanding_in_progress` holds.
+    /// A disband request or disband candidate is in progress for the
+    /// group, so it cannot be forgotten.
     #[error("group is disbanding")]
     GroupDisbanding,
     /// The group is busy: an own commit is in flight or convergence input
@@ -2011,8 +2011,8 @@ impl Session {
     /// Forget the group locally: `engine.forget_group_local` drops the
     /// engine's rows (leaving its `ForgottenGroup` tombstone so old
     /// Welcomes stay rejected), then one storage unit releases this
-    /// session's own group rows — queued-intent links, media-secret rows,
-    /// and retry rows whose outbound no longer exists.
+    /// session's own group rows — queued-intent links and retry rows
+    /// whose outbound no longer exists.
     ///
     /// # Errors
     /// [`SessionError::GroupDisbanding`] while a disband is in progress;
@@ -2048,7 +2048,6 @@ impl Session {
                 for message_id in &links {
                     self.provider.delete_queued_intent_link(message_id)?;
                 }
-                self.provider.delete_media_secrets_for_group(&group_id)?;
                 for id in &stale {
                     self.provider.delete_outbound_retry(id)?;
                 }
@@ -2148,6 +2147,7 @@ impl Session {
         let payload = app_event
             .encode()
             .map_err(|_| SessionError::Internal("app event encode"))?;
+        let message = unsigned_of_app_event(&app_event)?;
         let result = self
             .engine
             .send(SendIntent::AppMessage {
@@ -2158,7 +2158,6 @@ impl Session {
             .await
             .map_err(session_engine_error)?;
         let outcome = self.finish_send(result)?;
-        let message = unsigned_of_app_event(&app_event)?;
         Ok(SentMessage { outcome, message })
     }
 
@@ -2358,6 +2357,7 @@ impl Session {
         let payload = app_event
             .encode()
             .map_err(|_| SessionError::Internal("app event encode"))?;
+        let unsigned = unsigned_of_app_event(&app_event)?;
         let result = match self
             .engine
             .send(SendIntent::AppMessage {
@@ -2382,7 +2382,6 @@ impl Session {
             None
         };
         let outcome = self.finish_send(result)?;
-        let unsigned = unsigned_of_app_event(&app_event)?;
         if let Some(message_id) = sent_message_id {
             let secret = self.media_secret(&group_id)?;
             self.provider
@@ -3160,9 +3159,6 @@ impl Session {
         }))
     }
 
-    /// The admin-policy component decoded: a QUIC-varint count followed by
-    /// that many sorted 32-byte member keys (cgka-engine
-    /// `app_components::decode_admin_policy`).
     /// `NotGroupAdmin` when this account is not a current admin — the
     /// session-side gate for admin ops so a refused call stages nothing
     /// (the engine may validate a commit only after staging it).
@@ -3176,6 +3172,9 @@ impl Session {
         Ok(())
     }
 
+    /// The admin-policy component decoded: a QUIC-varint count followed by
+    /// that many sorted 32-byte member keys (cgka-engine
+    /// `app_components::decode_admin_policy`).
     fn admin_set(&self, group_id: &EngineGroupId) -> Result<Vec<[u8; 32]>, SessionError> {
         let Some(bytes) = self
             .engine
