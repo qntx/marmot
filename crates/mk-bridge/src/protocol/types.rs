@@ -486,7 +486,7 @@ impl From<core::GroupAvatar> for GroupAvatar {
 
 /// A typed application-message intent (`send_intent`).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum MessageIntent {
     /// A chat message; `reply_to` adds the `e`/`q` reply pair.
     Chat {

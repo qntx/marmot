@@ -1192,6 +1192,38 @@ async fn protocol_errors() {
     ));
     assert_eq!(error_kind(&response), "invalid_request");
 
+    // `send_intent`: unknown fields inside each intent variant are refused.
+    let group_hex = "aa".repeat(32);
+    let intents = [
+        json!({"type": "chat", "content": "x", "reply_to": null, "extra": 1}),
+        json!({"type": "reaction", "target": group_hex, "emoji": "+1", "extra": 1}),
+        json!({"type": "unreact", "reactions": [group_hex], "extra": 1}),
+        json!({"type": "edit", "target": group_hex, "content": "x", "extra": 1}),
+        json!({"type": "delete", "target": group_hex, "extra": 1}),
+        json!({"type": "remove", "target": group_hex, "extra": 1}),
+    ];
+    for intent in intents {
+        let response = busy.call_bytes(&raw_call(
+            now(&busy),
+            json!({"type": "send_intent", "group": group_hex, "intent": intent}),
+        ));
+        assert_eq!(
+            error_kind(&response),
+            "invalid_request",
+            "intent with unknown field: {intent}"
+        );
+    }
+    // `set_group_avatar`: unknown fields inside `avatar` are refused.
+    let response = busy.call_bytes(&raw_call(
+        now(&busy),
+        json!({
+            "type": "set_group_avatar",
+            "group": group_hex,
+            "avatar": {"url": "https://example.com/a.png", "extra": 1},
+        }),
+    ));
+    assert_eq!(error_kind(&response), "invalid_request");
+
     // Busy: suspend on a signer op, then any other request answers busy.
     let response = busy.call_once(Request::PublishKeyPackage(PublishKeyPackageRequest {
         relays: vec![RELAY.to_owned()],
