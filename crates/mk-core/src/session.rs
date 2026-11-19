@@ -590,6 +590,16 @@ fn session_engine_error(error: EngineError) -> SessionError {
         | EngineError::GroupRecoveryUnsettled { .. }
         | EngineError::AppMessageEpochUnsettled { .. } => SessionError::GroupBusy,
         EngineError::Storage(inner) => SessionError::Storage(inner),
+        // `PendingPublish`/`Merging` mean an own commit awaits its publish
+        // resolution (`EpochState::is_resolving_local_publish`): a further
+        // commit-producing op is transiently refused. Other transitions —
+        // `Recovering`, `Disbanded is terminal`, `DeviceGroup` — keep the
+        // engine kind.
+        EngineError::InvalidTransition(transition)
+            if matches!(transition.from, "PendingPublish" | "Merging") =>
+        {
+            SessionError::GroupBusy
+        }
         _ => SessionError::Engine {
             kind: error.privacy_safe_kind(),
         },

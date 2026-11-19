@@ -1394,6 +1394,76 @@ mod app_surface_tests {
         assert_eq!(snapshot(&a, &gid).retention_seconds, 0);
     }
 
+    /// A second commit-producing op while the previous own commit awaits
+    /// its publish resolution answers `GroupBusy` and stages nothing; the
+    /// same op succeeds after the in-flight commit confirms.
+    #[tokio::test(flavor = "current_thread")]
+    async fn op_while_own_commit_in_flight_is_busy() {
+        let relay = FakeRelay::new();
+        let mut a = open_member().await;
+        let mut b = open_member().await;
+        publish_identity(&mut a, &relay, RELAY).await;
+        publish_identity(&mut b, &relay, RELAY).await;
+        let gid = group_with(&mut a, &relay, &[&b], "busy").await;
+        join_via_welcome(&mut b, &relay).await;
+        sync_member(&mut a, &relay, RELAY, &gid).await;
+
+        // The first admin op stages a commit: the epoch sits in
+        // `PendingPublish` until its publish resolves.
+        let outcome = a
+            .session
+            .set_group_avatar(
+                &gid,
+                Some(GroupAvatar {
+                    url: "https://example.com/a.png".to_owned(),
+                    dim: None,
+                    thumbhash: None,
+                }),
+            )
+            .await
+            .expect("set avatar");
+        assert!(matches!(outcome, SendOutcome::Staged(_)), "{outcome:?}");
+
+        // A second commit-producing op is refused busy and stages
+        // nothing: no new KV batch, and the gated outbound still holds
+        // only the first commit.
+        let before = a.host.batches().len();
+        assert!(
+            matches!(
+                a.session.set_retention(&gid, 60).await,
+                Err(SessionError::GroupBusy)
+            ),
+            "second op while a commit is in flight"
+        );
+        assert_eq!(
+            a.host.batches().len(),
+            before,
+            "busy op writes no KV batch"
+        );
+        if let Some(seq) = a.session.awaiting_durability() {
+            a.session.acknowledge_durable(seq);
+        }
+        let items = a.session.take_outbound().expect("take_outbound");
+        assert_eq!(items.len(), 1, "only the first commit is staged");
+        let item = items
+            .into_iter()
+            .find(|item| item.purpose == OutboundPurpose::Commit)
+            .expect("the commit outbound");
+        let resolution = a
+            .session
+            .report_publish(&item.id, &relay.publish(&item))
+            .await
+            .expect("report_publish");
+        assert!(
+            matches!(resolution, PublishResolution::Confirmed),
+            "{resolution:?}"
+        );
+
+        // After the confirm the same op stages.
+        let outcome = a.session.set_retention(&gid, 60).await.expect("retention");
+        assert!(matches!(outcome, SendOutcome::Staged(_)), "{outcome:?}");
+    }
+
     /// Lifecycle: non-admin and admin leave paths, last-admin refusal,
     /// disband propagation, the `GroupDisbanding` forget guard, and a
     /// removed member keeping its received attachment.
