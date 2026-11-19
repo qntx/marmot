@@ -71,12 +71,12 @@ jobs:
     permissions:
       contents: read
     with:
-      targets: aarch64-apple-ios aarch64-apple-ios-sim aarch64-linux-android x86_64-linux-android
+      targets: aarch64-apple-ios aarch64-apple-ios-sim aarch64-linux-android armv7-linux-androideabi x86_64-linux-android
       packages: mk-ffi
 
   # crates/interop is a standalone project (own workspace/lockfile/deny.toml);
-  # it compiles and lints here and runs its non-ignored tests. The wn/wnd
-  # scenario tests stay #[ignore] until a CI job can pin the wn binaries.
+  # it compiles and lints here. Its wn/wnd scenarios are #[ignore]d (they
+  # need the binaries) and run in interop-rust below.
   interop:
     uses: qntx/workflows/.github/workflows/ci-rust.yml@v2
     permissions:
@@ -85,6 +85,210 @@ jobs:
       working-directory: crates/interop
       deny: true
       doc: false
+
+  # White Noise wn/wnd for the interop jobs, built from source at the
+  # upstream.json `wn` pin. The pinned tag must still name the pinned rev
+  # upstream. build-wn caches the binaries by rev, MDK's Rust channel and
+  # runner platform; nothing prebuilt is downloaded.
+  wn:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: pin
+        run: |
+          set -euo pipefail
+          repository="$(jq -r .wn.repository upstream.json)"
+          tag="$(jq -r .wn.tag upstream.json)"
+          rev="$(jq -r .wn.rev upstream.json)"
+          # The peeled ref (annotated tags) sorts after the tag ref itself.
+          resolved="$(git ls-remote "$repository" "refs/tags/$tag" "refs/tags/$tag^{}" | tail -n1 | cut -f1)"
+          if [ "$resolved" != "$rev" ]; then
+            echo "::error::upstream.json wn: $tag resolves to '${resolved}' upstream, pinned rev is $rev"
+            exit 1
+          fi
+          {
+            echo "repository=${repository#https://github.com/}"
+            echo "rev=$rev"
+            echo "version=wn ${tag#v}"
+          } >>"$GITHUB_OUTPUT"
+      - uses: ./.github/actions/build-wn
+        with:
+          repository: ${{ steps.pin.outputs.repository }}
+          rev: ${{ steps.pin.outputs.rev }}
+          version: ${{ steps.pin.outputs.version }}
+          path: ${{ runner.temp }}/wn-bin
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: wn-bin
+          path: ${{ runner.temp }}/wn-bin
+          retention-days: 1
+          if-no-files-found: error
+
+  # The six Session-API scenarios and the bridge scenario of crates/interop
+  # against the pinned wn/wnd.
+  interop-rust:
+    needs: wn
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: crates/interop
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: "1.99.1"
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: crates/interop
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: wn-bin
+          path: ${{ runner.temp }}/wn-bin
+      # Artifacts drop the executable bit. wnd refuses a home under the
+      # world-writable /tmp, so the scenario homes go to a private TMPDIR.
+      - run: |
+          set -euo pipefail
+          chmod +x "$RUNNER_TEMP/wn-bin/wn" "$RUNNER_TEMP/wn-bin/wnd"
+          install -d -m 0700 "$RUNNER_TEMP/tmp"
+      - run: cargo test --release --locked -- --ignored --test-threads=1 --nocapture
+        env:
+          WN_BIN: ${{ runner.temp }}/wn-bin/wn
+          WND_BIN: ${{ runner.temp }}/wn-bin/wnd
+          TMPDIR: ${{ runner.temp }}/tmp
+      - if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: interop-rust-logs
+          path: crates/interop/target/wn-logs
+          retention-days: 7
+
+  # test:interop — MarmotClient on the release wasm (the artifact the wasm job
+  # built) against the pinned wn/wnd, through a relay that serves a NIP-11
+  # document with `limitation.max_limit`, as production relays do.
+  interop-wasm:
+    needs: [wn, wasm]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: packages/marmot-wasm
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: "1.4"
+      - run: bun install --frozen-lockfile
+        working-directory: .
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: marmot-wasm-dist
+          path: packages/marmot-wasm
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: wn-bin
+          path: ${{ runner.temp }}/wn-bin
+      - run: chmod +x "$RUNNER_TEMP/wn-bin/wn" "$RUNNER_TEMP/wn-bin/wnd"
+      - run: bun run test:interop
+        env:
+          WN_BIN: ${{ runner.temp }}/wn-bin/wn
+          WND_BIN: ${{ runner.temp }}/wn-bin/wnd
+      - if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: interop-wasm-logs
+          path: |
+            target/interop-m3b.log
+            target/wn-logs
+          retention-days: 7
+
+  # Not required, never fails: the S2 loss rate of test:interop against the
+  # bare fake relay, which publishes no NIP-11 document. Without
+  # `limitation.max_limit` wnd's post-join history sweep cannot prove a slice
+  # complete, halves it down to one-second slices, and a message that arrives
+  # during that sweep is never admitted — a White Noise defect, drafted for
+  # upstream in docs/upstream/mdk-issue-live-message-lost-after-join.md
+  # (local design docs) with the investigation beside it. interop-wasm runs
+  # the same suite against a relay with NIP-11 limits, as real relays serve.
+  interop-known-upstream:
+    needs: [wn, wasm]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: packages/marmot-wasm
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: "1.4"
+      - run: bun install --frozen-lockfile
+        working-directory: .
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: marmot-wasm-dist
+          path: packages/marmot-wasm
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: wn-bin
+          path: ${{ runner.temp }}/wn-bin
+      - run: chmod +x "$RUNNER_TEMP/wn-bin/wn" "$RUNNER_TEMP/wn-bin/wnd"
+      - name: S2 loss rate without NIP-11
+        env:
+          WN_BIN: ${{ runner.temp }}/wn-bin/wn
+          WND_BIN: ${{ runner.temp }}/wn-bin/wnd
+          INTEROP_RELAY: bare
+          RUNS: "20"
+        run: |
+          set -uo pipefail
+          runs_dir="$RUNNER_TEMP/known-upstream"
+          mkdir -p "$runs_dir"
+          lost=0
+          s2_other=0
+          other=0
+          for i in $(seq 1 "$RUNS"); do
+            log="$runs_dir/run-$i.log"
+            bun run test:interop >"$log" 2>&1
+            if grep -q '^\[[0-9:.]*\] FAIL S2 .*wn messages list shows s2-us-' "$log"; then
+              lost=$((lost + 1))
+            elif ! grep -q '^\[[0-9:.]*\] PASS S2 ' "$log"; then
+              s2_other=$((s2_other + 1))
+            fi
+            if grep -q '^\[[0-9:.]*\] FAIL S[13] ' "$log"; then
+              other=$((other + 1))
+            fi
+          done
+          {
+            echo "### interop-known-upstream (relay without NIP-11)"
+            echo "- S2: wn never shows our message in ${lost}/${RUNS} runs"
+            echo "- S2 failing or never reached for another reason: ${s2_other}/${RUNS}"
+            echo "- runs with an S1 or S3 failure: ${other}/${RUNS}"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+      - if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: interop-known-upstream-logs
+          path: |
+            ${{ runner.temp }}/known-upstream
+            target/wn-logs
+          retention-days: 7
 
   # crates/conformance replays the recorded MDK vectors through our Session
   # API; its cgka-conformance-simulator dep pulls marmot-markdown, which
@@ -134,8 +338,7 @@ jobs:
 
   # The marmot-native export gate: the host libmarmot_ffi.so must export
   # exactly the mk_* ABI (no dep symbols, no mk_bridge_test_panic). The
-  # iOS/Android prebuilt builds stay local gates (Xcode/NDK, see
-  # CONTRIBUTING.md).
+  # iOS/Android prebuilts build in native.yml.
   native:
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -205,11 +408,16 @@ jobs:
       - run: bun run check:size
       - run: bun run check:generated
       - run: node --version && bun run test:wasm
+      # dist/ plus src/generated: the loader the tests import pairs with the
+      # glue wasm-bindgen emitted for this very wasm.
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: marmot-wasm-dist
-          path: packages/marmot-wasm/dist
+          path: |
+            packages/marmot-wasm/dist
+            packages/marmot-wasm/src/generated
           retention-days: 1
+          if-no-files-found: error
 
   # Chromium (Playwright): flow over IndexedDB, kill-during-write, two-tab
   # Web Locks, perf budget — against the artifact the wasm job built.
@@ -234,6 +442,6 @@ jobs:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: marmot-wasm-dist
-          path: packages/marmot-wasm/dist
+          path: packages/marmot-wasm
       - run: bunx playwright install --with-deps chromium
       - run: bun run test:browser

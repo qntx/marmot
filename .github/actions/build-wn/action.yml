@@ -1,0 +1,88 @@
+name: build-wn
+description: >-
+  Build White Noise wn/wnd (MDK's wn-cli package) from source at one commit,
+  with MDK's own toolchain file and its checksum-pinned Odin installer. The
+  binaries are cached by commit, Rust channel and runner platform, so a pin
+  builds once per runner image and every later run restores it.
+inputs:
+  repository:
+    description: GitHub owner/name of the MDK repository.
+    required: true
+  rev:
+    description: Full 40-hex commit to build.
+    required: true
+  version:
+    description: Expected `wn --version` output, e.g. `wn 0.17.0`. Empty skips the check.
+    required: false
+    default: ""
+  path:
+    description: Directory that receives the wn and wnd binaries.
+    required: true
+outputs:
+  cache-hit:
+    description: Whether the binaries came from the cache.
+    value: ${{ steps.cache.outputs.cache-hit }}
+runs:
+  using: composite
+  steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        repository: ${{ inputs.repository }}
+        ref: ${{ inputs.rev }}
+        path: .wn-src
+        persist-credentials: false
+
+    - id: toolchain
+      shell: bash
+      run: |
+        set -euo pipefail
+        channel="$(sed -n 's/^channel *= *"\(.*\)"$/\1/p' .wn-src/rust-toolchain.toml)"
+        if [ -z "$channel" ]; then
+          echo '::error::build-wn: no channel in the MDK rust-toolchain.toml'
+          exit 1
+        fi
+        echo "channel=$channel" >>"$GITHUB_OUTPUT"
+
+    - id: cache
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ${{ inputs.path }}
+        key: wn-${{ inputs.rev }}-rust-${{ steps.toolchain.outputs.channel }}-${{ runner.os }}-${{ runner.arch }}
+
+    - name: Build wn and wnd
+      if: steps.cache.outputs.cache-hit != 'true'
+      shell: bash
+      working-directory: .wn-src
+      env:
+        CHANNEL: ${{ steps.toolchain.outputs.channel }}
+        OUT: ${{ inputs.path }}
+      run: |
+        set -euo pipefail
+        bash scripts/install-odin.sh "$RUNNER_TEMP/odin"
+        rustup toolchain install "$CHANNEL" --profile minimal
+        ODIN="$RUNNER_TEMP/odin/odin" CARGO_TARGET_DIR="$RUNNER_TEMP/wn-target" \
+          cargo +"$CHANNEL" build --release --locked -p wn-cli --bins
+        mkdir -p "$OUT"
+        cp "$RUNNER_TEMP/wn-target/release/wn" "$RUNNER_TEMP/wn-target/release/wnd" "$OUT/"
+        rm -rf "$RUNNER_TEMP/wn-target"
+
+    - name: Check the build
+      shell: bash
+      env:
+        OUT: ${{ inputs.path }}
+        VERSION: ${{ inputs.version }}
+        REV: ${{ inputs.rev }}
+        CACHE_HIT: ${{ steps.cache.outputs.cache-hit }}
+      run: |
+        set -euo pipefail
+        found="$("$OUT/wn" --version)"
+        echo "$found"
+        if [ -n "$VERSION" ] && [ "$found" != "$VERSION" ]; then
+          echo "::error::build-wn: wn --version is '$found', expected '$VERSION'"
+          exit 1
+        fi
+        {
+          echo "### White Noise ${found} at ${REV}"
+          echo "cache hit: ${CACHE_HIT:-false}"
+          ls -l "$OUT"
+        } >>"$GITHUB_STEP_SUMMARY"
