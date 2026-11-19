@@ -1,22 +1,356 @@
-# Caller owns on:. Pin at @v2.
-# OIDC. Do not pass NPM_TOKEN. Do not set environment, runs-on, or steps.
-# Required check-run on a tag: marmot / publish.
+# Publishes @qntx/marmot, @qntx/marmot-wasm and @qntx/marmot-native at one
+# lockstep version with npm provenance (OIDC trusted publishing through
+# qntx/workflows publish-npm; never an NPM_TOKEN). Real publishes run on
+# `v*.*.*` tag pushes only — tag the release merge commit by hand; tags pushed
+# with GITHUB_TOKEN do not trigger workflows. workflow_dispatch and the
+# pull_request paths below run the whole pipeline, binaries included, with
+# `npm publish --dry-run`. Every shipped binary is built in this run from the
+# checked-out source; release builds never restore a rust cache.
 name: Publish
 
 on:
   push:
     tags: ["v*.*.*"]
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/publish-npm.yml"
+      - ".github/workflows/native.yml"
+      - "bump.config.ts"
+      - "scripts/build-native.ts"
+      - "scripts/build-wasm.ts"
+      - "scripts/check-generated.ts"
+      - "scripts/check-version.ts"
+      - "scripts/stage-wasm.ts"
+      - "scripts/sync-versions.ts"
+      - "packages/*/package.json"
 
 permissions:
   contents: read
-  id-token: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # Lockstep versions on every run. On a tag push the tag must also equal
+  # every package version and point at a commit on main; the called publish
+  # workflow checks neither.
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: "1.4"
+          no-cache: true
+      - run: bun scripts/check-version.ts
+      - name: Check the tag matches every package version
+        if: github.event_name == 'push'
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          fail=0
+          for pkg in marmot marmot-wasm marmot-native; do
+            version="$(jq -r .version "packages/${pkg}/package.json")"
+            if [ "v${version}" != "${REF_NAME}" ]; then
+              echo "::error::packages/${pkg} is ${version}, the tag is ${REF_NAME}"
+              fail=1
+            fi
+          done
+          [ "${fail}" -eq 0 ]
+      - name: Check the tagged commit is on main
+        if: github.event_name == 'push'
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if ! git merge-base --is-ancestor HEAD origin/main; then
+            echo "::error::${REF_NAME} points at a commit that is not on origin/main"
+            exit 1
+          fi
+
+  native:
+    uses: ./.github/workflows/native.yml
+    permissions:
+      contents: read
+    with:
+      release: ${{ github.event_name != 'pull_request' }}
+
+  # The iOS and Android artifacts as one upload laid out relative to
+  # packages/marmot-native: exactly the gitignored `files` entries, which the
+  # publish workflow downloads into the package before packing.
+  native-artifact:
+    needs: native
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: MarmotFfi.xcframework
+          path: staging/ios/MarmotFfi.xcframework
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: marmot-native-jniLibs
+          path: staging
+      - name: Record sizes and SHA-256
+        working-directory: staging
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/notes"
+          {
+            echo "### @qntx/marmot-native prebuilts"
+            echo
+            echo '| file | bytes | sha256 |'
+            echo '| --- | ---: | --- |'
+            find . -type f \( -name MarmotFfi -o -name libmarmot_ffi.so -o -name marmot_ffi.h \) | sort |
+              while read -r file; do
+                echo "| \`${file#./}\` | $(stat -c %s "$file") | \`$(sha256sum "$file" | cut -d' ' -f1)\` |"
+              done
+            echo
+          } | tee "$RUNNER_TEMP/notes/native.md" >>"$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: marmot-native-prebuilt
+          path: staging
+          retention-days: 1
+          if-no-files-found: error
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-notes-native
+          path: ${{ runner.temp }}/notes
+          retention-days: 1
+      - name: Attest build provenance
+        if: github.event_name != 'pull_request'
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: staging/**
+
+  # The shipped wasm, built twice on separate runners from the same commit.
+  # Each build passes the size gate and the committed-glue check; the
+  # artifact is packages/marmot-wasm/src/generated (release wasm plus the glue
+  # wasm-bindgen emitted with it, so the shim hashes pair).
+  wasm:
+    strategy:
+      matrix:
+        build: [first, second]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: packages/marmot-wasm
+    env:
+      CC_wasm32_unknown_unknown: clang
+      AR_wasm32_unknown_unknown: llvm-ar
+      CFLAGS_wasm32_unknown_unknown: --target=wasm32-unknown-unknown -Wno-implicit-function-declaration
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends clang lld llvm
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: "1.99.1"
+          targets: wasm32-unknown-unknown
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: "1.4"
+          no-cache: true
+      - run: bun install --frozen-lockfile
+        working-directory: .
+      - run: bun run build:wasm
+      - uses: qntx/workflows/actions/setup-wasm@v2
+        with:
+          toolchain: false
+          dist-check: true
+          package-directory: packages/marmot-wasm
+          dist-export: .
+      - run: bun run check:size
+      - run: bun run check:generated
+      - name: Stage the release artifact
+        env:
+          BUILD: ${{ matrix.build }}
+        run: |
+          set -euo pipefail
+          stage="$RUNNER_TEMP/marmot-wasm/src/generated"
+          mkdir -p "$stage"
+          cp src/generated/marmot_wasm.js src/generated/marmot_wasm.d.ts \
+            src/generated/marmot_wasm_bg.wasm.d.ts src/generated/marmot_wasm_bg.wasm "$stage/"
+          {
+            echo "### wasm build ${BUILD}"
+            echo '```text'
+            (cd "$stage" && sha256sum -- *)
+            echo '```'
+          } >>"$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: marmot-wasm-${{ matrix.build }}
+          path: ${{ runner.temp }}/marmot-wasm
+          retention-days: 1
+          if-no-files-found: error
+
+  # Two builds of one commit must be byte-identical — the release wasm and
+  # its glue. The first build is the one that ships.
+  wasm-reproducibility:
+    needs: wasm
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: marmot-wasm-first
+          path: first
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: marmot-wasm-second
+          path: second
+      - name: Compare the two builds
+        run: |
+          set -euo pipefail
+          diff -r first second
+          wasm=first/src/generated/marmot_wasm_bg.wasm
+          mkdir -p "$RUNNER_TEMP/notes"
+          {
+            echo "### @qntx/marmot-wasm"
+            echo
+            echo "\`marmot_wasm_bg.wasm\`: $(stat -c %s "$wasm") bytes, gzip -9 $(gzip -9 -c "$wasm" | wc -c) bytes"
+            echo
+            echo "sha256 \`$(sha256sum "$wasm" | cut -d' ' -f1)\` (two independent CI builds, byte-identical)"
+            echo
+          } | tee "$RUNNER_TEMP/notes/wasm.md" >>"$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-notes-wasm
+          path: ${{ runner.temp }}/notes
+          retention-days: 1
+      - name: Attest build provenance
+        if: github.event_name != 'pull_request'
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: first/src/generated/marmot_wasm_bg.wasm
+
   marmot:
+    needs: verify
     uses: qntx/workflows/.github/workflows/publish-npm.yml@v2
     permissions:
       contents: read
       id-token: write
     with:
       package-manager: bun
+      install-directory: .
       working-directory: packages/marmot
+      dry-run: ${{ github.event_name != 'push' }}
+
+  marmot-wasm:
+    needs: [marmot, wasm-reproducibility]
+    uses: qntx/workflows/.github/workflows/publish-npm.yml@v2
+    permissions:
+      contents: read
+      id-token: write
+    with:
+      package-manager: bun
+      install-directory: .
+      working-directory: packages/marmot-wasm
+      artifact: marmot-wasm-first
+      dry-run: ${{ github.event_name != 'push' }}
+
+  marmot-native:
+    needs: [marmot, native-artifact]
+    uses: qntx/workflows/.github/workflows/publish-npm.yml@v2
+    permissions:
+      contents: read
+      id-token: write
+    with:
+      package-manager: bun
+      install-directory: .
+      working-directory: packages/marmot-native
+      artifact: marmot-native-prebuilt
+      dry-run: ${{ github.event_name != 'push' }}
+
+  # Artifact hashes for the GitHub release notes: the wasm, every native
+  # prebuilt and the three npm tarballs exactly as packed for publish.
+  release-notes:
+    needs: [marmot, marmot-wasm, marmot-native]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: release-notes-*
+          merge-multiple: true
+          path: notes
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: npm-pack-*
+          merge-multiple: true
+          path: pack
+      - name: Compose
+        run: |
+          set -euo pipefail
+          {
+            echo "## Artifacts"
+            echo
+            cat notes/wasm.md notes/native.md
+            echo "### npm tarballs"
+            echo
+            echo '| tarball | bytes | sha256 |'
+            echo '| --- | ---: | --- |'
+            for tgz in pack/*.tgz; do
+              echo "| \`$(basename "$tgz")\` | $(stat -c %s "$tgz") | \`$(cut -d' ' -f1 "$tgz.sha256")\` |"
+            done
+          } >artifacts.md
+          cat artifacts.md >>"$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-artifacts-md
+          path: artifacts.md
+          retention-days: 7
+
+  # The GitHub release exists only once all three packages are published; its
+  # git-cliff notes gain the artifact section above.
+  release:
+    needs: release-notes
+    if: github.event_name == 'push'
+    uses: qntx/workflows/.github/workflows/release.yml@v2
+    permissions:
+      contents: write
+
+  release-artifacts:
+    needs: release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-artifacts-md
+      - name: Append the artifact hashes to the release notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.release.outputs.tag-name }}
+        run: |
+          set -euo pipefail
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json body --jq .body >notes.md
+          printf '\n' >>notes.md
+          cat artifacts.md >>notes.md
+          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --notes-file notes.md
