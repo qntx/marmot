@@ -33,6 +33,7 @@ use serde as _;
 use serde_json as _;
 use thiserror as _;
 use tokio as _;
+use tracing as _;
 
 const SESSION_RS: &str = include_str!("../../mk-core/src/session.rs");
 
@@ -110,6 +111,11 @@ const TABLE: &[(&str, &str, Mapping)] = &[
     ),
     ("Session", "groups", Request("groups")),
     ("Session", "group", Request("group")),
+    (
+        "Session",
+        "outbound_fanout_list_count",
+        Elsewhere("testing feature"),
+    ),
 ];
 
 /// The public method names declared directly inside `impl <name> { ... }`

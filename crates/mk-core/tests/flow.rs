@@ -1134,4 +1134,68 @@ mod flow_tests {
             );
         }
     }
+
+    /// `report_publish` resolves each reported fanout by reading that one
+    /// row — never by listing the outbox (the large-group regression:
+    /// publishing N create-time Welcomes must not scan N fanouts apiece).
+    #[tokio::test(flavor = "current_thread")]
+    async fn report_publish_reads_only_the_reported_fanout() {
+        let relay = FakeRelay::new();
+        let mut a = open_member().await;
+        let mut invitees: Vec<Member> = Vec::new();
+        for _ in 0..3 {
+            invitees.push(open_member().await);
+        }
+        publish_identity(&mut a, &relay, RELAY).await;
+        for member in &mut invitees {
+            publish_identity(member, &relay, RELAY).await;
+        }
+        a.session
+            .create_group(CreateGroup {
+                name: "report-read".to_owned(),
+                description: String::new(),
+                relays: vec![RELAY.to_owned()],
+                invitees: invitees
+                    .iter()
+                    .map(|member| Invitee {
+                        key_package: key_package_of(&relay, RELAY, &member.account_hex()),
+                        inbox_relays: inbox_relays_of(&relay, RELAY, &member.account_hex()),
+                    })
+                    .collect(),
+                admins: Vec::new(),
+                components: Vec::new(),
+            })
+            .await
+            .expect("create_group");
+        if let Some(seq) = a.session.awaiting_durability() {
+            a.session.acknowledge_durable(seq);
+        }
+        let outbound = a.session.take_outbound().expect("take_outbound");
+        assert_eq!(
+            outbound
+                .iter()
+                .filter(|item| item.purpose == mk_core::OutboundPurpose::Welcome)
+                .count(),
+            3,
+            "the create stages one welcome per invitee"
+        );
+        let scans = a.session.outbound_fanout_list_count();
+        for item in &outbound {
+            let resolution = a
+                .session
+                .report_publish(&item.id, &relay.publish(item))
+                .await
+                .expect("report_publish");
+            assert_eq!(
+                resolution,
+                PublishResolution::Complete,
+                "every reported item resolves terminal"
+            );
+        }
+        assert_eq!(
+            a.session.outbound_fanout_list_count(),
+            scans,
+            "report_publish must not list the fanout table"
+        );
+    }
 }

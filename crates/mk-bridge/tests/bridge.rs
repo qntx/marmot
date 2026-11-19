@@ -43,6 +43,7 @@ use serde_json::{Value, json};
 use support::*;
 use thiserror as _;
 use tokio as _;
+use tracing as _;
 
 use std::collections::BTreeSet;
 

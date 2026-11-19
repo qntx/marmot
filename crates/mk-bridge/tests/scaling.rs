@@ -30,10 +30,11 @@ use std::time::Instant;
 
 use serde as _;
 use thiserror as _;
+use tracing as _;
 
 use mk_bridge::protocol::{
     AppMessage, CreateGroupRequest, IngestRequest, Invitee, OpResult, Request, Response,
-    SendMessageRequest,
+    SendMessageRequest, SendOutcome, SendOutcomeResult,
 };
 use support::*;
 
@@ -129,5 +130,97 @@ async fn send_time_is_bounded_against_history() {
         late <= RATIO * early,
         "send median at history {HISTORY} is {late:.3} ms, more than {RATIO}x \
          the {early:.3} ms median at history {H_EARLY}"
+    );
+}
+
+/// The first and 200 consecutive sends in a 200-member group stage and
+/// reach the relay instead of queueing behind the deferred-peel foreground
+/// budget.
+#[tokio::test(flavor = "current_thread")]
+async fn large_group_first_and_200_sends_stage() {
+    const MEMBERS: usize = 200;
+    let mut relay = FakeRelay::new();
+    let mut members: Vec<Member<CompactHost>> = Vec::with_capacity(MEMBERS);
+    for _ in 0..MEMBERS {
+        let mut member = Member::with_host(CompactHost::new());
+        member.indexed_publish = true;
+        member.open().await;
+        member.publish_identity(&mut relay).await;
+        members.push(member);
+    }
+    let (creator, invitees) = members.split_first_mut().expect("a creator");
+    creator.max_signer_rounds = usize::MAX;
+
+    let create_start = Instant::now();
+    let response = creator
+        .call(Request::CreateGroup(CreateGroupRequest {
+            name: "large".to_owned(),
+            description: String::new(),
+            relays: vec![RELAY.to_owned()],
+            invitees: invitees
+                .iter()
+                .map(|member| Invitee {
+                    key_package: key_package_of(&relay, &member.account_hex()),
+                    inbox_relays: vec![RELAY.to_owned()],
+                })
+                .collect(),
+            admins: Vec::new(),
+            components: Vec::new(),
+        }))
+        .await;
+    let create_ms = create_start.elapsed().as_secs_f64() * 1_000.0;
+    let Response::Ok { result } = response else {
+        panic!("create_group: {response:?}");
+    };
+    let OpResult::GroupCreated(created) = *result else {
+        panic!("create_group: {result:?}");
+    };
+    let group = created.group.id.clone();
+    let publish_start = Instant::now();
+    creator.publish(&mut relay).await;
+    let publish_ms = publish_start.elapsed().as_secs_f64() * 1_000.0;
+    assert_eq!(
+        relay.fetch(|event| event.kind == 1059).len(),
+        MEMBERS - 1,
+        "one welcome per invitee"
+    );
+
+    let route = creator.route_hex(&group).await;
+    let mut times = Vec::with_capacity(MEMBERS);
+    for i in 0..MEMBERS {
+        creator.advance(1_000);
+        let start = Instant::now();
+        let response = creator
+            .call(Request::SendMessage(SendMessageRequest {
+                group: group.clone(),
+                message: AppMessage {
+                    kind: 9,
+                    tags: Vec::new(),
+                    content: format!("m{i}"),
+                },
+            }))
+            .await;
+        times.push(start.elapsed().as_secs_f64() * 1_000.0);
+        let Response::Ok { result } = response else {
+            panic!("send {i}: {response:?}");
+        };
+        let OpResult::SendOutcome(SendOutcomeResult { outcome }) = *result else {
+            panic!("send {i}: {result:?}");
+        };
+        assert!(
+            matches!(outcome, SendOutcome::Staged { .. }),
+            "send {i} must stage, not queue: {outcome:?}"
+        );
+        creator.publish(&mut relay).await;
+    }
+    eprintln!(
+        "large_group: create {create_ms:.0} ms, create-publish {publish_ms:.0} ms, \
+         median send {:.3} ms",
+        median(&times)
+    );
+    assert_eq!(
+        group_events(&relay, &route).len(),
+        MEMBERS,
+        "every staged send reached the relay"
     );
 }

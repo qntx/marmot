@@ -24,9 +24,14 @@ thiserror  = { workspace = true }
 [dev-dependencies]
 mk-core = { path = "../mk-core", version = "=0.0.0", features = ["testing"] }
 tokio   = { workspace = true }
+tracing = { workspace = true }
 
 [[bench]]
 name    = "scaling"
+harness = false
+
+[[bench]]
+name    = "large_group"
 harness = false
 
 [lints]

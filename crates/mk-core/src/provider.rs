@@ -11,6 +11,8 @@
 //! grouping gives.
 
 use std::collections::HashMap;
+#[cfg(feature = "testing")]
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use cgka_traits::app_event::PendingAppMessageAuthority;
@@ -81,6 +83,10 @@ pub struct KvStorageProvider {
     /// Per-store interner for capability descriptions: at most one leaked
     /// allocation per distinct unknown string, bounded by count and length.
     descriptions: Arc<Mutex<HashMap<String, &'static str>>>,
+    /// Fanout-table scans served, shared across clones so the engine's
+    /// provider handle counts too.
+    #[cfg(feature = "testing")]
+    fanout_lists: Arc<AtomicUsize>,
 }
 
 impl KvStorageProvider {
@@ -96,6 +102,8 @@ impl KvStorageProvider {
             mls: crate::mls::KvOpenMlsStorage::new(store.clone()),
             store,
             descriptions: Arc::new(Mutex::new(HashMap::new())),
+            #[cfg(feature = "testing")]
+            fanout_lists: Arc::new(AtomicUsize::new(0)),
         })
     }
 
@@ -154,6 +162,13 @@ impl KvStorageProvider {
         self.descriptions
             .lock()
             .map_or(0, |interner| interner.len())
+    }
+
+    /// Fanout listings served so far — the `testing` surface uses it to
+    /// prove `report_publish` never scans the whole outbox.
+    #[cfg(feature = "testing")]
+    pub(crate) fn fanout_list_count(&self) -> usize {
+        self.fanout_lists.load(Ordering::Relaxed)
     }
 }
 
@@ -1852,6 +1867,8 @@ impl OutboundFanoutStorage for KvStorageProvider {
     }
 
     fn list_outbound_fanouts(&self) -> StorageResult<Vec<OutboundFanout>> {
+        #[cfg(feature = "testing")]
+        self.fanout_lists.fetch_add(1, Ordering::Relaxed);
         self.list_ordered(Table::OutboundFanout, &[])
     }
 
@@ -1859,6 +1876,8 @@ impl OutboundFanoutStorage for KvStorageProvider {
         &self,
         group_id: &GroupId,
     ) -> StorageResult<Vec<OutboundFanout>> {
+        #[cfg(feature = "testing")]
+        self.fanout_lists.fetch_add(1, Ordering::Relaxed);
         Ok(self
             .list_ordered::<OutboundFanout>(Table::OutboundFanout, &[])?
             .into_iter()

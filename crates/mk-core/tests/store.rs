@@ -815,6 +815,14 @@ mod indexed_queries {
         );
         assert_eq!(
             provider
+                .list_deferred_message_metadata(&engine_gid)
+                .expect("deferred listing answers from the state index")
+                .len(),
+            0,
+            "deferred listing must not decode unreturned rows"
+        );
+        assert_eq!(
+            provider
                 .list_messages_in_states(&engine_gid, &[MessageState::Created], EpochId(0))
                 .expect("other states list cleanly")
                 .len(),

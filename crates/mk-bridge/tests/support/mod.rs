@@ -478,6 +478,11 @@ pub struct Member<H: Host = MemHost> {
     pub indexed_publish: bool,
     /// 32- and 64-byte segments of every durable key seen so far.
     durable_ids: HashSet<Vec<u8>>,
+    /// `signer_pending` round-trips [`Self::call`] answers before it
+    /// declares the loop unsettled.
+    pub max_signer_rounds: usize,
+    /// `signer_pending` round-trips answered so far.
+    pub signer_rounds: usize,
 }
 
 impl Member<MemHost> {
@@ -502,6 +507,8 @@ where
             acked: 0,
             indexed_publish: false,
             durable_ids: HashSet::new(),
+            max_signer_rounds: 32,
+            signer_rounds: 0,
         }
     }
 
@@ -591,10 +598,11 @@ where
     /// `LocalSigner` until the call resolves.
     pub async fn call(&mut self, request: Request) -> Response {
         let mut response = self.call_once(request);
-        for _ in 0..32 {
+        for _ in 0..self.max_signer_rounds {
             let Response::SignerPending { requests } = &response else {
                 return response;
             };
+            self.signer_rounds += 1;
             let mut replies = Vec::with_capacity(requests.len());
             for request in requests {
                 replies.push(SignerReply {
