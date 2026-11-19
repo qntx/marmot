@@ -28,6 +28,8 @@ export type MarmotErrorKind =
   | "storage"
   | "handler_failed"
   | "subscription_limit"
+  | "commit_too_large"
+  | "commit_refused"
   | "engine";
 
 export class MarmotError extends Error {
