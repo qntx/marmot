@@ -33,6 +33,7 @@ use serde as _;
 use serde_json as _;
 use thiserror as _;
 use tokio as _;
+use tracing as _;
 
 const SESSION_RS: &str = include_str!("../../mk-core/src/session.rs");
 

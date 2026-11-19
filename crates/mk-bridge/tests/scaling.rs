@@ -30,6 +30,7 @@ use std::time::Instant;
 
 use serde as _;
 use thiserror as _;
+use tracing as _;
 
 use mk_bridge::protocol::{
     AppMessage, CreateGroupRequest, IngestRequest, Invitee, OpResult, Request, Response,

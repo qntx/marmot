@@ -36,6 +36,7 @@ use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use thiserror as _;
 use tokio as _;
+use tracing as _;
 
 fn vector_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../vectors/bridge")
