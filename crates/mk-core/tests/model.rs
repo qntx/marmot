@@ -77,12 +77,13 @@ use cgka_traits::maintenance::{
     MaintenanceTrigger, PeriodicMaintenancePolicy, TransportFanoutAttemptState,
     TransportFanoutTarget,
 };
-use cgka_traits::message::{MessageRecord, MessageState};
+use cgka_traits::message::{MessageRecord, MessageState, StoredMessagePayload};
 use cgka_traits::storage::{
     AccountDeviceHistoryKey, AccountDeviceSignerBinding, CommittedMembers, CommittedRoster,
     CommittedRosterWrite, DeferredPeelGeneration, DeviceGroupWelcomeExpectation, DisbandCandidate,
-    DisbandRequest, DisbandRequestStatus, GroupStateCheckpointRef, LeaveRequest, OwnCommitBaseline,
-    OwnCommitIntent, QueuedOutboundIntent, RosterRevision, StorageError, StorageProvider,
+    DisbandRequest, DisbandRequestStatus, GroupStateCheckpointRef, LeaveRequest,
+    OpenMlsContentFilter, OwnCommitBaseline, OwnCommitIntent, QueuedOutboundIntent, RosterRevision,
+    StorageError, StorageProvider,
 };
 use cgka_traits::transport::{Timestamp, TransportEnvelope, TransportMessage, TransportSource};
 use cgka_traits::transport_adapter::{
@@ -172,15 +173,44 @@ fn group(n: u8, epoch: u64) -> Group {
     }
 }
 
-fn record(n: u8, g: u8, state: MessageState, epoch: u64) -> MessageRecord {
+fn record(n: u8, g: u8, state: MessageState, epoch: u64, class: u8) -> MessageRecord {
     MessageRecord {
         id: mid(n),
         group_id: gid(g),
         epoch: EpochId(epoch),
         state,
-        payload: vec![n; 4],
+        payload: payload(n, g, epoch, class),
         deferred_peel: None,
     }
+}
+
+/// `class` 0 keeps the opaque four-byte payload (UNCLASSIFIED — every
+/// listing returns it); 1..=3 wraps a TLS-framed `PrivateMessage` of that
+/// `ContentType` at `epoch`, so the payload-derived
+/// `openmls_content`/`openmls_epoch` columns classify the row on both
+/// backends and the content filters can include and exclude it.
+fn payload(n: u8, g: u8, epoch: u64, class: u8) -> Vec<u8> {
+    if class == 0 {
+        return vec![n; 4];
+    }
+    let group = gid(g);
+    let mut wire = Vec::with_capacity(group.as_slice().len() + 16);
+    wire.extend_from_slice(&1u16.to_be_bytes()); // ProtocolVersion::Mls10
+    wire.extend_from_slice(&2u16.to_be_bytes()); // MlsMessageBodyIn::PrivateMessage
+    // RFC 9420 variable-length vectors carry a varint length prefix
+    // (one byte below 64), not the u32 of the TLS presentation syntax.
+    wire.push(group.as_slice().len() as u8);
+    wire.extend_from_slice(group.as_slice());
+    wire.extend_from_slice(&epoch.to_be_bytes());
+    wire.push(class); // ContentType: application 1, proposal 2, commit 3
+    // authenticated_data, encrypted_sender_data, ciphertext — empty VLBytes.
+    wire.extend_from_slice(&[0, 0, 0]);
+    StoredMessagePayload::OpenMlsWire(TransportMessage {
+        payload: wire,
+        ..transport_message(n, g)
+    })
+    .encode()
+    .expect("stored payload encodes")
 }
 
 fn welcome(n: u8, g: u8) -> PendingWelcome {
@@ -520,7 +550,7 @@ enum Op {
     HasAtomicSavepoints,
     DeleteGroup(u8),
     GetGroup(u8),
-    PutMessage(u8, u8, u8, u64),
+    PutMessage(u8, u8, u8, u64, u8),
     UpdateState(u8, u8),
     DeleteMessage(u8),
     GetMessage(u8),
@@ -612,9 +642,8 @@ fn leaf_strategy() -> impl Strategy<Value = Op> {
         1 => Just(Op::HasAtomicSavepoints),
         1 => (0..GROUPS).prop_map(Op::DeleteGroup),
         1 => (0..GROUPS).prop_map(Op::GetGroup),
-        4 => (0..MESSAGES, 0..GROUPS, 0..7u8, 0..4u64).prop_map(|(m, g, s, e)| {
-            Op::PutMessage(m, g, s, e)
-        }),
+        4 => (0..MESSAGES, 0..GROUPS, 0..7u8, 0..4u64, 0..4u8)
+            .prop_map(|(m, g, s, e, c)| Op::PutMessage(m, g, s, e, c)),
         2 => (0..MESSAGES, 0..7u8).prop_map(|(m, s)| Op::UpdateState(m, s)),
         1 => (0..MESSAGES).prop_map(Op::DeleteMessage),
         1 => (0..MESSAGES, 0..GROUPS, 0..7u8, 0..4u64).prop_map(|(m, g, s, e)| {
@@ -875,12 +904,12 @@ where
         Op::HasAtomicSavepoints => Outcome::Bool(Ok(p.has_atomic_group_savepoints())),
         Op::DeleteGroup(g) => unit(p.delete_group(&gid(*g))),
         Op::GetGroup(g) => Outcome::Group(p.get_group(&gid(*g)).map_err(|e| kind(&e))),
-        Op::PutMessage(m, g, s, e) => unit(p.put_message(&record(*m, *g, state_of(*s), *e))),
+        Op::PutMessage(m, g, s, e, c) => unit(p.put_message(&record(*m, *g, state_of(*s), *e, *c))),
         Op::UpdateState(m, s) => unit(p.update_message_state(&mid(*m), state_of(*s))),
         Op::DeleteMessage(m) => unit(p.delete_message(&mid(*m))),
         Op::GetMessage(m) => Outcome::Message(p.get_message(&mid(*m)).map_err(|e| kind(&e))),
         Op::ReleaseMessage(m, g, s, e) => {
-            unit(p.release_message_for_replay(&record(*m, *g, state_of(*s), *e)))
+            unit(p.release_message_for_replay(&record(*m, *g, state_of(*s), *e, 0)))
         }
         Op::PutWelcome(m, g) => unit(p.put_welcome(&welcome(*m, *g))),
         Op::TakeWelcome(m) => Outcome::Welcome(p.take_welcome(&mid(*m)).map_err(|e| kind(&e))),
@@ -1388,6 +1417,48 @@ where
         }
     }
 
+    // `list_openmls_messages_in_states` under every content filter: the
+    // bound sits inside the generated epoch range (0..4) so Processed
+    // applications land on both sides of it.
+    const ALL_STATES: &[MessageState] = &[
+        MessageState::Sent,
+        MessageState::Created,
+        MessageState::Processed,
+        MessageState::Failed,
+        MessageState::Retryable,
+        MessageState::PeelDeferred,
+        MessageState::EpochInvalidated,
+    ];
+    for g in 0..GROUPS {
+        let id = gid(g);
+        for (name, filter) in [
+            ("commits", OpenMlsContentFilter::Commits),
+            (
+                "without-proc-through",
+                OpenMlsContentFilter::WithoutProcessedApplicationsThrough(EpochId(1)),
+            ),
+            (
+                "without-proc",
+                OpenMlsContentFilter::WithoutProcessedApplications,
+            ),
+            ("apps-at", OpenMlsContentFilter::ApplicationsAt(EpochId(1))),
+            (
+                "cp-between",
+                OpenMlsContentFilter::CommitsAndProposalsBetween {
+                    from: EpochId(1),
+                    through: EpochId(2),
+                },
+            ),
+        ] {
+            put(
+                &format!("openmls-{name}-{g}"),
+                p.list_openmls_messages_in_states(&id, ALL_STATES, EpochId(0), filter)
+                    .map(|v| format!("{v:?}"))
+                    .map_err(|e| kind(&e)),
+            );
+        }
+    }
+
     for f in FEATURES {
         put(
             &format!("feature-{f}"),
@@ -1624,6 +1695,22 @@ sql: {:?}",
                 "sqlite served a cached group whose generation did not move: {:?}",
                 sql_cache.stale,
             );
+        }
+
+        // Deterministic classified rows on both sides of the
+        // `WithoutProcessedApplicationsThrough` bound: random ops rarely
+        // leave a Processed application above the bound in final state, so
+        // seed the rows the content filters distinguish.
+        for op in [
+            Op::PutGroupKeepingRoster(0, 0),
+            Op::PutMessage(11, 0, 2, 0, 1), // processed app at the bound
+            Op::PutMessage(10, 0, 2, 3, 1), // processed app above the bound
+            Op::PutMessage(9, 0, 0, 3, 1),  // unprocessed app above the bound
+            Op::PutMessage(8, 0, 2, 3, 3),  // processed commit
+            Op::PutMessage(7, 0, 2, 2, 2),  // processed proposal
+        ] {
+            apply(&kv, &op, &mut |_| {});
+            apply(&sqlite, &op, &mut |_| {});
         }
 
         let kv_dump = dump(&kv);
