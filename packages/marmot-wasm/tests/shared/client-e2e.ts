@@ -246,29 +246,48 @@ export async function restart(handle: ClientHandle): Promise<void> {
 }
 
 /**
- * Process death: `network.kill` severs the old port (its sockets and in-flight writes are gone),
- * the instance is abandoned without closing, and it reopens over exactly what was durable —
- * `memoryKv(old.rows())` + `memoryCursorStore(old.bytes())` — on a fresh port name and timer.
+ * The kill half of `crash`: the port dies (sockets and in-flight writes gone), the instance is
+ * abandoned, and the next lifetime's stores/port name are prepared — but nothing reopens yet, so
+ * events published while silenced are missed live and arrive only on `wake`'s replay.
  */
-export async function crash(handle: ClientHandle): Promise<void> {
+export function silence(handle: ClientHandle): void {
   handle.restarting = true;
   handle.generation += 1;
   handle.zombies.push(handle.client);
+  handle.network.kill(handle.portName);
+  handle.portName = `${handle.name}-${handle.generation}`;
+  handle.stores = {
+    kv: memoryKv(handle.stores.kv.rows()),
+    cursors: memoryCursorStore(handle.stores.cursors.bytes()),
+  };
+  handle.timer = countingTimer();
+}
+
+/** The reopen half of `crash`: a fresh instance over the prepared durable rows. */
+export async function wake(handle: ClientHandle): Promise<void> {
   try {
-    handle.network.kill(handle.portName);
-    handle.portName = `${handle.name}-${handle.generation}`;
-    handle.stores = {
-      kv: memoryKv(handle.stores.kv.rows()),
-      cursors: memoryCursorStore(handle.stores.cursors.bytes()),
-    };
-    handle.timer = countingTimer();
     handle.client = await openInstance(handle);
   } finally {
     handle.restarting = false;
   }
 }
 
-/** Send one app message, retrying `group_busy` with 20 ms sleeps (bounded). */
+/**
+ * Process death: `network.kill` severs the old port (its sockets and in-flight writes are gone),
+ * the instance is abandoned without closing, and it reopens over exactly what was durable —
+ * `memoryKv(old.rows())` + `memoryCursorStore(old.bytes())` — on a fresh port name and timer.
+ */
+export async function crash(handle: ClientHandle): Promise<void> {
+  silence(handle);
+  await wake(handle);
+}
+
+/**
+ * Send one app message, retrying `group_busy` and `send_rate_exceeded` with 20 ms sleeps (bounded).
+ * The pacing cap — 50 per group per `created_at` second, 30 s forward skew — only refuses a send
+ * beyond 1,550 per group inside 30 s; retrying after a short sleep is the documented host
+ * behaviour, exactly like `group_busy`.
+ */
 export async function send(handle: ClientHandle, group: string, text: string): Promise<void> {
   for (let attempt = 0; attempt < SEND_ATTEMPTS; attempt += 1) {
     if (handle.restarting) {
@@ -279,16 +298,14 @@ export async function send(handle: ClientHandle, group: string, text: string): P
       // oxlint-disable-next-line no-await-in-loop -- a send is sequential by design
       await handle.client.sendMessage(group, { kind: 9, tags: [], content: text });
       handle.sent.add(text);
-      // Cap ~80 msgs/s: a same-second cohort beyond the engine's 100-generation
-      // out-of-order tolerance loses its random-order tail — same-second-burst.test.ts.
-      // oxlint-disable-next-line no-await-in-loop -- sender pacing is sequential by design
-      await sleep(12);
       return;
     } catch (error) {
       // A send racing a mid-stream restart dies as `closed` before staging — safe to retry.
       const transient =
         error instanceof MarmotError &&
-        (error.kind === "group_busy" || (error.kind === "closed" && handle.restarting));
+        (error.kind === "group_busy" ||
+          error.kind === "send_rate_exceeded" ||
+          (error.kind === "closed" && handle.restarting));
       if (transient) {
         // oxlint-disable-next-line no-await-in-loop -- bounded app-level retry
         await sleep(RETRY_MS);
