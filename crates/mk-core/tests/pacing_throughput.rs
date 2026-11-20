@@ -18,6 +18,8 @@
     clippy::doc_markdown,
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss,
+    clippy::excessive_nesting,
+    clippy::manual_is_multiple_of,
     reason = "test code"
 )]
 
@@ -94,10 +96,9 @@ mod throughput {
         let signer: Arc<dyn AccountSigner> = Arc::new(LocalSigner::new());
         let clock = Arc::new(WallClock::new());
         let host = Arc::new(RecordingHost::new());
-        let kv_host: Arc<dyn mk_core::KvHost> = host.clone();
         let opened = Session::open(SessionConfig {
             signer: Arc::clone(&signer),
-            host: kv_host,
+            host: Arc::<RecordingHost>::clone(&host),
             rows: Vec::new(),
             clock,
             destination_policy: DestinationPolicy {
