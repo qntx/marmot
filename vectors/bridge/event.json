@@ -12,6 +12,11 @@
     },
     "type": "agent_stream_started"
   },
+  "app_event_dropped": {
+    "group": "dead",
+    "reason": "expired",
+    "type": "app_event_dropped"
+  },
   "epoch_changed": {
     "from": "1",
     "group": "dead",
@@ -35,6 +40,7 @@
     "epoch": "2",
     "group": "dead",
     "origin_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "row_id": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
     "type": "group_state_changed"
   },
   "group_state_invalidated": {
@@ -89,8 +95,13 @@
       "content": "hi",
       "created_at": "1700000000",
       "epoch": "1",
+      "expires_at": "1700003600",
       "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       "kind": "9",
+      "semantics": {
+        "reply_to": null,
+        "type": "chat"
+      },
       "sender": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
       "stream_final": {
         "chunk_count": "2",

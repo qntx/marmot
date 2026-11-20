@@ -41,7 +41,8 @@
 //! `WrongRecipient`.
 
 use cgka_traits::app_event::{
-    MARMOT_APP_EVENT_KIND_AGENT_STREAM_START, MARMOT_APP_EVENT_KIND_CHAT, MarmotAppEvent,
+    AppMessageAuthority, AppMessageRetentionDecision, MARMOT_APP_EVENT_KIND_AGENT_STREAM_START,
+    MARMOT_APP_EVENT_KIND_CHAT, MarmotAppEvent,
 };
 use cgka_traits::engine::GroupEvent;
 use cgka_traits::ingest::{
@@ -53,6 +54,7 @@ use zeroize::Zeroizing;
 use crate::agent_stream::{self, StreamFinal};
 use crate::media::{self, AttachmentRejection, MediaReference};
 use crate::outbox::PublishResolution;
+use crate::semantics::{self, DropReason, Semantics};
 use crate::types::{AccountId, EventId, GroupId, OutboundId};
 
 /// Spec `foundation/errors.md` input categories. `as_str` returns the exact
@@ -435,6 +437,11 @@ pub struct ReceivedMessage {
     /// The agent-stream final anchor, when this kind-9 message carries all
     /// four `stream*` tags well-formed.
     pub stream_final: Option<StreamFinal>,
+    /// The typed meaning of the inner event.
+    pub semantics: Semantics,
+    /// Source-epoch retention expiry (`engine.retention.expires_at`):
+    /// `None` means no expiry or no recoverable policy.
+    pub expires_at: Option<u64>,
 }
 
 /// The anchors of a delivered agent text stream start (kind 1200).
@@ -581,6 +588,11 @@ pub enum SessionEvent {
         change: GroupChange,
         /// The commit that produced the change (for later invalidation).
         origin_commit: Option<EventId>,
+        /// Canonical row id (`group_system_canonical_id`): identical on
+        /// every member that applies the same commit and on re-delivery —
+        /// hosts upsert system rows by it and withdraw rows whose
+        /// `origin_commit` a `GroupStateInvalidated` names.
+        row_id: String,
     },
     /// A commit's state notifications were withdrawn because it lost a fork.
     GroupStateInvalidated {
@@ -657,6 +669,14 @@ pub enum SessionEvent {
         /// The verdict.
         resolution: PublishResolution,
     },
+    /// A decrypted application event was dropped instead of delivered;
+    /// the session acknowledged its pending row itself inside the drain.
+    AppEventDropped {
+        /// The group.
+        group: GroupId,
+        /// Why it was dropped.
+        reason: DropReason,
+    },
 }
 
 /// The mapped session event plus the media-secret row effects
@@ -671,6 +691,10 @@ pub(crate) struct MappedEvent {
     /// `(group, transport)` media-secret row to delete (the message's media
     /// secret is no longer needed once it is invalidated).
     pub secret_delete: Option<(EngineGroupId, MessageId)>,
+    /// Pending application-event row the session acknowledges itself inside
+    /// the drain's storage unit (the event dropped unverified, malformed,
+    /// unauthorized, or expired — never a media secret written).
+    pub drop_pending: Option<MessageId>,
 }
 
 impl MappedEvent {
@@ -680,6 +704,7 @@ impl MappedEvent {
             event,
             secret_write: None,
             secret_delete: None,
+            drop_pending: None,
         }
     }
 }
@@ -702,7 +727,7 @@ impl MappedEvent {
 ///   still surfaced as `MessageInvalidated` (the payload ref is diagnostic
 ///   only and carries no additional meaning for the host); its media-secret
 ///   row (if any) is retired with the event.
-pub(crate) fn session_event(event: GroupEvent) -> Option<MappedEvent> {
+pub(crate) fn session_event(event: GroupEvent, now_secs: u64) -> Option<MappedEvent> {
     match event {
         GroupEvent::MessageReceived {
             group_id,
@@ -710,6 +735,8 @@ pub(crate) fn session_event(event: GroupEvent) -> Option<MappedEvent> {
             sender,
             epoch,
             payload,
+            retention,
+            authority,
             encrypted_media_secret,
             ..
         } => message_received(
@@ -718,7 +745,10 @@ pub(crate) fn session_event(event: GroupEvent) -> Option<MappedEvent> {
             &sender,
             epoch,
             &payload,
+            retention,
+            authority,
             encrypted_media_secret,
+            now_secs,
         ),
         GroupEvent::AppMessageInvalidated {
             group_id,
@@ -733,6 +763,7 @@ pub(crate) fn session_event(event: GroupEvent) -> Option<MappedEvent> {
             },
             secret_write: None,
             secret_delete: Some((group_id, message_id)),
+            drop_pending: None,
         }),
         GroupEvent::GroupCreated { group_id } => {
             Some(MappedEvent::plain(SessionEvent::GroupCreated {
@@ -758,6 +789,19 @@ pub(crate) fn session_event(event: GroupEvent) -> Option<MappedEvent> {
             change,
             origin_commit_id,
         } => {
+            // The canonical row id binds the engine change verbatim —
+            // including fields the mapped `GroupChange` drops (a rename's
+            // `previous_name`) — so compute it before mapping. The id
+            // function errors only for `GroupDisbanded` without an actor,
+            // which the engine never emits; that malformed event is
+            // dropped here.
+            let row_id = cgka_traits::app_event::group_system_canonical_id(
+                &group_id,
+                epoch.0,
+                actor.as_ref(),
+                &change,
+            )
+            .ok()?;
             let change = group_change(change)?;
             Some(MappedEvent::plain(SessionEvent::GroupStateChanged {
                 group: group_of(&group_id),
@@ -765,6 +809,7 @@ pub(crate) fn session_event(event: GroupEvent) -> Option<MappedEvent> {
                 actor: actor.as_ref().and_then(account_of),
                 change,
                 origin_commit: origin_commit_id.as_ref().and_then(event_id_of),
+                row_id,
             }))
         }
         other => session_event_rest(other).map(MappedEvent::plain),
@@ -772,19 +817,49 @@ pub(crate) fn session_event(event: GroupEvent) -> Option<MappedEvent> {
 }
 
 /// Map a decrypted application message to its session event plus the
-/// media-secret write it carries.
+/// media-secret write it carries. A message the receive-side rules drop
+/// (expired, unauthorized, unverifiable, malformed) maps to
+/// [`SessionEvent::AppEventDropped`] and acknowledges its pending row
+/// inside the drain — classification is stateless, so a restart between
+/// ingest and ack re-delivers the same decision.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "every argument is a field of the engine's MessageReceived event"
+)]
 fn message_received(
     group_id: EngineGroupId,
     message_id: MessageId,
     sender: &MemberId,
     epoch: EpochId,
     payload: &[u8],
+    retention: Option<AppMessageRetentionDecision>,
+    authority: Option<AppMessageAuthority>,
     encrypted_media_secret: Option<EncryptedMediaSecret>,
+    now_secs: u64,
 ) -> Option<MappedEvent> {
     let inner = MarmotAppEvent::decode(payload).ok()?;
     let group = group_of(&group_id);
     let transport_id = event_id_of(&message_id)?;
     let sender_account = account_of(sender)?;
+    let expires_at = retention.and_then(|decision| decision.expires_at);
+    let semantics = match semantics::classify(
+        inner.kind,
+        &inner.tags,
+        &inner.content,
+        authority.map(|grant| grant.moderation_grant),
+        expires_at,
+        now_secs,
+    ) {
+        semantics::Classified::Deliver(semantics) => semantics,
+        semantics::Classified::Drop(reason) => {
+            return Some(MappedEvent {
+                event: SessionEvent::AppEventDropped { group, reason },
+                secret_write: None,
+                secret_delete: None,
+                drop_pending: Some(message_id),
+            });
+        }
+    };
     if inner.kind == MARMOT_APP_EVENT_KIND_AGENT_STREAM_START
         && let Ok(start) = agent_stream::parse_stream_start(&inner.tags)
     {
@@ -839,10 +914,13 @@ fn message_received(
                 transport_id,
                 attachments,
                 stream_final,
+                semantics,
+                expires_at,
             },
         },
         secret_write,
         secret_delete: None,
+        drop_pending: None,
     })
 }
 
@@ -1261,7 +1339,7 @@ mod tests {
     /// the anchor fields and no stream candidate on the event.
     #[test]
     fn stream_start_maps_to_anchor_event() {
-        let mapped = session_event(message_event(1200, stream_tags())).expect("mapped");
+        let mapped = session_event(message_event(1200, stream_tags()), 0).expect("mapped");
         let SessionEvent::AgentStreamStarted { group, start } = mapped.event else {
             panic!("expected AgentStreamStarted");
         };
@@ -1285,7 +1363,7 @@ mod tests {
             .get_mut(3)
             .and_then(|tag| tag.get_mut(1))
             .expect("parent tag") = hex32(0xab).to_uppercase();
-        let mapped = session_event(message_event(1200, parent_upper)).expect("mapped");
+        let mapped = session_event(message_event(1200, parent_upper), 0).expect("mapped");
         let SessionEvent::AgentStreamStarted { start, .. } = mapped.event else {
             panic!("expected AgentStreamStarted");
         };
@@ -1296,7 +1374,7 @@ mod tests {
             .first_mut()
             .and_then(|tag| tag.get_mut(1))
             .expect("stream tag") = hex32(0xcd).to_uppercase();
-        let mapped_upper = session_event(message_event(1200, stream_upper)).expect("mapped");
+        let mapped_upper = session_event(message_event(1200, stream_upper), 0).expect("mapped");
         assert!(
             matches!(mapped_upper.event, SessionEvent::MessageReceived { .. }),
             "uppercase stream id must stay a message"
@@ -1333,7 +1411,7 @@ mod tests {
                 vec!["final-kind".to_owned(), "9".to_owned()],
             ],
         ] {
-            let mapped = session_event(message_event(1200, tags)).expect("mapped");
+            let mapped = session_event(message_event(1200, tags), 0).expect("mapped");
             assert!(
                 matches!(mapped.event, SessionEvent::MessageReceived { .. }),
                 "malformed start must stay a message"
@@ -1355,7 +1433,7 @@ mod tests {
             ],
         );
         let SessionEvent::MessageReceived { message, .. } =
-            session_event(good).expect("mapped").event
+            session_event(good, 0).expect("mapped").event
         else {
             panic!("expected MessageReceived");
         };
@@ -1377,7 +1455,7 @@ mod tests {
         let SessionEvent::MessageReceived {
             message: bad_message,
             ..
-        } = session_event(bad).expect("mapped").event
+        } = session_event(bad, 0).expect("mapped").event
         else {
             panic!("expected MessageReceived");
         };
@@ -1430,10 +1508,10 @@ mod tests {
             "filename pic.png".to_owned(),
             format!("nonce {}", "a".repeat(24)),
         ]];
-        let mapped = session_event(with_secret(valid)).expect("mapped");
+        let mapped = session_event(with_secret(valid), 0).expect("mapped");
         assert!(mapped.secret_write.is_some());
         let malformed = vec![vec!["imeta".to_owned(), "v encrypted-media-v9".to_owned()]];
-        let malformed_mapped = session_event(with_secret(malformed)).expect("mapped");
+        let malformed_mapped = session_event(with_secret(malformed), 0).expect("mapped");
         assert!(malformed_mapped.secret_write.is_none());
     }
 
@@ -1481,7 +1559,7 @@ mod tests {
             authority,
             encrypted_media_secret: Some(EncryptedMediaSecret::new(Zeroizing::new(vec![3; 32]))),
         };
-        let mapped = session_event(event).expect("mapped");
+        let mapped = session_event(event, 0).expect("mapped");
         let SessionEvent::MessageReceived { message, .. } = mapped.event else {
             panic!("expected MessageReceived");
         };
@@ -1515,12 +1593,58 @@ mod tests {
             reason: AppMessageInvalidationReason::LosingBranch,
             decrypted_payload_ref: None,
         };
-        let mapped = session_event(event).expect("mapped");
+        let mapped = session_event(event, 0).expect("mapped");
         assert!(matches!(
             mapped.event,
             SessionEvent::MessageInvalidated { .. }
         ));
         assert_eq!(mapped.secret_write, None);
         assert_eq!(mapped.secret_delete, Some((group_id, message_id)));
+    }
+
+    /// `group_system_canonical_id` errors only for a `GroupDisbanded`
+    /// without an actor — the engine never emits it; if it ever did the
+    /// event is dropped rather than surfaced with a fabricated row id.
+    #[test]
+    fn disbanded_without_actor_is_dropped() {
+        let event = GroupEvent::GroupStateChanged {
+            group_id: gid(),
+            epoch: EpochId(3),
+            actor: None,
+            change: cgka_traits::engine::GroupStateChange::GroupDisbanded,
+            origin_commit_id: None,
+        };
+        assert!(session_event(event, 0).is_none());
+    }
+
+    /// A well-formed change carries the canonical system-row id: equal to
+    /// `group_system_canonical_id` of the exact group, epoch, actor and
+    /// engine change (including fields the mapped `GroupChange` drops).
+    #[test]
+    fn state_change_row_id_is_canonical() {
+        let actor = MemberId::new(vec![5; 32]);
+        let engine_change = cgka_traits::engine::GroupStateChange::GroupRenamed {
+            previous_name: Some("before".to_owned()),
+            name: "after".to_owned(),
+        };
+        let event = GroupEvent::GroupStateChanged {
+            group_id: gid(),
+            epoch: EpochId(7),
+            actor: Some(actor.clone()),
+            change: engine_change.clone(),
+            origin_commit_id: None,
+        };
+        let expected = cgka_traits::app_event::group_system_canonical_id(
+            &gid(),
+            7,
+            Some(&actor),
+            &engine_change,
+        )
+        .expect("canonical id");
+        let mapped = session_event(event, 0).expect("mapped");
+        let SessionEvent::GroupStateChanged { row_id, .. } = mapped.event else {
+            panic!("expected GroupStateChanged");
+        };
+        assert_eq!(row_id, expected);
     }
 }

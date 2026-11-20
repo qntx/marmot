@@ -371,6 +371,32 @@ impl KvStorageProvider {
         ))
     }
 
+    /// The message ids of every queued-intent link belonging to `group_id`
+    /// — `forget_group` releases them with the group.
+    pub(crate) fn queued_intent_links_for_group(
+        &self,
+        group_id: &cgka_traits::GroupId,
+    ) -> Result<Vec<cgka_traits::MessageId>, StorageError> {
+        let mut out = Vec::new();
+        for (key, value) in self
+            .store()
+            .scan(&keys::key(Table::QueuedIntentLink, &[]))?
+        {
+            let mut tuple = crate::ser::Tuple::new(&value);
+            let linked_group = tuple.field()?;
+            tuple.field()?;
+            tuple.finish()?;
+            if linked_group == group_id.as_slice() {
+                let message_id = keys::segments(&key)
+                    .and_then(|segments| <[&[u8]; 1]>::try_from(segments.as_slice()).ok())
+                    .map(|[segment]| cgka_traits::MessageId::new(segment.to_vec()))
+                    .ok_or_else(|| storage_err("kv decode: queued intent link"))?;
+                out.push(message_id);
+            }
+        }
+        Ok(out)
+    }
+
     /// Read a session-owned meta row (raw bytes).
     pub(crate) fn session_meta(&self, name: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
         self.store().get(&keys::key(Table::Meta, &[name]))

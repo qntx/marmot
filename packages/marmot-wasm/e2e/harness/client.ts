@@ -255,15 +255,15 @@ const api: ClientHarness = {
     for (let attempt = 0; attempt < 200; attempt += 1) {
       try {
         // oxlint-disable-next-line no-await-in-loop -- a send is sequential by design
-        const outcome = await requireClient().sendMessage(group, {
+        const sent = await requireClient().sendMessage(group, {
           kind: 9,
           tags: [],
           content: text,
         });
         appendStored("mc:sent", [text]);
-        if (outcome.type === "staged") {
+        if (sent.outcome.type === "staged") {
           const map = sentMap();
-          map.set(text, outcome.ids);
+          map.set(text, sent.outcome.ids);
           localStorage.setItem("mc:sentmap", JSON.stringify([...map.entries()]));
         }
         return;

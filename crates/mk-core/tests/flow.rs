@@ -916,7 +916,7 @@ mod flow_tests {
             .await
             .expect("send");
         assert_eq!(
-            outcome,
+            outcome.outcome,
             SendOutcome::Queued,
             "the send queues behind the pending commit"
         );

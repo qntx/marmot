@@ -3,7 +3,9 @@
 use serde::{Deserialize, Serialize};
 
 use super::ser::{hex_bytes, hex_str, opt_u64_str};
-use super::types::{GroupSnapshot, InputReport, Outbound, PublishResolution, SendOutcome};
+use super::types::{
+    GroupSnapshot, InputReport, Outbound, PublishResolution, SendOutcome, SentEvent,
+};
 
 /// `submit_proof` succeeded; the session is usable.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -79,6 +81,17 @@ pub struct GroupCreatedResult {
 pub struct SendOutcomeResult {
     /// What the send produced.
     pub outcome: SendOutcome,
+}
+
+/// Any `send_message`/`send_media`/`send_intent` result: the outcome plus
+/// the inner event the host renders for the sender's own copy.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MessageSentResult {
+    /// What the send produced.
+    pub outcome: SendOutcome,
+    /// The inner app event, with its canonical id.
+    pub message: SentEvent,
 }
 
 /// `seal_attachment` result: the blob to upload plus the send-time handle.
@@ -161,6 +174,8 @@ pub enum OpResult {
     GroupCreated(GroupCreatedResult),
     /// A send/membership operation.
     SendOutcome(SendOutcomeResult),
+    /// `send_message`/`send_media`/`send_intent`.
+    MessageSent(MessageSentResult),
     /// `seal_attachment`.
     SealedAttachment(SealedAttachmentResult),
     /// `open_attachment`.

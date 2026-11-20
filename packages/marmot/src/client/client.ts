@@ -11,10 +11,12 @@ import type {
   AppMessage,
   AttachmentInput,
   ComponentUpdate,
+  GroupAvatar,
   GroupSnapshot,
   Invitee,
   MediaReference,
   SendOutcome,
+  SentMessage,
 } from "../backend/protocol.ts";
 import * as groups from "../groups/index.ts";
 import type { UploadPort } from "../groups/index.ts";
@@ -27,7 +29,7 @@ import { safeRelayUrl } from "../transport/index.ts";
 import { MarmotError, toMarmotError } from "./errors.ts";
 import type { MarmotErrorKind } from "./errors.ts";
 import { Pump } from "./pump.ts";
-import type { ClientMessage, DeliveryEvent, GroupEvent } from "./pump.ts";
+import type { ClientMessage, DeliveryEvent, DropEvent, GroupEvent } from "./pump.ts";
 import { decodeClientState } from "./state.ts";
 import type { ClientState } from "./state.ts";
 
@@ -135,6 +137,10 @@ export class MarmotClient {
 
   onDelivery(listener: (event: DeliveryEvent) => void): () => void {
     return this.pump.onDelivery(listener);
+  }
+
+  onDropped(listener: (event: DropEvent) => void): () => void {
+    return this.pump.onDropped(listener);
   }
 
   onError(listener: (error: MarmotError) => void): () => void {
@@ -246,7 +252,14 @@ export class MarmotClient {
   }
 
   async leave(group: string): Promise<SendOutcome> {
-    return this.op(async (engine) => groups.leave(engine, group));
+    return this.op(async (engine) => {
+      const outcome = await groups.leave(engine, group);
+      // A leave arms the delayed self-remove auto-commit: queue a tick to arm its wake.
+      if (outcome.type === "leave_requested") {
+        this.pump.requestTick();
+      }
+      return outcome;
+    });
   }
 
   async selfUpdate(group: string): Promise<SendOutcome> {
@@ -264,15 +277,92 @@ export class MarmotClient {
     return this.op(async (engine) => groups.updateAppComponents(engine, group, updates));
   }
 
-  async sendMessage(group: string, message: AppMessage): Promise<SendOutcome> {
+  async sendMessage(group: string, message: AppMessage): Promise<SentMessage> {
     return this.op(async (engine) => groups.sendMessage(engine, group, message));
+  }
+
+  /** Send a chat message; `replyTo` adds the `e`/`q` reply pair. */
+  async sendChat(group: string, content: string, replyTo?: string): Promise<SentMessage> {
+    return this.op(async (engine) => groups.sendChat(engine, group, content, replyTo));
+  }
+
+  /** React to `target` with `emoji`. */
+  async react(group: string, target: string, emoji: string): Promise<SentMessage> {
+    return this.op(async (engine) => groups.react(engine, group, target, emoji));
+  }
+
+  /** Withdraw own reactions by event id. */
+  async unreact(group: string, reactions: string[]): Promise<SentMessage> {
+    return this.op(async (engine) => groups.unreact(engine, group, reactions));
+  }
+
+  /** Replace `target`'s content. */
+  async editMessage(group: string, target: string, content: string): Promise<SentMessage> {
+    return this.op(async (engine) => groups.editMessage(engine, group, target, content));
+  }
+
+  /** Delete `target` (admin removal shape when this account is an admin). */
+  async deleteMessage(group: string, target: string): Promise<SentMessage> {
+    return this.op(async (engine) => groups.deleteMessage(engine, group, target));
+  }
+
+  /** Admin removal of `target`. */
+  async removeMessage(group: string, target: string): Promise<SentMessage> {
+    return this.op(async (engine) => groups.removeMessage(engine, group, target));
+  }
+
+  /** Grant or revoke `account`'s admin flag. */
+  async setAdmin(group: string, account: string, admin: boolean): Promise<SendOutcome> {
+    return this.op(async (engine) => groups.setAdmin(engine, group, account, admin));
+  }
+
+  /** Step down: revoke this account's own admin flag. */
+  async stepDown(group: string): Promise<SendOutcome> {
+    return this.op(async (engine) => groups.stepDown(engine, group, this.account));
+  }
+
+  /** Set or clear the group's avatar; `undefined` clears. */
+  async setGroupAvatar(group: string, avatar: GroupAvatar | undefined): Promise<SendOutcome> {
+    return this.op(async (engine) => groups.setGroupAvatar(engine, group, avatar));
+  }
+
+  /** Set the group's message retention seconds; `0` disables. */
+  async setRetention(group: string, seconds: bigint): Promise<SendOutcome> {
+    return this.op(async (engine) => groups.setRetention(engine, group, seconds));
+  }
+
+  /** Request the group's terminal disband; subscriptions reconcile afterwards. */
+  async disband(group: string): Promise<SendOutcome> {
+    return this.op(async (engine) => {
+      const outcome = await groups.disband(engine, group);
+      this.pump.flagReconcile();
+      // A disband request arms deferred engine work: queue a tick so it reaches an
+      // outbound commit without waiting on unrelated traffic.
+      if (outcome.type === "disband_requested") {
+        this.pump.requestTick();
+      }
+      return outcome;
+    });
+  }
+
+  /** Require the lifecycle component on a group that predates it. */
+  async enableDisbanding(group: string): Promise<SendOutcome> {
+    return this.op(async (engine) => groups.enableDisbanding(engine, group));
+  }
+
+  /** Forget the group locally; subscriptions reconcile away from it. */
+  async forgetGroup(group: string): Promise<void> {
+    await this.op(async (engine) => {
+      await groups.forgetGroup(engine, group);
+      this.pump.flagReconcile();
+    });
   }
 
   /**
    * Seal in the pump, upload outside it, send back in it. An upload failure discards every sealed
    * handle before rejecting `upload_failed`.
    */
-  async sendMedia(group: string, media: MediaInput, upload: UploadPort): Promise<SendOutcome> {
+  async sendMedia(group: string, media: MediaInput, upload: UploadPort): Promise<SentMessage> {
     const sealed = await this.op(async (engine) =>
       groups.sealAttachments(engine, group, media.attachments),
     );

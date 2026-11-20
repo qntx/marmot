@@ -9,8 +9,8 @@ use serde::{Deserialize, Serialize};
 
 use super::ser::{hex_bytes, hex_str, hex_str_seq, u64_str};
 use super::types::{
-    AppMessage, AttachmentInput, ComponentUpdate, Event, Invitee, MediaAttachmentRef,
-    MediaReference, RelayResult, SignerReply,
+    AppMessage, AttachmentInput, ComponentUpdate, Event, GroupAvatar, Invitee, MediaAttachmentRef,
+    MediaReference, MessageIntent, RelayResult, SignerReply,
 };
 
 /// The empty argument struct every argument-less request wraps.
@@ -242,6 +242,81 @@ pub struct SignerReplyRequest {
     pub replies: Vec<SignerReply>,
 }
 
+/// Send a typed application message (`MessageIntent`) into a group.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SendIntentRequest {
+    /// The group, hex.
+    #[serde(with = "hex_bytes")]
+    pub group: Vec<u8>,
+    /// The typed intent.
+    pub intent: MessageIntent,
+}
+
+/// Grant or revoke a member's admin flag.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SetAdminRequest {
+    /// The group, hex.
+    #[serde(with = "hex_bytes")]
+    pub group: Vec<u8>,
+    /// The member account, hex.
+    #[serde(with = "hex_str")]
+    pub account: [u8; 32],
+    /// Whether the account becomes an admin.
+    pub admin: bool,
+}
+
+/// Set or clear the group's avatar component.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SetGroupAvatarRequest {
+    /// The group, hex.
+    #[serde(with = "hex_bytes")]
+    pub group: Vec<u8>,
+    /// The avatar to set, or `null` to clear.
+    pub avatar: Option<GroupAvatar>,
+}
+
+/// Set the group's message retention.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SetRetentionRequest {
+    /// The group, hex.
+    #[serde(with = "hex_bytes")]
+    pub group: Vec<u8>,
+    /// Retention seconds; `0` disables (decimal string).
+    #[serde(with = "u64_str")]
+    pub seconds: u64,
+}
+
+/// Request the group's terminal disband.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DisbandRequest {
+    /// The group, hex.
+    #[serde(with = "hex_bytes")]
+    pub group: Vec<u8>,
+}
+
+/// Require the lifecycle component on a group that predates it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EnableDisbandingRequest {
+    /// The group, hex.
+    #[serde(with = "hex_bytes")]
+    pub group: Vec<u8>,
+}
+
+/// Forget the group locally.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ForgetGroupRequest {
+    /// The group, hex.
+    #[serde(with = "hex_bytes")]
+    pub group: Vec<u8>,
+}
+
 /// A `call` request. The `"type"` tag must appear in
 /// [`crate::protocol::REQUEST_TYPES`] before decode; anything else answers
 /// `unsupported`.
@@ -298,4 +373,18 @@ pub enum Request {
     Group(GroupRequest),
     /// Answer signer operations and resume.
     SignerReply(SignerReplyRequest),
+    /// Send a typed application message.
+    SendIntent(SendIntentRequest),
+    /// Grant or revoke a member's admin flag.
+    SetAdmin(SetAdminRequest),
+    /// Set or clear the group's avatar.
+    SetGroupAvatar(SetGroupAvatarRequest),
+    /// Set the group's message retention.
+    SetRetention(SetRetentionRequest),
+    /// Request the group's terminal disband.
+    Disband(DisbandRequest),
+    /// Require the lifecycle component on the group.
+    EnableDisbanding(EnableDisbandingRequest),
+    /// Forget the group locally.
+    ForgetGroup(ForgetGroupRequest),
 }

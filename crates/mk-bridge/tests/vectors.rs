@@ -162,6 +162,25 @@ fn send_outcome_variants() {
 }
 
 #[test]
+fn message_intent_variants() {
+    check::<MessageIntent>("message_intent.json", "type", tagged_probe());
+}
+
+#[test]
+fn semantics_variants() {
+    check::<Semantics>("semantics.json", "type", tagged_probe());
+}
+
+#[test]
+fn drop_reason_variants() {
+    check::<DropReason>(
+        "drop_reason.json",
+        "type",
+        Value::String("\u{0}".to_owned()),
+    );
+}
+
+#[test]
 fn publish_resolution_variants() {
     check::<PublishResolution>(
         "publish_resolution.json",

@@ -9,7 +9,7 @@
 use mk_core as core;
 use serde::{Deserialize, Serialize};
 
-use super::ser::{hex_bytes, hex_str, opt_hex32, u64_str};
+use super::ser::{hex_bytes, hex_str, hex_str_seq, opt_hex32, opt_u64_str, u64_str};
 
 /// One reading of the injected clock.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -452,6 +452,224 @@ impl From<AppMessage> for core::AppMessage {
     }
 }
 
+/// The group's `0x8007` avatar-url component fields.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GroupAvatar {
+    /// The avatar URL.
+    pub url: String,
+    /// Optional `WxH` hint.
+    pub dim: Option<String>,
+    /// Optional thumbhash hint.
+    pub thumbhash: Option<String>,
+}
+
+impl From<GroupAvatar> for core::GroupAvatar {
+    fn from(avatar: GroupAvatar) -> Self {
+        Self {
+            url: avatar.url,
+            dim: avatar.dim,
+            thumbhash: avatar.thumbhash,
+        }
+    }
+}
+
+impl From<core::GroupAvatar> for GroupAvatar {
+    fn from(avatar: core::GroupAvatar) -> Self {
+        Self {
+            url: avatar.url,
+            dim: avatar.dim,
+            thumbhash: avatar.thumbhash,
+        }
+    }
+}
+
+/// A typed application-message intent (`send_intent`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum MessageIntent {
+    /// A chat message; `reply_to` adds the `e`/`q` reply pair.
+    Chat {
+        /// Message body.
+        content: String,
+        /// The replied-to inner event id, hex or `null`.
+        #[serde(with = "opt_hex32")]
+        reply_to: Option<[u8; 32]>,
+    },
+    /// A reaction on `target`.
+    Reaction {
+        /// The reacted-to inner event id, hex.
+        #[serde(with = "hex_str")]
+        target: [u8; 32],
+        /// The emoji.
+        emoji: String,
+    },
+    /// Withdraw own reactions.
+    Unreact {
+        /// Reaction event ids, hex each.
+        #[serde(with = "hex_str_seq")]
+        reactions: Vec<[u8; 32]>,
+    },
+    /// Replace `target`'s content.
+    Edit {
+        /// The message this edit replaces, hex.
+        #[serde(with = "hex_str")]
+        target: [u8; 32],
+        /// The replacement body.
+        content: String,
+    },
+    /// Delete `target` (admin removal shape when the sender is an admin).
+    Delete {
+        /// The message to delete, hex.
+        #[serde(with = "hex_str")]
+        target: [u8; 32],
+    },
+    /// Admin removal of `target`.
+    Remove {
+        /// The message to remove, hex.
+        #[serde(with = "hex_str")]
+        target: [u8; 32],
+    },
+}
+
+impl From<MessageIntent> for core::MessageIntent {
+    fn from(intent: MessageIntent) -> Self {
+        match intent {
+            MessageIntent::Chat { content, reply_to } => Self::Chat {
+                content,
+                reply_to: reply_to.map(core::EventId),
+            },
+            MessageIntent::Reaction { target, emoji } => Self::Reaction {
+                target: core::EventId(target),
+                emoji,
+            },
+            MessageIntent::Unreact { reactions } => Self::Unreact {
+                reactions: reactions.into_iter().map(core::EventId).collect(),
+            },
+            MessageIntent::Edit { target, content } => Self::Edit {
+                target: core::EventId(target),
+                content,
+            },
+            MessageIntent::Delete { target } => Self::Delete {
+                target: core::EventId(target),
+            },
+            MessageIntent::Remove { target } => Self::Remove {
+                target: core::EventId(target),
+            },
+        }
+    }
+}
+
+/// The inner app event a send produced, including its canonical id.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SentEvent {
+    /// Canonical inner event id, hex.
+    pub id: String,
+    /// Signer's account key, 32-byte hex.
+    #[serde(with = "hex_str")]
+    pub pubkey: [u8; 32],
+    /// Unix seconds (decimal string).
+    #[serde(with = "u64_str")]
+    pub created_at: u64,
+    /// Nostr kind.
+    pub kind: u16,
+    /// Tag list.
+    pub tags: Vec<Vec<String>>,
+    /// Content string.
+    pub content: String,
+}
+
+impl From<core::UnsignedEvent> for SentEvent {
+    fn from(event: core::UnsignedEvent) -> Self {
+        Self {
+            id: event.id().to_hex(),
+            pubkey: event.pubkey.0,
+            created_at: event.created_at,
+            kind: event.kind,
+            tags: event.tags,
+            content: event.content,
+        }
+    }
+}
+
+/// The typed meaning of a received application message.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum Semantics {
+    /// A chat message; `reply_to` is the resolved reply reference.
+    Chat {
+        /// The replied-to inner event id, hex or `null`.
+        #[serde(with = "opt_hex32")]
+        reply_to: Option<[u8; 32]>,
+    },
+    /// A reaction on `target` carrying `emoji`.
+    Reaction {
+        /// The reacted-to inner event id, hex.
+        #[serde(with = "hex_str")]
+        target: [u8; 32],
+        /// The reaction emoji.
+        emoji: String,
+    },
+    /// An admin removal of `target`.
+    Removal {
+        /// The removed message's inner event id, hex.
+        #[serde(with = "hex_str")]
+        target: [u8; 32],
+    },
+    /// Every other kind, delivered untyped.
+    Other,
+    /// An `mk-core` semantics this wire version does not know.
+    Unmapped,
+}
+
+impl From<core::Semantics> for Semantics {
+    fn from(semantics: core::Semantics) -> Self {
+        match semantics {
+            core::Semantics::Chat { reply_to } => Self::Chat {
+                reply_to: reply_to.map(|id| id.0),
+            },
+            core::Semantics::Reaction { target, emoji } => Self::Reaction {
+                target: target.0,
+                emoji,
+            },
+            core::Semantics::Removal { target } => Self::Removal { target: target.0 },
+            core::Semantics::Other => Self::Other,
+            // `Semantics` is `#[non_exhaustive]`.
+            _ => Self::Unmapped,
+        }
+    }
+}
+
+/// Why a received application event was dropped instead of delivered.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DropReason {
+    /// The message's source-epoch retention elapsed before drain.
+    Expired,
+    /// Kind 4891 without granted moderation authority.
+    Unauthorized,
+    /// Kind 5 or 1009: unverifiable on receive.
+    Unverifiable,
+    /// The event's tags or payload failed validation.
+    Malformed,
+    /// An `mk-core` drop reason this wire version does not know.
+    Unmapped,
+}
+
+impl From<core::DropReason> for DropReason {
+    fn from(reason: core::DropReason) -> Self {
+        match reason {
+            core::DropReason::Expired => Self::Expired,
+            core::DropReason::Unauthorized => Self::Unauthorized,
+            core::DropReason::Unverifiable => Self::Unverifiable,
+            core::DropReason::Malformed => Self::Malformed,
+            // `DropReason` is `#[non_exhaustive]`.
+            _ => Self::Unmapped,
+        }
+    }
+}
+
 /// A sealed attachment referenced by `send_media`: its bridge handle plus
 /// the locators the host's uploads produced.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -479,6 +697,8 @@ pub enum SendOutcome {
     NoChange,
     /// The leave request is durable.
     LeaveRequested,
+    /// The disband request is durable; the terminal Commit follows.
+    DisbandRequested,
     /// An `mk-core` send outcome this wire version does not know.
     Unmapped,
 }
@@ -492,6 +712,7 @@ impl From<core::SendOutcome> for SendOutcome {
             core::SendOutcome::Queued => Self::Queued,
             core::SendOutcome::NoChange => Self::NoChange,
             core::SendOutcome::LeaveRequested => Self::LeaveRequested,
+            core::SendOutcome::DisbandRequested => Self::DisbandRequested,
             // `SendOutcome` is `#[non_exhaustive]`.
             _ => Self::Unmapped,
         }
@@ -931,6 +1152,11 @@ pub struct ReceivedMessage {
     pub attachments: Vec<AttachmentResult>,
     /// The agent-stream final anchor, when carried.
     pub stream_final: Option<StreamFinal>,
+    /// The typed meaning of the inner event.
+    pub semantics: Semantics,
+    /// Source-epoch retention expiry, decimal string or `null`.
+    #[serde(with = "opt_u64_str")]
+    pub expires_at: Option<u64>,
 }
 
 impl From<core::ReceivedMessage> for ReceivedMessage {
@@ -957,6 +1183,8 @@ impl From<core::ReceivedMessage> for ReceivedMessage {
                 })
                 .collect(),
             stream_final: message.stream_final.map(StreamFinal::from),
+            semantics: message.semantics.into(),
+            expires_at: message.expires_at,
         }
     }
 }
@@ -1172,6 +1400,8 @@ pub enum SessionEvent {
         /// The commit that produced the change, hex.
         #[serde(with = "opt_hex32")]
         origin_commit: Option<[u8; 32]>,
+        /// Canonical system-row id, deterministic across members.
+        row_id: String,
     },
     /// A commit's state notifications were withdrawn.
     GroupStateInvalidated {
@@ -1262,6 +1492,14 @@ pub enum SessionEvent {
         /// The verdict.
         resolution: PublishResolution,
     },
+    /// A decrypted application event was dropped instead of delivered.
+    AppEventDropped {
+        /// The group, hex.
+        #[serde(with = "hex_bytes")]
+        group: Vec<u8>,
+        /// Why it was dropped.
+        reason: DropReason,
+    },
     /// An `mk-core` session event this wire version does not know.
     Unmapped,
 }
@@ -1307,12 +1545,14 @@ impl From<core::SessionEvent> for SessionEvent {
                 actor,
                 change,
                 origin_commit,
+                row_id,
             } => Self::GroupStateChanged {
                 group: group.0,
                 epoch,
                 actor: actor.map(|account| account.0),
                 change: change.into(),
                 origin_commit: origin_commit.map(|id| id.0),
+                row_id,
             },
             core::SessionEvent::GroupStateInvalidated {
                 group,
@@ -1374,6 +1614,10 @@ impl From<core::SessionEvent> for SessionEvent {
             } => Self::PublishResolved {
                 outbound: outbound.0,
                 resolution: resolution.into(),
+            },
+            core::SessionEvent::AppEventDropped { group, reason } => Self::AppEventDropped {
+                group: group.0,
+                reason: reason.into(),
             },
             // `SessionEvent` is `#[non_exhaustive]`.
             _ => Self::Unmapped,
@@ -1449,6 +1693,15 @@ pub struct GroupSnapshot {
     pub encrypted_media: Option<EncryptedMediaPolicy>,
     /// The group's `0x8006` agent text stream policy, when present.
     pub agent_text_stream: Option<AgentStreamPolicy>,
+    /// The group's avatar component, when set.
+    pub avatar: Option<GroupAvatar>,
+    /// Message retention seconds (`0` = disabled), decimal string.
+    #[serde(with = "u64_str")]
+    pub retention_seconds: u64,
+    /// Whether the group requires the `0x800c` lifecycle component.
+    pub disband_enabled: bool,
+    /// Whether a disband is in progress.
+    pub disbanding: bool,
 }
 
 impl From<core::GroupSnapshot> for GroupSnapshot {
@@ -1472,6 +1725,10 @@ impl From<core::GroupSnapshot> for GroupSnapshot {
             own_account_admin: snapshot.own_account_admin,
             encrypted_media: snapshot.encrypted_media.map(EncryptedMediaPolicy::from),
             agent_text_stream: snapshot.agent_text_stream.map(AgentStreamPolicy::from),
+            avatar: snapshot.avatar.map(GroupAvatar::from),
+            retention_seconds: snapshot.retention_seconds,
+            disband_enabled: snapshot.disband_enabled,
+            disbanding: snapshot.disbanding,
         }
     }
 }

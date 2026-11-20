@@ -442,7 +442,7 @@ impl BridgeMember {
             }))
             .await
         {
-            OpResult::SendOutcome(_) => {}
+            OpResult::MessageSent(_) => {}
             other => panic!("{}: send_message: {other:?}", self.name),
         }
         self.flush(rig).await;

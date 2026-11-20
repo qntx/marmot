@@ -50,9 +50,21 @@
     ],
     "type": "create_group"
   },
+  "disband": {
+    "group": "dead",
+    "type": "disband"
+  },
   "discard_attachment": {
     "handle": 1,
     "type": "discard_attachment"
+  },
+  "enable_disbanding": {
+    "group": "dead",
+    "type": "enable_disbanding"
+  },
+  "forget_group": {
+    "group": "dead",
+    "type": "forget_group"
   },
   "group": {
     "group": "dead",
@@ -174,6 +186,15 @@
     "group": "dead",
     "type": "self_update"
   },
+  "send_intent": {
+    "group": "dead",
+    "intent": {
+      "emoji": "\ud83d\udc4d",
+      "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "type": "reaction"
+    },
+    "type": "send_intent"
+  },
   "send_media": {
     "attachments": [
       {
@@ -204,6 +225,26 @@
       "tags": []
     },
     "type": "send_message"
+  },
+  "set_admin": {
+    "account": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "admin": true,
+    "group": "dead",
+    "type": "set_admin"
+  },
+  "set_group_avatar": {
+    "avatar": {
+      "dim": "64x64",
+      "thumbhash": null,
+      "url": "https://example.com/a.png"
+    },
+    "group": "dead",
+    "type": "set_group_avatar"
+  },
+  "set_retention": {
+    "group": "dead",
+    "seconds": "60",
+    "type": "set_retention"
   },
   "signer_reply": {
     "replies": [

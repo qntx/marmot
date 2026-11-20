@@ -362,6 +362,47 @@ async fn every_request_variant() {
         }))
         .await,
     );
+    // Protocol-v3 app surface requests against the live group.
+    mark!(
+        "send_intent",
+        &a.call(Request::SendIntent(SendIntentRequest {
+            group: group.clone(),
+            intent: MessageIntent::Chat {
+                content: "typed".to_owned(),
+                reply_to: None,
+            },
+        }))
+        .await,
+    );
+    mark!(
+        "set_admin",
+        &a.call(Request::SetAdmin(SetAdminRequest {
+            group: group.clone(),
+            account: b.signer.account().0,
+            admin: true,
+        }))
+        .await,
+    );
+    mark!(
+        "set_group_avatar",
+        &a.call(Request::SetGroupAvatar(SetGroupAvatarRequest {
+            group: group.clone(),
+            avatar: Some(GroupAvatar {
+                url: "https://example.com/a.png".to_owned(),
+                dim: Some("64x64".to_owned()),
+                thumbhash: None,
+            }),
+        }))
+        .await,
+    );
+    mark!(
+        "set_retention",
+        &a.call(Request::SetRetention(SetRetentionRequest {
+            group: group.clone(),
+            seconds: 60,
+        }))
+        .await,
+    );
     // `leave` on a second group member so it is a real send.
     mark!(
         "leave",
@@ -375,6 +416,27 @@ async fn every_request_variant() {
         "signer_reply",
         &a.call(Request::SignerReply(SignerReplyRequest {
             replies: Vec::new(),
+        }))
+        .await,
+    );
+    mark!(
+        "enable_disbanding",
+        &a.call(Request::EnableDisbanding(EnableDisbandingRequest {
+            group: group.clone(),
+        }))
+        .await,
+    );
+    mark!(
+        "disband",
+        &a.call(Request::Disband(DisbandRequest {
+            group: group.clone(),
+        }))
+        .await,
+    );
+    mark!(
+        "forget_group",
+        &a.call(Request::ForgetGroup(ForgetGroupRequest {
+            group: group.clone(),
         }))
         .await,
     );
@@ -1130,6 +1192,38 @@ async fn protocol_errors() {
     ));
     assert_eq!(error_kind(&response), "invalid_request");
 
+    // `send_intent`: unknown fields inside each intent variant are refused.
+    let group_hex = "aa".repeat(32);
+    let intents = [
+        json!({"type": "chat", "content": "x", "reply_to": null, "extra": 1}),
+        json!({"type": "reaction", "target": group_hex, "emoji": "+1", "extra": 1}),
+        json!({"type": "unreact", "reactions": [group_hex], "extra": 1}),
+        json!({"type": "edit", "target": group_hex, "content": "x", "extra": 1}),
+        json!({"type": "delete", "target": group_hex, "extra": 1}),
+        json!({"type": "remove", "target": group_hex, "extra": 1}),
+    ];
+    for intent in intents {
+        let response = busy.call_bytes(&raw_call(
+            now(&busy),
+            json!({"type": "send_intent", "group": group_hex, "intent": intent}),
+        ));
+        assert_eq!(
+            error_kind(&response),
+            "invalid_request",
+            "intent with unknown field: {intent}"
+        );
+    }
+    // `set_group_avatar`: unknown fields inside `avatar` are refused.
+    let response = busy.call_bytes(&raw_call(
+        now(&busy),
+        json!({
+            "type": "set_group_avatar",
+            "group": group_hex,
+            "avatar": {"url": "https://example.com/a.png", "extra": 1},
+        }),
+    ));
+    assert_eq!(error_kind(&response), "invalid_request");
+
     // Busy: suspend on a signer op, then any other request answers busy.
     let response = busy.call_once(Request::PublishKeyPackage(PublishKeyPackageRequest {
         relays: vec![RELAY.to_owned()],
@@ -1270,8 +1364,9 @@ async fn run_scenario(
                     .await;
                 match response {
                     Response::Ok { result } => {
-                        if let OpResult::SendOutcome(SendOutcomeResult {
+                        if let OpResult::MessageSent(MessageSentResult {
                             outcome: SendOutcome::Staged { ids },
+                            ..
                         }) = *result
                         {
                             run.staged.push(ids);
@@ -1604,6 +1699,334 @@ async fn vectors_and_fuzz_seeds_never_panic() {
     let mut second = Member::new();
     let config = std::fs::read(dir.join("config.json")).expect("config");
     second.open_bytes(&config);
+}
+
+/// Protocol v3 app surface, end to end over two bridge sessions:
+/// `send_intent` typed receive, admin/avatar/retention ops,
+/// `disband` to `Disbanded`, `forget_group`, and a non-admin attempt
+/// answering `not_group_admin`.
+#[tokio::test(flavor = "current_thread")]
+async fn app_surface() {
+    let mut relay = FakeRelay::new();
+    let mut a = Member::new();
+    let mut b = Member::new();
+    a.open().await;
+    b.open().await;
+    a.publish_identity(&mut relay).await;
+    b.publish_identity(&mut relay).await;
+
+    let response = a
+        .call(Request::CreateGroup(CreateGroupRequest {
+            name: "v3".to_owned(),
+            description: String::new(),
+            relays: vec![RELAY.to_owned()],
+            invitees: vec![Invitee {
+                key_package: key_package_of(&relay, &b.account_hex()),
+                inbox_relays: vec![RELAY.to_owned()],
+            }],
+            admins: Vec::new(),
+            components: Vec::new(),
+        }))
+        .await;
+    let OpResult::GroupCreated(created) = ok_result(response) else {
+        panic!("create_group")
+    };
+    let group = created.group.id.clone();
+    assert!(created.group.disband_enabled, "lifecycle required");
+    assert_eq!(created.group.retention_seconds, 0);
+    a.publish(&mut relay).await;
+    let welcomes = welcomes_for(&relay, &b.account_hex());
+    b.call(Request::Ingest(IngestRequest { events: welcomes }))
+        .await;
+    b.sync(&mut relay, &group).await;
+    a.sync(&mut relay, &group).await;
+
+    // `send_intent` chat: the result's `message.id` is the wire inner id
+    // the receiver sees, no hashing on the host.
+    a.advance(1_000);
+    let response = a
+        .call(Request::SendIntent(SendIntentRequest {
+            group: group.clone(),
+            intent: MessageIntent::Chat {
+                content: "m1".to_owned(),
+                reply_to: None,
+            },
+        }))
+        .await;
+    let OpResult::MessageSent(sent) = ok_result(response) else {
+        panic!("send_intent chat")
+    };
+    assert!(matches!(sent.outcome, SendOutcome::Staged { .. }));
+    assert_eq!(sent.message.kind, 9);
+    let m1 = sent.message.id.clone();
+    a.publish(&mut relay).await;
+
+    let route = a.route_hex(&group).await;
+    let events = b.ingest_and_drain(group_events(&relay, &route)).await;
+    let received = events
+        .iter()
+        .find_map(|event| match event {
+            SessionEvent::MessageReceived { message, .. } => Some(message),
+            _ => None,
+        })
+        .expect("chat received");
+    assert_eq!(received.id, m1, "wire inner id equals message_sent.id");
+    assert_eq!(received.semantics, Semantics::Chat { reply_to: None });
+    assert_eq!(received.expires_at, None, "no retention yet");
+
+    // A reply intent arrives typed with the reply reference.
+    a.advance(1_000);
+    let m1_id = hex_to_32(&m1);
+    let response = a
+        .call(Request::SendIntent(SendIntentRequest {
+            group: group.clone(),
+            intent: MessageIntent::Chat {
+                content: "r1".to_owned(),
+                reply_to: Some(m1_id),
+            },
+        }))
+        .await;
+    let OpResult::MessageSent(reply_sent) = ok_result(response) else {
+        panic!("send_intent reply")
+    };
+    let r1 = reply_sent.message.id.clone();
+    a.publish(&mut relay).await;
+    let events = b.ingest_and_drain(group_events(&relay, &route)).await;
+    let reply = events
+        .iter()
+        .find_map(|event| match event {
+            SessionEvent::MessageReceived { message, .. } if message.id == r1 => {
+                Some(message.semantics.clone())
+            }
+            _ => None,
+        })
+        .expect("reply received");
+    assert_eq!(
+        reply,
+        Semantics::Chat {
+            reply_to: Some(m1_id)
+        }
+    );
+
+    // B's reaction on m1 arrives typed at A.
+    b.advance(1_000);
+    let response = b
+        .call(Request::SendIntent(SendIntentRequest {
+            group: group.clone(),
+            intent: MessageIntent::Reaction {
+                target: m1_id,
+                emoji: "👍".to_owned(),
+            },
+        }))
+        .await;
+    let OpResult::MessageSent(reaction_sent) = ok_result(response) else {
+        panic!("send_intent reaction")
+    };
+    assert_eq!(reaction_sent.message.kind, 7);
+    b.publish(&mut relay).await;
+    let events = a.ingest_and_drain(group_events(&relay, &route)).await;
+    let reaction = events
+        .iter()
+        .find_map(|event| match event {
+            SessionEvent::MessageReceived { message, .. } if message.kind == 7 => {
+                Some(message.semantics.clone())
+            }
+            _ => None,
+        })
+        .expect("reaction received");
+    assert_eq!(
+        reaction,
+        Semantics::Reaction {
+            target: m1_id,
+            emoji: "👍".to_owned()
+        }
+    );
+
+    // A non-admin operation is refused without staging.
+    let response = b
+        .call(Request::SetRetention(SetRetentionRequest {
+            group: group.clone(),
+            seconds: 60,
+        }))
+        .await;
+    assert_eq!(error_kind(&response), "not_group_admin");
+
+    // Admin ops: promote B, set the avatar, set retention — each lands on
+    // B's snapshot after publish + sync.
+    let response = a
+        .call(Request::SetAdmin(SetAdminRequest {
+            group: group.clone(),
+            account: b.signer.account().0,
+            admin: true,
+        }))
+        .await;
+    let OpResult::SendOutcome(SendOutcomeResult {
+        outcome: SendOutcome::Staged { .. },
+    }) = ok_result(response)
+    else {
+        panic!("set_admin")
+    };
+    a.publish(&mut relay).await;
+    b.sync(&mut relay, &group).await;
+    a.sync(&mut relay, &group).await;
+
+    let response = a
+        .call(Request::SetGroupAvatar(SetGroupAvatarRequest {
+            group: group.clone(),
+            avatar: Some(GroupAvatar {
+                url: "https://example.com/a.png".to_owned(),
+                dim: Some("64x64".to_owned()),
+                thumbhash: None,
+            }),
+        }))
+        .await;
+    assert!(
+        matches!(ok_result(response), OpResult::SendOutcome(_)),
+        "set_group_avatar"
+    );
+    a.publish(&mut relay).await;
+
+    let response = a
+        .call(Request::SetRetention(SetRetentionRequest {
+            group: group.clone(),
+            seconds: 60,
+        }))
+        .await;
+    assert!(
+        matches!(ok_result(response), OpResult::SendOutcome(_)),
+        "set_retention"
+    );
+    a.publish(&mut relay).await;
+    b.sync(&mut relay, &group).await;
+
+    let response = b
+        .call(Request::Group(GroupRequest {
+            group: group.clone(),
+        }))
+        .await;
+    let OpResult::Group(GroupResult {
+        group: Some(snapshot),
+    }) = ok_result(response)
+    else {
+        panic!("b snapshot")
+    };
+    assert!(snapshot.own_account_admin, "b is admin after promotion");
+    let avatar = snapshot.avatar.expect("avatar set");
+    assert_eq!(avatar.url, "https://example.com/a.png");
+    assert_eq!(avatar.dim.as_deref(), Some("64x64"));
+    assert_eq!(snapshot.retention_seconds, 60);
+    assert!(snapshot.disband_enabled);
+    assert!(!snapshot.disbanding);
+
+    // A message under the policy arrives with `expires_at`.
+    a.advance(1_000);
+    let response = a
+        .call(Request::SendIntent(SendIntentRequest {
+            group: group.clone(),
+            intent: MessageIntent::Chat {
+                content: "expiring".to_owned(),
+                reply_to: None,
+            },
+        }))
+        .await;
+    let OpResult::MessageSent(expiring) = ok_result(response) else {
+        panic!("send_intent expiring")
+    };
+    a.publish(&mut relay).await;
+    let events = b.ingest_and_drain(group_events(&relay, &route)).await;
+    let message = events
+        .iter()
+        .find_map(|event| match event {
+            SessionEvent::MessageReceived { message, .. } if message.id == expiring.message.id => {
+                Some(message)
+            }
+            _ => None,
+        })
+        .expect("expiring message received");
+    assert_eq!(message.expires_at, Some(message.created_at + 60));
+
+    // `disband` stages the request; after publish + sync rounds every
+    // member's snapshot reads `disbanded`.
+    let response = a
+        .call(Request::Disband(DisbandRequest {
+            group: group.clone(),
+        }))
+        .await;
+    let OpResult::SendOutcome(SendOutcomeResult { outcome }) = ok_result(response) else {
+        panic!("disband")
+    };
+    assert_eq!(outcome, SendOutcome::DisbandRequested);
+    a.publish(&mut relay).await;
+    for _ in 0..8 {
+        a.call(Request::Tick(NoArgs {})).await;
+        a.advance(1_000);
+        a.publish(&mut relay).await;
+        b.sync(&mut relay, &group).await;
+        a.sync(&mut relay, &group).await;
+        let response = b
+            .call(Request::Group(GroupRequest {
+                group: group.clone(),
+            }))
+            .await;
+        let OpResult::Group(GroupResult {
+            group: Some(snapshot),
+        }) = ok_result(response)
+        else {
+            panic!("b snapshot")
+        };
+        if matches!(snapshot.state, GroupState::Disbanded) {
+            break;
+        }
+    }
+    let response = b
+        .call(Request::Group(GroupRequest {
+            group: group.clone(),
+        }))
+        .await;
+    let OpResult::Group(GroupResult {
+        group: Some(snapshot),
+    }) = ok_result(response)
+    else {
+        panic!("b snapshot")
+    };
+    assert!(
+        matches!(snapshot.state, GroupState::Disbanded),
+        "b sees the group disbanded: {:?}",
+        snapshot.state
+    );
+
+    // `forget_group` on a live second group: `done`, then absent from
+    // `groups`.
+    let response = a
+        .call(Request::CreateGroup(CreateGroupRequest {
+            name: "temp".to_owned(),
+            description: String::new(),
+            relays: vec![RELAY.to_owned()],
+            invitees: Vec::new(),
+            admins: Vec::new(),
+            components: Vec::new(),
+        }))
+        .await;
+    let OpResult::GroupCreated(temp) = ok_result(response) else {
+        panic!("create temp")
+    };
+    let response = a
+        .call(Request::ForgetGroup(ForgetGroupRequest {
+            group: temp.group.id.clone(),
+        }))
+        .await;
+    assert!(
+        matches!(ok_result(response), OpResult::Done),
+        "forget_group answers done"
+    );
+    let response = a.call(Request::Groups(NoArgs {})).await;
+    let OpResult::Groups(GroupsResult { groups }) = ok_result(response) else {
+        panic!("groups")
+    };
+    assert!(
+        !groups.iter().any(|snapshot| snapshot.id == temp.group.id),
+        "forgotten group absent"
+    );
 }
 
 /// The received-message contents of a drained event list, as a set.

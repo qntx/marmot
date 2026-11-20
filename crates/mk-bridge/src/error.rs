@@ -160,6 +160,10 @@ pub enum BridgeError {
     InvalidRelayUrl,
     /// The app message touches a reserved event surface.
     ReservedAppEvent,
+    /// The group does not require the `0x800c` lifecycle component.
+    DisbandingNotEnabled,
+    /// A disband request or disband candidate is in progress for the group.
+    GroupDisbanding,
     /// The group carries no encrypted-media component.
     MediaNotEnabled,
     /// The pinned media epoch no longer matches the group's epoch.
@@ -226,6 +230,8 @@ impl fmt::Display for BridgeError {
             Self::UnknownOutbound => f.write_str("unknown outbound"),
             Self::InvalidRelayUrl => f.write_str("invalid relay url"),
             Self::ReservedAppEvent => f.write_str("reserved app event surface"),
+            Self::DisbandingNotEnabled => f.write_str("disbanding not enabled"),
+            Self::GroupDisbanding => f.write_str("group disbanding in progress"),
             Self::MediaNotEnabled => f.write_str("encrypted media not enabled"),
             Self::MediaEpochStale => f.write_str("media epoch stale"),
             Self::MediaEpochUnsettled => f.write_str("media epoch unsettled"),
@@ -279,6 +285,8 @@ pub(crate) fn session_error(error: &SessionError) -> BridgeError {
         SessionError::UnknownOutbound => BridgeError::UnknownOutbound,
         SessionError::InvalidRelayUrl => BridgeError::InvalidRelayUrl,
         SessionError::ReservedAppEvent => BridgeError::ReservedAppEvent,
+        SessionError::DisbandingNotEnabled => BridgeError::DisbandingNotEnabled,
+        SessionError::GroupDisbanding => BridgeError::GroupDisbanding,
         SessionError::MediaNotEnabled => BridgeError::MediaNotEnabled,
         SessionError::MediaEpochStale => BridgeError::MediaEpochStale,
         SessionError::MediaEpochUnsettled => BridgeError::MediaEpochUnsettled,

@@ -12,6 +12,7 @@ import type {
   NostrEvent,
   Outbound,
   PublishResolution,
+  DropReason,
   ReceivedMessage,
   RelayResult,
   SessionEvent,
@@ -42,8 +43,14 @@ export type ClientMessage = {
 /** Session events surfaced to group-change listeners. */
 export type GroupEvent = Exclude<
   SessionEvent,
-  { type: "message_received" } | { type: "publish_resolved" } | { type: "unmapped" }
+  | { type: "message_received" }
+  | { type: "publish_resolved" }
+  | { type: "app_event_dropped" }
+  | { type: "unmapped" }
 >;
+
+/** A dropped application event surfaced to `onDropped` listeners. */
+export type DropEvent = { group: string; reason: DropReason };
 
 /** A resolved outbound item for delivery listeners. */
 export type DeliveryEvent = { outbound: string; resolution: PublishResolution };
@@ -96,6 +103,7 @@ export class Pump {
     groupChange: new Set<(event: GroupEvent) => void>(),
     invite: new Set<(event: InviteEvent) => void>(),
     delivery: new Set<(event: DeliveryEvent) => void>(),
+    dropped: new Set<(event: DropEvent) => void>(),
     error: new Set<(error: MarmotError) => void>(),
   };
 
@@ -165,6 +173,13 @@ export class Pump {
     this.listeners.delivery.add(listener);
     return () => {
       this.listeners.delivery.delete(listener);
+    };
+  }
+
+  onDropped(listener: (event: DropEvent) => void): () => void {
+    this.listeners.dropped.add(listener);
+    return () => {
+      this.listeners.dropped.delete(listener);
     };
   }
 
@@ -292,6 +307,24 @@ export class Pump {
     }
   }
 
+  /**
+   * Queue a tick + publish pass for an op that armed deferred engine work (a pending disband or the
+   * delayed self-remove commit). Serialized after the op's own pass, so the promoted outbound still
+   * publishes in order; the wake is re-armed from the engine's answer.
+   */
+  requestTick(): void {
+    void (async () => {
+      try {
+        const next = await this.run(async () => this.engine.tick());
+        if (!this.closed) {
+          this.scheduleWake(next === undefined ? undefined : Number(next));
+        }
+      } catch (error) {
+        this.emitError(toMarmotError(error));
+      }
+    })();
+  }
+
   private async publishOutbox(): Promise<void> {
     if (this.closed) {
       return;
@@ -366,7 +399,10 @@ export class Pump {
       ),
     );
     this.trackCommitRefusal(item, verdicts, resolution);
-    if (resolution === "pending") {
+    // `pending` re-offers immediately; a `confirmed` commit merge can arm a new
+    // convergence/lifecycle deadline that only a tick can observe — without the
+    // wake the deferred work (e.g. an own disband) never advances.
+    if (resolution === "pending" || (resolution === "confirmed" && item.purpose === "commit")) {
       this.scheduleWake(0);
     }
   }
@@ -618,6 +654,9 @@ export class Pump {
           this.emitInvite({ type: "joined", group: event.group });
           this.emitGroupChange(event);
           break;
+        case "app_event_dropped":
+          this.emitDropped({ group: event.group, reason: event.reason });
+          break;
         case "unmapped":
           break;
         case "group_created":
@@ -743,6 +782,16 @@ export class Pump {
 
   private emitGroupChange(event: GroupEvent): void {
     for (const listener of this.listeners.groupChange) {
+      try {
+        listener(event);
+      } catch {
+        this.emitError(new MarmotError("handler_failed"));
+      }
+    }
+  }
+
+  private emitDropped(event: DropEvent): void {
+    for (const listener of this.listeners.dropped) {
       try {
         listener(event);
       } catch {

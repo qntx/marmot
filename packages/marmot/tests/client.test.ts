@@ -20,6 +20,7 @@ import type {
   NostrEvent,
   Outbound,
   PublishResolution,
+  WireError,
 } from "../src/backend/protocol.ts";
 import { utf8Decode, utf8Encode } from "../src/backend/utf8.ts";
 import { MarmotClient } from "../src/client/client.ts";
@@ -69,6 +70,8 @@ const msg = (id: string) => ({
   createdAt: 1000n,
   streamFinal: undefined,
   attachments: [],
+  semantics: { type: "chat" as const, replyTo: undefined },
+  expiresAt: undefined,
 });
 
 const groupEvent = (id: string, createdAt = 1000n): NostrEvent =>
@@ -87,6 +90,10 @@ function snapshot(): GroupSnapshot {
     ownAccountAdmin: true,
     encryptedMedia: undefined,
     agentTextStream: undefined,
+    avatar: undefined,
+    retentionSeconds: 0n,
+    disbandEnabled: true,
+    disbanding: false,
   };
 }
 
@@ -109,8 +116,12 @@ type Script = {
   groups: GroupSnapshot[];
   /** `tick` answer (ms until wake). */
   nextWake: bigint | undefined;
-  /** `send_outcome` answer for send-type ops. */
+  /** `message_sent`/`send_outcome` answer for send-type ops. */
   sent: BridgeResponse;
+  /** `send_outcome` answer for membership/lifecycle ops. */
+  outcome: BridgeResponse;
+  /** Wire errors to answer for the matching request types. */
+  errors: Partial<Record<BridgeRequest["type"], WireError["kind"]>>;
   /** Emit `host.commit` (seq ascending) when these request types run. */
   commitOn: Array<BridgeRequest["type"]>;
   calls: BridgeRequest[];
@@ -135,96 +146,107 @@ function scriptedBackend(script: Script): { backend: Backend; closed: () => bool
           await Promise.resolve();
           const { request } = decodeCallValue(JSON.parse(utf8Decode(bytes)) as Json);
           script.calls.push(request);
-          const response = ((): BridgeResponse => {
-            switch (request.type) {
-              case "tick":
-                return {
-                  type: "ok",
-                  result: { type: "ticked", nextWakeMs: script.nextWake },
-                };
-              case "ingest": {
-                const reports =
-                  script.reports === "auto"
-                    ? request.events.map((e) => ({
-                        event: e.id,
-                        outcome: { type: "accepted" as const },
-                      }))
-                    : script.reports;
-                const ingested: BridgeResponse = {
-                  type: "ok",
-                  result: { type: "ingested", reports },
-                };
-                return ingested;
-              }
-              case "take_outbound": {
-                const items = script.outbound;
-                script.outbound = [];
-                for (const item of items) {
-                  inflight.set(item.id, item);
-                }
-                return { type: "ok", result: { type: "outbound", items } };
-              }
-              case "report_publish": {
-                const resolution = script.resolutions.shift() ?? "complete";
-                const item = inflight.get(request.id);
-                inflight.delete(request.id);
-                // A pending or confirmed-but-outstanding fanout stays live in the engine,
-                // withheld from `take_outbound` until its own deadline.
-                if (
-                  item !== undefined &&
-                  (resolution === "pending" || resolution === "confirmed")
-                ) {
-                  script.deferred.push(item);
-                }
-                return {
-                  type: "ok",
-                  result: { type: "publish_resolution", resolution },
-                };
-              }
-              case "groups":
-                return { type: "ok", result: { type: "groups", groups: script.groups } };
-              case "group":
-                return {
-                  type: "ok",
-                  result: { type: "group", group: script.groups[0] },
-                };
-              case "publish_key_package":
-                return {
-                  type: "ok",
-                  result: {
-                    type: "key_package",
-                    keyPackage: Uint8Array.of(1),
-                    keyPackageRef: "00".repeat(32),
-                    eventId: "00".repeat(32),
-                    account: ACCOUNT,
-                  },
-                };
-              case "publish_inbox_relays":
-                return {
-                  type: "ok",
-                  result: { type: "inbox_relays", outboundId: "00".repeat(32) },
-                };
-              case "seal_attachment":
-                return {
-                  type: "ok",
-                  result: {
-                    type: "sealed_attachment",
-                    ciphertext: Uint8Array.of(9),
-                    ciphertextSha256: "ab".repeat(32),
-                    handle: script.calls.filter((c) => c.type === "seal_attachment").length,
-                  },
-                };
-              case "send_media":
-                return script.sent;
-              case "send_message":
-              case "create_group":
-                return request.type === "create_group"
-                  ? { type: "ok", result: { type: "group_created", group: snapshot() } }
-                  : script.sent;
-              default:
-                return done();
-            }
-          })();
+          const injected = script.errors[request.type];
+          const response: BridgeResponse =
+            injected === undefined
+              ? ((): BridgeResponse => {
+                  switch (request.type) {
+                    case "tick":
+                      return {
+                        type: "ok",
+                        result: { type: "ticked", nextWakeMs: script.nextWake },
+                      };
+                    case "ingest": {
+                      const reports =
+                        script.reports === "auto"
+                          ? request.events.map((e) => ({
+                              event: e.id,
+                              outcome: { type: "accepted" as const },
+                            }))
+                          : script.reports;
+                      const ingested: BridgeResponse = {
+                        type: "ok",
+                        result: { type: "ingested", reports },
+                      };
+                      return ingested;
+                    }
+                    case "take_outbound": {
+                      const items = script.outbound;
+                      script.outbound = [];
+                      for (const item of items) {
+                        inflight.set(item.id, item);
+                      }
+                      return { type: "ok", result: { type: "outbound", items } };
+                    }
+                    case "report_publish": {
+                      const resolution = script.resolutions.shift() ?? "complete";
+                      const item = inflight.get(request.id);
+                      inflight.delete(request.id);
+                      // A pending or confirmed-but-outstanding fanout stays live in the engine,
+                      // withheld from `take_outbound` until its own deadline.
+                      if (
+                        item !== undefined &&
+                        (resolution === "pending" || resolution === "confirmed")
+                      ) {
+                        script.deferred.push(item);
+                      }
+                      return {
+                        type: "ok",
+                        result: { type: "publish_resolution", resolution },
+                      };
+                    }
+                    case "groups":
+                      return { type: "ok", result: { type: "groups", groups: script.groups } };
+                    case "group":
+                      return {
+                        type: "ok",
+                        result: { type: "group", group: script.groups[0] },
+                      };
+                    case "publish_key_package":
+                      return {
+                        type: "ok",
+                        result: {
+                          type: "key_package",
+                          keyPackage: Uint8Array.of(1),
+                          keyPackageRef: "00".repeat(32),
+                          eventId: "00".repeat(32),
+                          account: ACCOUNT,
+                        },
+                      };
+                    case "publish_inbox_relays":
+                      return {
+                        type: "ok",
+                        result: { type: "inbox_relays", outboundId: "00".repeat(32) },
+                      };
+                    case "seal_attachment":
+                      return {
+                        type: "ok",
+                        result: {
+                          type: "sealed_attachment",
+                          ciphertext: Uint8Array.of(9),
+                          ciphertextSha256: "ab".repeat(32),
+                          handle: script.calls.filter((c) => c.type === "seal_attachment").length,
+                        },
+                      };
+                    case "send_media":
+                    case "send_intent":
+                      return script.sent;
+                    case "set_admin":
+                    case "set_group_avatar":
+                    case "set_retention":
+                    case "disband":
+                    case "enable_disbanding":
+                      return script.outcome;
+                    case "send_message":
+                    case "create_group":
+                      return request.type === "create_group"
+                        ? { type: "ok", result: { type: "group_created", group: snapshot() } }
+                        : script.sent;
+                    default:
+                      return done();
+                  }
+                })()
+              : { type: "error", error: { kind: injected } as WireError };
           if (script.commitOn.includes(request.type)) {
             seq += 1n;
             host.commit(
@@ -282,7 +304,26 @@ function freshScript(): Script {
     deferred: [],
     groups: [],
     nextWake: undefined,
-    sent: { type: "ok", result: { type: "send_outcome", outcome: { type: "queued" } } },
+    errors: {},
+    outcome: {
+      type: "ok",
+      result: { type: "send_outcome", outcome: { type: "queued" } },
+    },
+    sent: {
+      type: "ok",
+      result: {
+        type: "message_sent",
+        outcome: { type: "queued" },
+        message: {
+          id: "aa".repeat(32),
+          pubkey: "bb".repeat(32),
+          createdAt: 1000n,
+          kind: 9,
+          tags: [],
+          content: "hi",
+        },
+      },
+    },
     commitOn: [],
     calls: [],
   };
@@ -424,6 +465,8 @@ describe("MarmotClient", () => {
       createdAt: 1000n,
       streamFinal: undefined,
       attachments: [],
+      semantics: { type: "chat" as const, replyTo: undefined },
+      expiresAt: undefined,
     };
     script.drains.push(
       { type: "events", events: [] }, // open's first drain
@@ -463,6 +506,8 @@ describe("MarmotClient", () => {
       createdAt: 1000n,
       streamFinal: undefined,
       attachments: [],
+      semantics: { type: "chat" as const, replyTo: undefined },
+      expiresAt: undefined,
     };
     script.drains.push(
       { type: "events", events: [] },
@@ -1207,5 +1252,160 @@ describe("MarmotClient", () => {
       expect(message).not.toMatch(/[0-9a-f]{64}/);
       expect(message).not.toMatch(/wss?:\/\//);
     }
+  });
+
+  test("sendMessage returns the sent inner event", async () => {
+    const fixture = await open(freshScript());
+    const sent = await fixture.client.sendMessage(GROUP, { kind: 9, tags: [], content: "x" });
+    expect(sent.outcome).toStrictEqual({ type: "queued" });
+    expect(sent.message.id).toBe("aa".repeat(32));
+    expect(sent.message.kind).toBe(9);
+    await fixture.client.close();
+  });
+
+  test("typed intents issue send_intent requests", async () => {
+    const fixture = await open(freshScript());
+    const reply = "cc".repeat(32);
+    const target = "dd".repeat(32);
+    const reactions = ["ee".repeat(32)];
+    await fixture.client.sendChat(GROUP, "hi", reply);
+    await fixture.client.react(GROUP, target, "👍");
+    await fixture.client.unreact(GROUP, reactions);
+    await fixture.client.editMessage(GROUP, target, "edited");
+    await fixture.client.deleteMessage(GROUP, target);
+    await fixture.client.removeMessage(GROUP, target);
+    const intents = callsOf(fixture.script, "send_intent").map(
+      (r) => (r as { intent: unknown }).intent,
+    );
+    expect(intents).toStrictEqual([
+      { type: "chat", content: "hi", replyTo: reply },
+      { type: "reaction", target, emoji: "👍" },
+      { type: "unreact", reactions },
+      { type: "edit", target, content: "edited" },
+      { type: "delete", target },
+      { type: "remove", target },
+    ]);
+    await fixture.client.close();
+  });
+
+  test("admin, avatar, retention, and lifecycle ops issue the v3 requests", async () => {
+    const fixture = await open(freshScript());
+    const avatar = { url: "https://example.com/a.png", dim: "64x64", thumbhash: undefined };
+    await fixture.client.setAdmin(GROUP, "bb".repeat(32), true);
+    await fixture.client.stepDown(GROUP);
+    await fixture.client.setGroupAvatar(GROUP, avatar);
+    await fixture.client.setGroupAvatar(GROUP, undefined);
+    await fixture.client.setRetention(GROUP, 3600n);
+    await fixture.client.disband(GROUP);
+    await fixture.client.enableDisbanding(GROUP);
+    const admins = callsOf(fixture.script, "set_admin").map((c) => {
+      const call = c as { account: string; admin: boolean };
+      return { account: call.account, admin: call.admin };
+    });
+    expect(admins).toStrictEqual([
+      { account: "bb".repeat(32), admin: true },
+      { account: fixture.client.account, admin: false },
+    ]);
+    const avatars = callsOf(fixture.script, "set_group_avatar").map(
+      (c) => (c as { avatar: unknown }).avatar,
+    );
+    expect(avatars).toStrictEqual([avatar, undefined]);
+    expect(
+      callsOf(fixture.script, "set_retention").map((c) => (c as { seconds: bigint }).seconds),
+    ).toStrictEqual([3600n]);
+    expect(callsOf(fixture.script, "disband")).toHaveLength(1);
+    expect(callsOf(fixture.script, "enable_disbanding")).toHaveLength(1);
+    await fixture.client.close();
+  });
+
+  test("forgetGroup forgets and reconciles subscriptions away", async () => {
+    const script = freshScript();
+    script.groups = [snapshot()];
+    const fixture = await open(script, encodeClientState({ cursors: {}, inbox: [RELAY] }));
+    await settle(fixture.timer, 5000);
+    expect(fixture.network.openSubscriptions()).toBe(2);
+    script.groups = [];
+    // The op's own post-run reconcile drops the group's subscription, so it is
+    // already closed by the time `forgetGroup` resolves — no settle, no other op.
+    await fixture.client.forgetGroup(GROUP);
+    expect(callsOf(fixture.script, "forget_group")).toHaveLength(1);
+    expect(fixture.network.openSubscriptions()).toBe(1);
+    await settle(fixture.timer, 5000);
+    expect(fixture.network.openSubscriptions()).toBe(1);
+    await fixture.client.close();
+  });
+
+  test("app_event_dropped reaches onDropped, not onMessages or onGroupChange", async () => {
+    const script = freshScript();
+    script.drains.push({
+      type: "events",
+      events: [
+        {
+          type: "app_event_dropped",
+          group: GROUP,
+          reason: "unverifiable",
+        },
+      ],
+    });
+    const fixture = await open(script);
+    const drops: Array<{ group: string; reason: string }> = [];
+    const messages: unknown[] = [];
+    const changes: unknown[] = [];
+    fixture.client.onDropped((event) => drops.push(event));
+    fixture.client.onMessages(async (batch) => {
+      messages.push(batch);
+      return Promise.resolve();
+    });
+    fixture.client.onGroupChange((event) => changes.push(event));
+    await settle(fixture.timer, 5000);
+    expect(drops).toStrictEqual([{ group: GROUP, reason: "unverifiable" }]);
+    expect(messages).toHaveLength(0);
+    expect(changes).toHaveLength(0);
+    await fixture.client.close();
+  });
+
+  test("message_received carries semantics and expiresAt through", async () => {
+    const script = freshScript();
+    const target = "dd".repeat(32);
+    const incoming = {
+      ...msg("12".repeat(32)),
+      semantics: { type: "reaction" as const, target, emoji: "🔥" },
+      expiresAt: 3600n,
+    };
+    script.drains.push(
+      { type: "events", events: [] },
+      { type: "events", events: [] },
+      {
+        type: "events",
+        events: [{ type: "message_received", group: GROUP, message: incoming }],
+      },
+    );
+    script.groups = [snapshot()];
+    const fixture = await open(script, encodeClientState({ cursors: {}, inbox: [RELAY] }));
+    await settle(fixture.timer, 5000);
+    const batches: Array<Array<{ semantics: unknown; expiresAt: bigint | undefined }>> = [];
+    fixture.client.onMessages(async (batch) => {
+      batches.push(batch.map((entry) => entry.message));
+      return Promise.resolve();
+    });
+    await fixture.network.port("peer").publish(RELAY, groupEvent("34".repeat(32)));
+    await settle(fixture.timer, 5000);
+    expect(batches[0]?.[0]?.semantics).toStrictEqual({ type: "reaction", target, emoji: "🔥" });
+    expect(batches[0]?.[0]?.expiresAt).toBe(3600n);
+    await fixture.client.close();
+  });
+
+  test("new bridge errors map to the new client kinds", async () => {
+    const script = freshScript();
+    script.errors["disband"] = "disbanding_not_enabled";
+    script.errors["forget_group"] = "group_disbanding";
+    const fixture = await open(script);
+    await expect(fixture.client.disband(GROUP)).rejects.toMatchObject({
+      kind: "disbanding_not_enabled",
+    });
+    await expect(fixture.client.forgetGroup(GROUP)).rejects.toMatchObject({
+      kind: "group_disbanding",
+    });
+    await fixture.client.close();
   });
 });

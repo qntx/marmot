@@ -55,8 +55,8 @@ mod support;
 use std::time::Instant;
 
 use mk_bridge::protocol::{
-    AppMessage, CreateGroupRequest, IngestRequest, Invitee, NoArgs, OpResult, Request,
-    SendMessageRequest, SendOutcome, SendOutcomeResult, SessionEvent, TickedResult,
+    AppMessage, CreateGroupRequest, IngestRequest, Invitee, MessageSentResult, NoArgs, OpResult,
+    Request, SendMessageRequest, SendOutcome, SessionEvent, TickedResult,
 };
 use mk_core::testing::openmls_group_loads;
 use serde_json::{Value, json};
@@ -328,7 +328,7 @@ async fn run_n(n: usize) -> Value {
             .await;
         send_ms.push(ms_since(start));
         loads[0] += openmls_group_loads() - loads_at;
-        let OpResult::SendOutcome(SendOutcomeResult { outcome }) = ok_result(response) else {
+        let OpResult::MessageSent(MessageSentResult { outcome, .. }) = ok_result(response) else {
             panic!("send result");
         };
         let label = match outcome {
@@ -340,6 +340,7 @@ async fn run_n(n: usize) -> Value {
             }
             SendOutcome::NoChange => "no_change",
             SendOutcome::LeaveRequested => "leave_requested",
+            SendOutcome::DisbandRequested => "disband_requested",
             SendOutcome::Unmapped => "unmapped",
         };
         outcomes.push(label);

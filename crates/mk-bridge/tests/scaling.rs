@@ -34,8 +34,8 @@ use thiserror as _;
 use tracing as _;
 
 use mk_bridge::protocol::{
-    AppMessage, CreateGroupRequest, IngestRequest, Invitee, OpResult, Request, Response,
-    SendMessageRequest, SendOutcome, SendOutcomeResult,
+    AppMessage, CreateGroupRequest, IngestRequest, Invitee, MessageSentResult, OpResult, Request,
+    Response, SendMessageRequest, SendOutcome,
 };
 use support::*;
 
@@ -205,7 +205,7 @@ async fn large_group_first_and_200_sends_stage() {
         let Response::Ok { result } = response else {
             panic!("send {i}: {response:?}");
         };
-        let OpResult::SendOutcome(SendOutcomeResult { outcome }) = *result else {
+        let OpResult::MessageSent(MessageSentResult { outcome, .. }) = *result else {
             panic!("send {i}: {result:?}");
         };
         assert!(

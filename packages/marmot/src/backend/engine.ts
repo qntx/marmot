@@ -22,12 +22,14 @@ import type {
   BridgeRequest,
   ClockReading,
   ComponentUpdate,
+  GroupAvatar,
   GroupSnapshot,
   InputReport,
   Invitee,
   KeyPackageResult,
   MediaAttachmentRef,
   MediaReference,
+  MessageIntent,
   NostrEvent,
   OpResult,
   Outbound,
@@ -35,6 +37,7 @@ import type {
   RelayResult,
   SealedAttachmentResult,
   SendOutcome,
+  SentMessage,
   SessionEvent,
   SignerOp,
   SignerReply,
@@ -458,10 +461,57 @@ export class Engine {
   }
 
   /** Send an application message. */
-  async sendMessage(group: string, message: AppMessage): Promise<SendOutcome> {
+  async sendMessage(group: string, message: AppMessage): Promise<SentMessage> {
     return this.op({ type: "send_message", group, message }, (r) =>
+      r.type === "message_sent" ? { outcome: r.outcome, message: r.message } : MISS,
+    );
+  }
+
+  /** Send a typed application message (`MessageIntent`). */
+  async sendIntent(group: string, intent: MessageIntent): Promise<SentMessage> {
+    return this.op({ type: "send_intent", group, intent }, (r) =>
+      r.type === "message_sent" ? { outcome: r.outcome, message: r.message } : MISS,
+    );
+  }
+
+  /** Grant or revoke a member's admin flag. */
+  async setAdmin(group: string, account: string, admin: boolean): Promise<SendOutcome> {
+    return this.op({ type: "set_admin", group, account, admin }, (r) =>
       r.type === "send_outcome" ? r.outcome : MISS,
     );
+  }
+
+  /** Set or clear the group's avatar component; `undefined` clears. */
+  async setGroupAvatar(group: string, avatar: GroupAvatar | undefined): Promise<SendOutcome> {
+    return this.op({ type: "set_group_avatar", group, avatar }, (r) =>
+      r.type === "send_outcome" ? r.outcome : MISS,
+    );
+  }
+
+  /** Set the group's message retention seconds; `0` disables. */
+  async setRetention(group: string, seconds: bigint): Promise<SendOutcome> {
+    return this.op({ type: "set_retention", group, seconds }, (r) =>
+      r.type === "send_outcome" ? r.outcome : MISS,
+    );
+  }
+
+  /** Request the group's terminal disband. */
+  async disband(group: string): Promise<SendOutcome> {
+    return this.op({ type: "disband", group }, (r) =>
+      r.type === "send_outcome" ? r.outcome : MISS,
+    );
+  }
+
+  /** Require the lifecycle component on a group that predates it. */
+  async enableDisbanding(group: string): Promise<SendOutcome> {
+    return this.op({ type: "enable_disbanding", group }, (r) =>
+      r.type === "send_outcome" ? r.outcome : MISS,
+    );
+  }
+
+  /** Forget the group locally; the forgotten-group tombstone stays. */
+  async forgetGroup(group: string): Promise<void> {
+    return this.op({ type: "forget_group", group }, (r) => (r.type === "done" ? undefined : MISS));
   }
 
   /** Encrypt an attachment and pin it to the current media epoch. */
@@ -486,9 +536,9 @@ export class Engine {
     caption: string,
     attachments: MediaAttachmentRef[],
     tags: string[][] = [],
-  ): Promise<SendOutcome> {
+  ): Promise<SentMessage> {
     return this.op({ type: "send_media", group, caption, attachments, tags }, (r) =>
-      r.type === "send_outcome" ? r.outcome : MISS,
+      r.type === "message_sent" ? { outcome: r.outcome, message: r.message } : MISS,
     );
   }
 

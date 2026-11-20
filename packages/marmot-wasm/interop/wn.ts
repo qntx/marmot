@@ -25,14 +25,8 @@ import { join, resolve } from "node:path";
 import { finalizeEvent, generateSecretKey } from "nostr-tools";
 
 import type { Backend } from "@qntx/marmot/backend";
-import { MarmotClient, nostrRelayPort } from "@qntx/marmot/client";
-import type {
-  ClientMessage,
-  GroupEvent,
-  InviteEvent,
-  MarmotError,
-  Timer,
-} from "@qntx/marmot/client";
+import { MarmotClient, nostrRelayPort, MarmotError } from "@qntx/marmot/client";
+import type { ClientMessage, GroupEvent, InviteEvent, Timer } from "@qntx/marmot/client";
 import { memoryCursorStore, memoryKv } from "@qntx/marmot/testing";
 import { Pool } from "@qntx/nostr";
 import { decode, npubEncode } from "@qntx/nostr/nips/nip19";
@@ -44,7 +38,7 @@ import { testSigner } from "../tests/signer.ts";
 const WN_BIN = process.env["WN_BIN"] ?? "/Users/xu/Desktop/qntx/marmot/spike/target/wn/bin/wn";
 const WND_BIN = process.env["WND_BIN"] ?? "/Users/xu/Desktop/qntx/marmot/spike/target/wn/bin/wnd";
 const REPO_ROOT = resolve(import.meta.dirname, "../../..");
-const LOG_PATH = join(REPO_ROOT, "target", "interop-m3b.log");
+const LOG_PATH = join(REPO_ROOT, "target", "interop-m5a.log");
 
 const WND_START_DEADLINE_MS = 60_000;
 const STEP_DEADLINE_MS = 90_000;
@@ -53,6 +47,8 @@ const RELAY_LIST_KIND = 10002;
 const KEY_PACKAGE_KIND = 30443;
 const INBOX_RELAYS_KIND = 10050;
 const CHAT_KIND = 9;
+/** Wn's marmot-push-v1 notification kind — delivered as `other`, not an app surface event. */
+const PUSH_KIND = 447n;
 const WN_MESSAGE_LIMIT = 600;
 
 const startMs = Date.now();
@@ -229,9 +225,19 @@ async function wnMessages(rig: Rig, gid: string): Promise<string[]> {
   return items.map((item) => JSON.stringify(item));
 }
 
+async function sleep(ms: number): Promise<void> {
+  await new Promise<void>((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
+function stamp(): string {
+  return `-${Math.floor(Date.now() / 1000)}-${Math.floor(Math.random() * 1e4)}`;
+}
+
 async function run(): Promise<void> {
   mkdirSync(join(REPO_ROOT, "target"), { recursive: true });
-  log("m3b phase D interop: wn/wnd vs MarmotClient (release wasm)");
+  log("m5a interop: wn/wnd vs MarmotClient (release wasm, app surface)");
 
   // The pinned MDK tag (upstream.json `mdk.tag`, minus the leading `v`) is the wn release we
   // interoperate with — the check fails loudly when the local binary is a different cohort.
@@ -264,7 +270,7 @@ async function run(): Promise<void> {
   // target/ is user-owned and keeps the socket path short (macOS ~104-char limit).
   const home = mkdtempSync(join(REPO_ROOT, "target", "wn-home-"));
   const socket = join(home, "w.sock");
-  const logsDir = join(REPO_ROOT, "target", "wn-logs", `m3b-${process.pid}`);
+  const logsDir = join(REPO_ROOT, "target", "wn-logs", `m5a-${process.pid}`);
   mkdirSync(logsDir, { recursive: true });
 
   const outFd = openSync(join(logsDir, "wnd.out.log"), "w");
@@ -366,6 +372,7 @@ async function run(): Promise<void> {
     const invites: InviteEvent[] = [];
     const groupChanges: GroupEvent[] = [];
     const clientErrors: MarmotError[] = [];
+    const drops: Array<{ group: string; reason: string }> = [];
     client.onMessages((batch) => {
       received.push(...batch);
     });
@@ -374,6 +381,10 @@ async function run(): Promise<void> {
     });
     client.onGroupChange((event) => {
       groupChanges.push(event);
+    });
+    client.onDropped((event) => {
+      drops.push({ group: event.group, reason: event.reason });
+      log(`onDropped group=${event.group} reason=${event.reason}`);
     });
     client.onError((error) => {
       clientErrors.push(error);
@@ -417,7 +428,11 @@ async function run(): Promise<void> {
       } catch (error) {
         failures.push(name);
         const detail = error instanceof Error ? (error.stack ?? error.message) : String(error);
-        log(`FAIL ${name} (${secs(start)}): ${detail}`);
+        const cause =
+          error instanceof Error && error.cause !== undefined
+            ? ` | cause: ${error.cause instanceof Error ? error.cause.message : JSON.stringify(error.cause)}`
+            : "";
+        log(`FAIL ${name} (${secs(start)}): ${detail}${cause}`);
       }
     }
 
@@ -580,6 +595,598 @@ async function run(): Promise<void> {
           ? `no local_copy_terminated event within 10s (${secs(at)})`
           : `local_copy_terminated voluntary=${String(terminated.voluntary)} (${secs(at)})`,
       );
+    });
+
+    const g = { w: "", u: "", w2: "", u2: "", u3: "", w3: "" };
+
+    /** Wn creates a group inviting us; resolves once our client joined, plus the 2 s settle. */
+    async function wnGroup(name: string): Promise<string> {
+      const created = await wn(rig, ["groups", "create", name, ourNpub], rig.wnNpub);
+      const gid = wnGroupId(created);
+      const joined = await waitFor(
+        () =>
+          invites.flatMap((event) =>
+            event.type === "joined" && event.group === gid ? [event.group] : [],
+          )[0],
+        `our onInvite joined ${name}`,
+      );
+      if (joined !== gid) {
+        throw new Error(`group id mismatch: ours ${joined} wn ${gid}`);
+      }
+      await sleep(2000);
+      return gid;
+    }
+
+    /** We create a group inviting wn; resolves once wn accepted, plus the 2 s settle. */
+    async function ourGroup(name: string): Promise<string> {
+      const invitees = await client.lookupInvitees(rig.wnPub, [url]);
+      if (invitees.length === 0) {
+        throw new Error(`lookupInvitees returned no key packages for ${name}`);
+      }
+      const snapshot = await client.createGroup({
+        name,
+        description: "",
+        relays: [url],
+        invitees,
+      });
+      await waitFor(async () => {
+        const gids = await wnInviteGids(rig);
+        return gids.includes(snapshot.id) || undefined;
+      }, `wn groups invites shows ${snapshot.id}`);
+      await wn(rig, ["groups", "accept", snapshot.id], rig.wnNpub);
+      await waitFor(async () => {
+        const roster = await client.group(snapshot.id);
+        if (roster === undefined) {
+          return undefined;
+        }
+        return roster.members.some((member) => member.account === rig.wnPub) || undefined;
+      }, `wn member ${rig.wnNpub} in ${name} roster`);
+      await sleep(2000);
+      return snapshot.id;
+    }
+
+    /** Parsed `wn --json messages timeline list` rows (reply/reaction/edit/delete fields). */
+    async function wnList(gid: string): Promise<Array<Record<string, unknown>>> {
+      const reply = await wn(rig, ["messages", "timeline", "list", gid], rig.wnNpub);
+      return ptrArr(reply, "/result/messages").filter(isRecord);
+    }
+
+    /** `wn --json groups <sub> <gid> <rest>` -> /result object. */
+    async function wnGroupResult(
+      gid: string,
+      sub: string,
+      extra: string[] = [],
+    ): Promise<Record<string, unknown>> {
+      const reply = await wn(rig, ["groups", sub, gid, ...extra], rig.wnNpub);
+      const result = ptr(reply, "/result");
+      if (!isRecord(result)) {
+        throw new Error(`wn groups ${sub} carried no result: ${JSON.stringify(reply)}`);
+      }
+      return result;
+    }
+
+    async function wnRetentionSecs(gid: string): Promise<number> {
+      const result = await wnGroupResult(gid, "retention");
+      const secs = result["disappearing_message_secs"];
+      if (typeof secs !== "number") {
+        throw new TypeError(
+          `retention lacked disappearing_message_secs: ${JSON.stringify(result)}`,
+        );
+      }
+      return secs;
+    }
+
+    /** Whether `wn groups <sub>` lists `who` (npub or hex pubkey inside one entry). */
+    async function wnHas(gid: string, sub: string, npub: string, hex: string): Promise<boolean> {
+      const reply = await wn(rig, ["groups", sub, gid], rig.wnNpub);
+      return ptrArr(reply, `/result/${sub}`).some((item) => {
+        const text = JSON.stringify(item);
+        return text.includes(npub) || text.includes(hex);
+      });
+    }
+
+    const findMsg = (gid: string, content: string): ClientMessage | undefined =>
+      received.find((entry) => entry.group === gid && entry.message.content === content);
+    const findRow = (
+      gid: string,
+      type: string,
+      account?: string,
+    ): Extract<GroupEvent, { type: "group_state_changed" }> | undefined => {
+      for (const event of groupChanges) {
+        if (event.group !== gid || event.type !== "group_state_changed") {
+          continue;
+        }
+        const change = event.change as { type: string; account?: string };
+        if (change.type === type && (account === undefined || change.account === account)) {
+          return event;
+        }
+      }
+      return undefined;
+    };
+
+    /** `action` must yield exactly one `unverifiable` drop for `gid` and no new message. */
+    async function expectUnverifiableDrop(
+      gid: string,
+      action: () => Promise<unknown>,
+    ): Promise<void> {
+      const dropsBefore = drops.filter((d) => d.group === gid).length;
+      const msgsBefore = received.filter(
+        (e) => e.group === gid && e.message.kind !== PUSH_KIND,
+      ).length;
+      await action();
+      await waitFor(
+        () => drops.some((d) => d.group === gid && d.reason === "unverifiable") || undefined,
+        `unverifiable drop in ${gid.slice(0, 8)}`,
+      );
+      await sleep(2000);
+      const newDrops = drops.filter((d) => d.group === gid).length - dropsBefore;
+      if (newDrops !== 1) {
+        throw new Error(`expected exactly 1 new drop for the group, saw ${newDrops}`);
+      }
+      const newMsgs =
+        received.filter((e) => e.group === gid && e.message.kind !== PUSH_KIND).length - msgsBefore;
+      if (newMsgs !== 0) {
+        throw new Error(`dropped event still produced ${newMsgs} onMessages entr(ies)`);
+      }
+    }
+
+    /**
+     * Commit-producing ops refuse with `group_busy` while a previous commit's publish resolution is
+     * still in flight — retry the staging call until the group settles.
+     */
+    async function whenTransitionClears<T>(op: () => Promise<T>): Promise<T> {
+      const deadline = Date.now() + STEP_DEADLINE_MS;
+      for (;;) {
+        try {
+          // oxlint-disable-next-line no-await-in-loop -- retries are inherently sequential
+          return await op();
+        } catch (error) {
+          if (
+            !(error instanceof MarmotError && error.kind === "group_busy") ||
+            Date.now() > deadline
+          ) {
+            throw error;
+          }
+          // oxlint-disable-next-line no-await-in-loop -- backoff between retries
+          await sleep(STEP_POLL_MS);
+        }
+      }
+    }
+
+    const needGroups = async (): Promise<void> => {
+      if (g.w === "") {
+        g.w = await wnGroup("m5a-w");
+        log(`Gw (wn-admin) ${g.w}`);
+      }
+      if (g.u === "") {
+        g.u = await ourGroup("m5a-u");
+        log(`Gu (our-admin) ${g.u}`);
+      }
+    };
+
+    // S4 — replies both directions.
+    await scenario("S4 reply both directions", async () => {
+      await needGroups();
+      const wnText = `s4-wn${stamp()}`;
+      await wn(rig, ["messages", "send", g.w, wnText], rig.wnNpub);
+      const wnMsg = await waitFor(() => findMsg(g.w, wnText), `we receive ${wnText}`);
+
+      const ourText = `s4-us${stamp()}`;
+      const sent = await client.sendChat(g.w, ourText, wnMsg.message.id);
+      const row = await waitFor(async () => {
+        const rows = await wnList(g.w);
+        return rows.find((entry) => entry["plaintext"] === ourText);
+      }, "wn list shows our reply");
+      if (row["reply_to_message_id"] !== wnMsg.message.id) {
+        throw new Error(
+          `reply_to_message_id ${JSON.stringify(row["reply_to_message_id"])} != ${wnMsg.message.id}; tags=${JSON.stringify(row["tags"])}`,
+        );
+      }
+
+      const wnReplyText = `s4-wn-r${stamp()}`;
+      await wn(
+        rig,
+        ["messages", "send", "--group", g.w, "--reply-to", sent.message.id, wnReplyText],
+        rig.wnNpub,
+      );
+      const replyMsg = await waitFor(() => findMsg(g.w, wnReplyText), `we receive ${wnReplyText}`);
+      const sem = replyMsg.message.semantics;
+      if (sem.type !== "chat" || sem.replyTo !== sent.message.id) {
+        throw new Error(`reply semantics ${JSON.stringify(sem)} != replyTo ${sent.message.id}`);
+      }
+    });
+
+    // S5 — reactions both directions.
+    await scenario("S5 reaction both directions", async () => {
+      await needGroups();
+      const wnText = `s5-wn${stamp()}`;
+      await wn(rig, ["messages", "send", g.w, wnText], rig.wnNpub);
+      const wnMsg = await waitFor(() => findMsg(g.w, wnText), `we receive ${wnText}`);
+
+      await client.react(g.w, wnMsg.message.id, "👍");
+      await waitFor(async () => {
+        const rows = await wnList(g.w);
+        const row = rows.find((entry) => entry["message_id"] === wnMsg.message.id);
+        return JSON.stringify(row?.["reactions"] ?? {}).includes(signer.pubkey) || undefined;
+      }, "wn lists our reaction on the target");
+
+      const ourText = `s5-us${stamp()}`;
+      const ourMsg = await client.sendChat(g.w, ourText);
+      await wn(rig, ["messages", "react", g.w, ourMsg.message.id, "🔥"], rig.wnNpub);
+      const wnReaction = await waitFor(
+        () =>
+          received.find(
+            (entry) =>
+              entry.group === g.w &&
+              entry.message.semantics.type === "reaction" &&
+              (entry.message.semantics as { target?: string }).target === ourMsg.message.id,
+          ),
+        "we receive wn reaction on our message",
+      );
+      const sem = wnReaction.message.semantics;
+      if (sem.type !== "reaction" || sem.emoji !== "🔥") {
+        throw new Error(`reaction semantics ${JSON.stringify(sem)} != fire`);
+      }
+    });
+
+    // S6 — unreact: ours applies on wn's side; wn's is stopped at our decoder.
+    await scenario("S6 unreact ours applies, wn's dropped", async () => {
+      await needGroups();
+      const wnText = `s6-wn${stamp()}`;
+      await wn(rig, ["messages", "send", g.w, wnText], rig.wnNpub);
+      const wnMsg = await waitFor(() => findMsg(g.w, wnText), `we receive ${wnText}`);
+      const reaction = await client.react(g.w, wnMsg.message.id, "🎉");
+      await waitFor(async () => {
+        const rows = await wnList(g.w);
+        const row = rows.find((entry) => entry["message_id"] === wnMsg.message.id);
+        return JSON.stringify(row?.["reactions"] ?? {}).includes(signer.pubkey) || undefined;
+      }, "wn lists our reaction");
+
+      await client.unreact(g.w, [reaction.message.id]);
+      await waitFor(async () => {
+        const rows = await wnList(g.w);
+        const row = rows.find((entry) => entry["message_id"] === wnMsg.message.id);
+        return !JSON.stringify(row?.["reactions"] ?? {}).includes(signer.pubkey) || undefined;
+      }, "wn no longer lists our reaction");
+
+      // wn can only retract a live reaction of its own: give it one first.
+      await wn(rig, ["messages", "react", g.w, wnMsg.message.id, "🔥"], rig.wnNpub);
+      await waitFor(
+        () =>
+          received.find(
+            (entry) =>
+              entry.group === g.w &&
+              entry.message.semantics.type === "reaction" &&
+              (entry.message.semantics as { target?: string }).target === wnMsg.message.id,
+          ),
+        "we receive wn's reaction to retract",
+      );
+      await expectUnverifiableDrop(g.w, async () => {
+        await wn(rig, ["messages", "unreact", g.w, wnMsg.message.id], rig.wnNpub);
+      });
+    });
+
+    // S7 — edit: ours applies on wn's side; wn's edit is dropped unverifiable.
+    await scenario("S7 edit ours applies, wn's dropped", async () => {
+      await needGroups();
+      const ourText = `s7-us${stamp()}`;
+      const ourMsg = await client.sendChat(g.w, ourText);
+      const edited = `s7-edited${stamp()}`;
+      await client.editMessage(g.w, ourMsg.message.id, edited);
+      await waitFor(async () => {
+        const rows = await wnList(g.w);
+        const row = rows.find((entry) => entry["message_id"] === ourMsg.message.id);
+        const edit = row === undefined ? undefined : row["edit"];
+        return (
+          (row?.["plaintext"] === edited &&
+            isRecord(edit) &&
+            typeof edit["edit_count"] === "number" &&
+            edit["edit_count"] >= 1) ||
+          undefined
+        );
+      }, "wn list shows edited content + edit_count");
+
+      const wnText = `s7-wn${stamp()}`;
+      await wn(rig, ["messages", "send", g.w, wnText], rig.wnNpub);
+      const wnMsg = await waitFor(() => findMsg(g.w, wnText), `we receive ${wnText}`);
+      await expectUnverifiableDrop(g.w, async () => {
+        await wn(
+          rig,
+          ["messages", "edit", g.w, wnMsg.message.id, `s7-wn-ed${stamp()}`],
+          rig.wnNpub,
+        );
+      });
+    });
+
+    // S8 — deletes/removals in every authority class.
+    await scenario("S8 deletes and removals", async () => {
+      await needGroups();
+      // Non-admin author delete (kind 5) of our own message in wn's group.
+      const ownText = `s8-own${stamp()}`;
+      const ownMsg = await client.sendChat(g.w, ownText);
+      await client.deleteMessage(g.w, ownMsg.message.id);
+      await waitFor(async () => {
+        const rows = await wnList(g.w);
+        const row = rows.find((entry) => entry["message_id"] === ownMsg.message.id);
+        return (row?.["deleted"] === true && row["deletion_source"] === "author") || undefined;
+      }, "wn shows our non-admin delete (author)");
+
+      // Admin removals in our group: own message + a wn message.
+      const ourText2 = `s8-adm${stamp()}`;
+      const ourMsg2 = await client.sendChat(g.u, ourText2);
+      const wnText2 = `s8-wn${stamp()}`;
+      await wn(rig, ["messages", "send", g.u, wnText2], rig.wnNpub);
+      const wnMsg2 = await waitFor(() => findMsg(g.u, wnText2), `we receive ${wnText2}`);
+      await client.deleteMessage(g.u, ourMsg2.message.id);
+      await client.removeMessage(g.u, wnMsg2.message.id);
+      await waitFor(async () => {
+        const rows = await wnList(g.u);
+        const own = rows.find((entry) => entry["message_id"] === ourMsg2.message.id);
+        const wnrow = rows.find((entry) => entry["message_id"] === wnMsg2.message.id);
+        return (
+          (own?.["deleted"] === true &&
+            own["deletion_source"] === "admin" &&
+            wnrow?.["deleted"] === true &&
+            wnrow["deletion_source"] === "admin") ||
+          undefined
+        );
+      }, "wn shows admin removals (admin)");
+
+      // wn admin delete of our message in wn's group -> typed removal on our side.
+      const targetText = `s8-rm${stamp()}`;
+      const target = await client.sendChat(g.w, targetText);
+      await wn(rig, ["messages", "delete", g.w, target.message.id], rig.wnNpub);
+      const removal = await waitFor(
+        () =>
+          received.find(
+            (entry) =>
+              entry.group === g.w &&
+              entry.message.semantics.type === "removal" &&
+              (entry.message.semantics as { target?: string }).target === target.message.id,
+          ),
+        "we receive wn admin removal",
+      );
+      const sem = removal.message.semantics;
+      if (sem.type !== "removal" || sem.target !== target.message.id) {
+        throw new Error(`removal semantics ${JSON.stringify(sem)} != target ${target.message.id}`);
+      }
+
+      // wn non-admin kind-5 delete of its own message in our group -> dropped.
+      const wnOwn = `s8-wnown${stamp()}`;
+      await wn(rig, ["messages", "send", g.u, wnOwn], rig.wnNpub);
+      const wnOwnMsg = await waitFor(() => findMsg(g.u, wnOwn), `we receive ${wnOwn}`);
+      await expectUnverifiableDrop(g.u, async () => {
+        const reply = await wnTry(
+          rig,
+          ["messages", "delete", g.u, wnOwnMsg.message.id],
+          rig.wnNpub,
+        );
+        if (!reply.ok) {
+          throw new Error(`wn refused its own non-admin delete locally: ${reply.raw}`);
+        }
+      });
+    });
+
+    // S9 — metadata both directions.
+    await scenario("S9 metadata both directions", async () => {
+      await needGroups();
+      const name = `m5a-u-renamed${stamp()}`;
+      await whenTransitionClears(async () =>
+        client.updateGroupProfile(g.u, { name, description: "desc m5a" }),
+      );
+      // The engine refuses a second app-data update while one is pending — wait for our
+      // own snapshot to reflect the rename before staging the avatar.
+      await waitFor(async () => {
+        const snap = await client.group(g.u);
+        return snap?.name === name || undefined;
+      }, "our snapshot shows the rename");
+      await whenTransitionClears(async () =>
+        client.setGroupAvatar(g.u, {
+          url: "https://example.com/m5a.png",
+          dim: "64x64",
+          thumbhash: undefined,
+        }),
+      );
+      await waitFor(async () => {
+        const show = await wnGroupResult(g.u, "show");
+        const text = JSON.stringify(show);
+        return (text.includes(name) && text.includes("https://example.com/m5a.png")) || undefined;
+      }, "wn groups show reflects our name+avatar");
+      const snap1 = await client.group(g.u);
+      if (snap1?.avatar?.url !== "https://example.com/m5a.png") {
+        throw new Error(`our avatar snapshot ${JSON.stringify(snap1?.avatar)}`);
+      }
+
+      await wn(
+        rig,
+        ["groups", "update", "--name", `m5a-w-renamed${stamp()}`, "--description", "wn desc", g.w],
+        rig.wnNpub,
+      );
+      await wn(
+        rig,
+        ["groups", "set-avatar-url", g.w, "--url", "https://example.com/wn.png", "--dim", "32x32"],
+        rig.wnNpub,
+      );
+      await waitFor(
+        () => findRow(g.w, "avatar_changed") ?? undefined,
+        "avatar_changed row for wn's update",
+      );
+      await waitFor(() => findRow(g.w, "renamed") ?? undefined, "renamed row for wn's update");
+      const renamed = findRow(g.w, "renamed");
+      const avatarRow = findRow(g.w, "avatar_changed");
+      if (renamed?.actor !== rig.wnPub || avatarRow?.actor !== rig.wnPub) {
+        throw new Error(
+          `row actors renamed=${String(renamed?.actor)} avatar=${String(avatarRow?.actor)} != wn`,
+        );
+      }
+      const snap2 = await client.group(g.w);
+      if (snap2?.avatar?.url !== "https://example.com/wn.png") {
+        throw new Error(`snapshot avatar ${JSON.stringify(snap2?.avatar)}`);
+      }
+    });
+
+    // S10 — admin changes both directions + local non-admin refusal.
+    await scenario("S10 admin changes + local refusal", async () => {
+      await needGroups();
+      await whenTransitionClears(async () => client.setAdmin(g.u, rig.wnPub, true));
+      await waitFor(
+        async () => (await wnHas(g.u, "admins", rig.wnNpub, rig.wnPub)) || undefined,
+        "wn groups admins lists wn after promote",
+      );
+      await waitFor(async () => {
+        const snap = await client.group(g.u);
+        return (
+          snap?.members.some((member) => member.account === rig.wnPub && member.admin) === true ||
+          undefined
+        );
+      }, "our snapshot shows wn admin");
+      await whenTransitionClears(async () => client.setAdmin(g.u, rig.wnPub, false));
+      await waitFor(
+        async () => !(await wnHas(g.u, "admins", rig.wnNpub, rig.wnPub)) || undefined,
+        "wn groups admins drops wn after demote",
+      );
+
+      // Our non-admin removal attempt fails locally and publishes nothing.
+      const own = await client.sendChat(g.w, `s10-own${stamp()}`);
+      await sleep(1000);
+      const relayBefore = served.relay.events().length;
+      let refusal = "";
+      try {
+        await client.removeMessage(g.w, own.message.id);
+      } catch (error) {
+        refusal =
+          error !== null && typeof error === "object" && "kind" in error
+            ? String(error.kind)
+            : String(error);
+      }
+      if (refusal !== "not_group_admin") {
+        throw new Error(`non-admin removeMessage -> ${refusal || "no error"}`);
+      }
+      await sleep(1000);
+      if (served.relay.events().length !== relayBefore) {
+        throw new Error("refused non-admin op still published relay events");
+      }
+
+      await wn(rig, ["groups", "promote", g.w, ourNpub], rig.wnNpub);
+      const added = await waitFor(
+        () => findRow(g.w, "admin_added", signer.pubkey) ?? undefined,
+        "admin_added row for our account",
+      );
+      if (added.actor !== rig.wnPub) {
+        throw new Error(`admin_added actor ${String(added.actor)} != wn`);
+      }
+      await waitFor(async () => {
+        const snap = await client.group(g.w);
+        return snap?.ownAccountAdmin === true || undefined;
+      }, "snapshot ownAccountAdmin true");
+      await wn(rig, ["groups", "demote", g.w, ourNpub], rig.wnNpub);
+      const removed = await waitFor(
+        () => findRow(g.w, "admin_removed", signer.pubkey) ?? undefined,
+        "admin_removed row for our account",
+      );
+      if (removed.actor !== rig.wnPub) {
+        throw new Error(`admin_removed actor ${String(removed.actor)} != wn`);
+      }
+      await waitFor(async () => {
+        const snap = await client.group(g.w);
+        return snap?.ownAccountAdmin === false || undefined;
+      }, "snapshot ownAccountAdmin false");
+    });
+
+    // S11 — retention both directions.
+    await scenario("S11 retention both directions", async () => {
+      await needGroups();
+      await whenTransitionClears(async () => client.setRetention(g.u, 3600n));
+      await waitFor(
+        async () => (await wnRetentionSecs(g.u)) === 3600 || undefined,
+        "wn groups retention shows 3600",
+      );
+
+      await wn(rig, ["groups", "retention", g.w, "--set", "1800"], rig.wnNpub);
+      const row = await waitFor(
+        () => findRow(g.w, "retention_changed") ?? undefined,
+        "retention_changed row",
+      );
+      if (row.actor !== rig.wnPub || row.change.type !== "retention_changed") {
+        throw new Error(`retention_changed row malformed: ${JSON.stringify(row)}`);
+      }
+      const wnText = `s11-wn${stamp()}`;
+      await wn(rig, ["messages", "send", g.w, wnText], rig.wnNpub);
+      const wnMsg = await waitFor(() => findMsg(g.w, wnText), `we receive ${wnText}`);
+      const expected = wnMsg.message.createdAt + 1800n;
+      if (wnMsg.message.expiresAt !== expected) {
+        throw new Error(
+          `expiresAt ${String(wnMsg.message.expiresAt)} != createdAt+1800 ${String(expected)}`,
+        );
+      }
+      // Restore Gw to no retention so later scenarios are unaffected.
+      await wn(rig, ["groups", "retention", g.w, "--set", "0"], rig.wnNpub);
+      await waitFor(
+        () =>
+          groupChanges.some(
+            (event) =>
+              event.group === g.w &&
+              event.type === "group_state_changed" &&
+              event.change.type === "retention_changed" &&
+              event.change.newSeconds === 0n,
+          ) || undefined,
+        "retention restored to 0",
+      );
+    });
+
+    // S12 — leaves both directions.
+    await scenario("S12 leave both directions", async () => {
+      g.w2 = await wnGroup("m5a-w2");
+      g.u2 = await ourGroup("m5a-u2");
+
+      await client.leave(g.w2);
+      await waitFor(
+        async () => !(await wnHas(g.w2, "members", ourNpub, signer.pubkey)) || undefined,
+        "wn groups members drops us",
+      );
+      await waitFor(async () => {
+        const snap = await client.group(g.w2);
+        return snap === undefined || snap.state === "removed" || undefined;
+      }, "our snapshot removed after leave");
+
+      await wn(rig, ["groups", "leave", g.u2], rig.wnNpub);
+      const row = await waitFor(
+        () => findRow(g.u2, "member_left", rig.wnPub) ?? undefined,
+        "member_left row for wn",
+      );
+      if (!("account" in row.change) || row.change.account !== rig.wnPub) {
+        throw new Error(`member_left subject ${JSON.stringify(row.change)} != wn`);
+      }
+    });
+
+    // S13 — disband both directions.
+    await scenario("S13 disband both directions", async () => {
+      g.u3 = await ourGroup("m5a-u3");
+      g.w3 = await wnGroup("m5a-w3");
+
+      const outcome = await client.disband(g.u3);
+      if (outcome.type !== "disband_requested") {
+        throw new Error(`disband outcome ${outcome.type} != disband_requested`);
+      }
+      await waitFor(async () => {
+        const status = await wnGroupResult(g.u3, "disband-status");
+        return (
+          status["disbanded"] === true || status["lifecycle_state"] === "terminal" || undefined
+        );
+      }, "wn disband-status reaches terminal");
+
+      await wn(rig, ["groups", "disband", "--confirm", g.w3], rig.wnNpub);
+      const row = await waitFor(
+        () => findRow(g.w3, "disbanded") ?? undefined,
+        "disbanded row for wn's disband",
+      );
+      if (row.actor !== rig.wnPub) {
+        throw new Error(`disbanded actor ${String(row.actor)} != wn`);
+      }
+      await waitFor(async () => {
+        const snap = await client.group(g.w3);
+        return snap?.state === "disbanded" || undefined;
+      }, "our snapshot disbanded");
     });
 
     log(

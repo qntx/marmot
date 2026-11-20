@@ -22,7 +22,14 @@
         "replay_ttl_secs": 60,
         "required_roles": 1
       },
+      "avatar": {
+        "dim": "64x64",
+        "thumbhash": null,
+        "url": "https://example.com/a.png"
+      },
       "description": "desc",
+      "disband_enabled": true,
+      "disbanding": false,
       "encrypted_media": {
         "allowed_locator_kinds": [
           "https"
@@ -48,6 +55,7 @@
       "relays": [
         "wss://relay.example"
       ],
+      "retention_seconds": "60",
       "state": "stable"
     },
     "type": "group_created"
@@ -61,7 +69,14 @@
           "replay_ttl_secs": 60,
           "required_roles": 1
         },
+        "avatar": {
+          "dim": "64x64",
+          "thumbhash": null,
+          "url": "https://example.com/a.png"
+        },
         "description": "desc",
+        "disband_enabled": true,
+        "disbanding": false,
         "encrypted_media": {
           "allowed_locator_kinds": [
             "https"
@@ -87,6 +102,7 @@
         "relays": [
           "wss://relay.example"
         ],
+        "retention_seconds": "60",
         "state": "stable"
       }
     ],
@@ -113,6 +129,23 @@
     "key_package": "01",
     "key_package_ref": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     "type": "key_package"
+  },
+  "message_sent": {
+    "message": {
+      "content": "hi",
+      "created_at": "1700000000",
+      "id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "kind": 9,
+      "pubkey": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "tags": []
+    },
+    "outcome": {
+      "ids": [
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      ],
+      "type": "staged"
+    },
+    "type": "message_sent"
   },
   "outbound": {
     "items": [

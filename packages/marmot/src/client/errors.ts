@@ -22,6 +22,8 @@ export type MarmotErrorKind =
   | "unknown_group"
   | "not_a_member"
   | "not_group_admin"
+  | "disbanding_not_enabled"
+  | "group_disbanding"
   | "invalid_input"
   | "media_epoch_stale"
   | "upload_failed"
@@ -54,6 +56,8 @@ const BRIDGE_KIND_MAP: Partial<Record<WireError["kind"], MarmotErrorKind>> = {
   unknown_group: "unknown_group",
   not_a_member: "not_a_member",
   not_group_admin: "not_group_admin",
+  disbanding_not_enabled: "disbanding_not_enabled",
+  group_disbanding: "group_disbanding",
   invalid_input: "invalid_input",
   media_epoch_stale: "media_epoch_stale",
   closed: "closed",
