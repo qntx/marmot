@@ -1,5 +1,5 @@
 /**
- * TypeScript mirror of the mk-bridge JSON wire protocol (`PROTOCOL_VERSION` 3). Decoded
+ * TypeScript mirror of the mk-bridge JSON wire protocol (`PROTOCOL_VERSION` 4). Decoded
  * representation: `u64` fields arrive as decimal strings and decode to `bigint`; identifiers (event
  * ids, pubkeys, group ids, nostr group ids, signatures, outbound ids, hashes, nonces) decode to
  * validated lowercase hex `string`s; payload blobs (`key_package`, component `data`, attachment
@@ -17,7 +17,7 @@ import type { InputCategory } from "../core/errors.ts";
 export type Complete<T extends never> = T;
 
 /** Wire protocol version. Bumped on any breaking schema change. */
-export const PROTOCOL_VERSION = 3;
+export const PROTOCOL_VERSION = 4;
 
 /** One reading of the injected clock (decimal strings on the wire). */
 export type ClockReading = {
@@ -216,10 +216,22 @@ export type Semantics =
   | { type: "chat"; replyTo: string | undefined }
   | { type: "reaction"; target: string; emoji: string }
   | { type: "removal"; target: string }
+  | { type: "edit"; target: string; content: string }
+  | { type: "deletion"; targets: string[] }
+  | { type: "unreact"; reactions: string[] }
   | { type: "other" }
   | { type: "unmapped" };
 
-export const SEMANTICS_TYPES = ["chat", "reaction", "removal", "other", "unmapped"] as const;
+export const SEMANTICS_TYPES = [
+  "chat",
+  "reaction",
+  "removal",
+  "edit",
+  "deletion",
+  "unreact",
+  "other",
+  "unmapped",
+] as const;
 
 export type _SemanticsComplete = Complete<
   Exclude<Semantics["type"], (typeof SEMANTICS_TYPES)[number]>
@@ -500,6 +512,8 @@ export type AgentStreamAnchor = {
   streamId: string;
   /** The prompt message this stream answers, when tagged, hex. */
   parent: string | undefined;
+  /** Source-epoch retention expiry. */
+  expiresAt: bigint | undefined;
 };
 
 /** The state delta a `group_state_changed` event carries. */
@@ -537,6 +551,7 @@ export type SessionEvent =
   | { type: "message_received"; group: string; message: ReceivedMessage }
   | { type: "agent_stream_started"; group: string; start: AgentStreamAnchor }
   | { type: "message_invalidated"; group: string; message: string; epoch: bigint }
+  | { type: "message_expired"; group: string; message: string; transportId: string }
   | { type: "group_created"; group: string }
   | { type: "group_joined"; group: string }
   | { type: "epoch_changed"; group: string; from: bigint; to: bigint }
@@ -573,6 +588,7 @@ export const SESSION_EVENT_TYPES = [
   "message_received",
   "agent_stream_started",
   "message_invalidated",
+  "message_expired",
   "group_created",
   "group_joined",
   "epoch_changed",
@@ -873,6 +889,7 @@ export type PlainErrorKind =
   | "not_open"
   | "poisoned"
   | "reserved_app_event"
+  | "send_rate_exceeded"
   | "storage"
   | "unknown_attachment"
   | "unknown_group"
@@ -933,6 +950,7 @@ export const ERROR_KINDS = [
   "proof_rejected",
   "protocol_version_mismatch",
   "reserved_app_event",
+  "send_rate_exceeded",
   "signer",
   "storage",
   "too_large",

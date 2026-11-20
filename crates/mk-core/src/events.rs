@@ -54,7 +54,7 @@ use zeroize::Zeroizing;
 use crate::agent_stream::{self, StreamFinal};
 use crate::media::{self, AttachmentRejection, MediaReference};
 use crate::outbox::PublishResolution;
-use crate::semantics::{self, DropReason, Semantics};
+use crate::semantics::{self, DropReason, Modifier, Semantics};
 use crate::types::{AccountId, EventId, GroupId, OutboundId};
 
 /// Spec `foundation/errors.md` input categories. `as_str` returns the exact
@@ -470,6 +470,9 @@ pub struct AgentStreamAnchor {
     pub stream_id: [u8; 32],
     /// The prompt message this stream answers, when tagged.
     pub parent: Option<EventId>,
+    /// Source-epoch retention expiry (`engine.retention.expires_at`):
+    /// `None` means no expiry or no recoverable policy.
+    pub expires_at: Option<u64>,
 }
 
 /// The state delta a `GroupStateChanged` event carries.
@@ -677,6 +680,18 @@ pub enum SessionEvent {
         /// Why it was dropped.
         reason: DropReason,
     },
+    /// A delivered message's retention expiry fired inside `tick`: the
+    /// session deleted its index row and media secret; the host should
+    /// retire its copy (the message may still be re-ingested, where
+    /// `expired` drops it).
+    MessageExpired {
+        /// The group.
+        group: GroupId,
+        /// Inner event id of the expired message.
+        message: EventId,
+        /// Transport event id of the expired message.
+        transport_id: EventId,
+    },
 }
 
 /// The mapped session event plus the media-secret row effects
@@ -695,6 +710,11 @@ pub(crate) struct MappedEvent {
     /// the drain's storage unit (the event dropped unverified, malformed,
     /// unauthorized, or expired — never a media secret written).
     pub drop_pending: Option<MessageId>,
+    /// The kind 1009/5 modifier this `MessageReceived` carries, for the
+    /// session to resolve against the delivered index. The mapped
+    /// semantics is a placeholder; resolution delivers the authorized
+    /// `Semantics` or drops the pending row.
+    pub modifier: Option<Modifier>,
 }
 
 impl MappedEvent {
@@ -705,6 +725,7 @@ impl MappedEvent {
             secret_write: None,
             secret_delete: None,
             drop_pending: None,
+            modifier: None,
         }
     }
 }
@@ -764,6 +785,7 @@ pub(crate) fn session_event(event: GroupEvent, now_secs: u64) -> Option<MappedEv
             secret_write: None,
             secret_delete: Some((group_id, message_id)),
             drop_pending: None,
+            modifier: None,
         }),
         GroupEvent::GroupCreated { group_id } => {
             Some(MappedEvent::plain(SessionEvent::GroupCreated {
@@ -842,7 +864,7 @@ fn message_received(
     let transport_id = event_id_of(&message_id)?;
     let sender_account = account_of(sender)?;
     let expires_at = retention.and_then(|decision| decision.expires_at);
-    let semantics = match semantics::classify(
+    let (semantics, modifier) = match semantics::classify(
         inner.kind,
         &inner.tags,
         &inner.content,
@@ -850,13 +872,15 @@ fn message_received(
         expires_at,
         now_secs,
     ) {
-        semantics::Classified::Deliver(semantics) => semantics,
+        semantics::Classified::Deliver(semantics) => (semantics, None),
+        semantics::Classified::Modifier(modifier) => (Semantics::Other, Some(modifier)),
         semantics::Classified::Drop(reason) => {
             return Some(MappedEvent {
                 event: SessionEvent::AppEventDropped { group, reason },
                 secret_write: None,
                 secret_delete: None,
                 drop_pending: Some(message_id),
+                modifier: None,
             });
         }
     };
@@ -873,6 +897,7 @@ fn message_received(
                 transport_id,
                 stream_id: start.stream_id,
                 parent: start.parent.map(EventId),
+                expires_at,
             },
         }));
     }
@@ -921,6 +946,7 @@ fn message_received(
         secret_write,
         secret_delete: None,
         drop_pending: None,
+        modifier,
     })
 }
 

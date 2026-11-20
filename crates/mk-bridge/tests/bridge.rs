@@ -362,7 +362,7 @@ async fn every_request_variant() {
         }))
         .await,
     );
-    // Protocol-v3 app surface requests against the live group.
+    // Protocol-v4 app surface requests against the live group.
     mark!(
         "send_intent",
         &a.call(Request::SendIntent(SendIntentRequest {
@@ -1701,7 +1701,7 @@ async fn vectors_and_fuzz_seeds_never_panic() {
     second.open_bytes(&config);
 }
 
-/// Protocol v3 app surface, end to end over two bridge sessions:
+/// Protocol v4 app surface, end to end over two bridge sessions:
 /// `send_intent` typed receive, admin/avatar/retention ops,
 /// `disband` to `Disbanded`, `forget_group`, and a non-admin attempt
 /// answering `not_group_admin`.
@@ -1717,7 +1717,7 @@ async fn app_surface() {
 
     let response = a
         .call(Request::CreateGroup(CreateGroupRequest {
-            name: "v3".to_owned(),
+            name: "v4".to_owned(),
             description: String::new(),
             relays: vec![RELAY.to_owned()],
             invitees: vec![Invitee {
@@ -2050,4 +2050,183 @@ async fn group_snapshot(member: &mut Member, group: &[u8]) -> Value {
         panic!()
     };
     serde_json::to_value(group.expect("group")).expect("snapshot")
+}
+
+/// Protocol v4 modifier semantics: an edit ingested before its target is
+/// held (nothing surfaces), then delivered as `Semantics::Edit` once the
+/// target's index row exists.
+#[tokio::test(flavor = "current_thread")]
+async fn held_edit_releases_as_edit() {
+    let mut relay = FakeRelay::new();
+    let mut a = Member::new();
+    let mut b = Member::new();
+    a.open().await;
+    b.open().await;
+    a.publish_identity(&mut relay).await;
+    b.publish_identity(&mut relay).await;
+
+    let response = a
+        .call(Request::CreateGroup(CreateGroupRequest {
+            name: "mods".to_owned(),
+            description: String::new(),
+            relays: vec![RELAY.to_owned()],
+            invitees: vec![Invitee {
+                key_package: key_package_of(&relay, &b.account_hex()),
+                inbox_relays: vec![RELAY.to_owned()],
+            }],
+            admins: Vec::new(),
+            components: Vec::new(),
+        }))
+        .await;
+    let OpResult::GroupCreated(created) = ok_result(response) else {
+        panic!("create_group")
+    };
+    let group = created.group.id.clone();
+    a.publish(&mut relay).await;
+    b.call(Request::Ingest(IngestRequest {
+        events: welcomes_for(&relay, &b.account_hex()),
+    }))
+    .await;
+    b.sync(&mut relay, &group).await;
+    a.sync(&mut relay, &group).await;
+    let route = a.route_hex(&group).await;
+
+    // The target: m1 is on the relay but B never ingests it yet.
+    let mut backlog = group_events(&relay, &route);
+    a.advance(1_000);
+    let response = a
+        .call(Request::SendIntent(SendIntentRequest {
+            group: group.clone(),
+            intent: MessageIntent::Chat {
+                content: "m1".to_owned(),
+                reply_to: None,
+            },
+        }))
+        .await;
+    let OpResult::MessageSent(sent) = ok_result(response) else {
+        panic!("send m1")
+    };
+    let m1 = sent.message.id.clone();
+    a.publish(&mut relay).await;
+    let all = group_events(&relay, &route);
+    let target_events = all[backlog.len()..].to_vec();
+    backlog = all;
+    assert_eq!(target_events.len(), 1, "one transport event for m1");
+
+    // A's own edit of m1 (kind 1009): authorized for B once m1 is indexed.
+    a.advance(1_000);
+    let response = a
+        .call(Request::SendIntent(SendIntentRequest {
+            group: group.clone(),
+            intent: MessageIntent::Edit {
+                target: hex_to_32(&m1),
+                content: "m1*".to_owned(),
+            },
+        }))
+        .await;
+    let OpResult::MessageSent(edit_sent) = ok_result(response) else {
+        panic!("send edit")
+    };
+    a.publish(&mut relay).await;
+    let all = group_events(&relay, &route);
+    let edit_events = all[backlog.len()..].to_vec();
+    let _ = backlog;
+    assert_eq!(edit_events.len(), 1, "one transport event for the edit");
+
+    // Ingesting the edit first surfaces nothing — the modifier is held.
+    let events = b.ingest_and_drain(edit_events).await;
+    assert!(
+        events
+            .iter()
+            .all(|event| !matches!(event, SessionEvent::MessageReceived { .. })),
+        "held edit surfaces no message: {events:?}"
+    );
+
+    // The target's arrival indexes it and releases the held edit as
+    // `Semantics::Edit` carrying the inner target id.
+    let events = b.ingest_and_drain(target_events).await;
+    let mut saw_target = false;
+    let mut edit = None;
+    for event in &events {
+        if let SessionEvent::MessageReceived { message, .. } = event {
+            if message.id == m1 {
+                saw_target = true;
+            }
+            if let Semantics::Edit { .. } = message.semantics {
+                edit = Some(message.semantics.clone());
+            }
+        }
+    }
+    assert!(saw_target, "m1 delivered: {events:?}");
+    assert_eq!(
+        edit,
+        Some(Semantics::Edit {
+            target: hex_to_32(&m1),
+            content: "m1*".to_owned(),
+        }),
+        "held edit released with edit semantics: {events:?}"
+    );
+    let _ = edit_sent;
+}
+
+/// Protocol v4 send pacing: 50 sends per `created_at` second per group
+/// with 30 s of forward skew — 1,550 sends on a frozen clock stage, the
+/// 1,551st answers `send_rate_exceeded` and stages no outbound / commits
+/// no batch.
+#[tokio::test(flavor = "current_thread")]
+async fn send_pacing_rate_exceeded() {
+    let mut relay = FakeRelay::new();
+    let mut a = Member::new();
+    a.open().await;
+    a.publish_identity(&mut relay).await;
+    let response = a
+        .call(Request::CreateGroup(CreateGroupRequest {
+            name: "paced".to_owned(),
+            description: String::new(),
+            relays: vec![RELAY.to_owned()],
+            invitees: Vec::new(),
+            admins: Vec::new(),
+            components: Vec::new(),
+        }))
+        .await;
+    let OpResult::GroupCreated(created) = ok_result(response) else {
+        panic!("create_group")
+    };
+    let group = created.group.id.clone();
+    a.publish(&mut relay).await;
+
+    let message = |text: String| {
+        Request::SendMessage(SendMessageRequest {
+            group: group.clone(),
+            message: AppMessage {
+                kind: 9,
+                tags: Vec::new(),
+                content: text,
+            },
+        })
+    };
+    // Frozen clock: every send lands on one `created_at` second and the
+    // allocator spills at the 50-per-second cap up to the 30 s skew bound.
+    for i in 0..1_550usize {
+        let response = a.call(message(format!("burst#{i}"))).await;
+        assert!(matches!(response, Response::Ok { .. }), "send #{i}");
+    }
+
+    // Drain the staged outbound so the refused send's staging would be
+    // visible; committed() is the KV-batch counter.
+    let Response::Ok { result: _ } = a.call(Request::TakeOutbound(NoArgs {})).await else {
+        panic!("take_outbound")
+    };
+    let committed = a.host.committed();
+    let response = a.call(message("one too many".to_owned())).await;
+    assert_eq!(error_kind(&response), "send_rate_exceeded");
+    assert_eq!(a.host.committed(), committed, "refused send committed");
+
+    let Response::Ok { result } = a.call(Request::TakeOutbound(NoArgs {})).await else {
+        panic!("take_outbound")
+    };
+    let OpResult::Outbound(OutboundResult { items }) = *result else {
+        panic!("take_outbound result")
+    };
+    assert!(items.is_empty(), "refused send staged nothing: {items:?}");
 }

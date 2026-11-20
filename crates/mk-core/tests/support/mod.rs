@@ -453,3 +453,57 @@ pub async fn send_chat(member: &mut Member, relay: &FakeRelay, group: &GroupId, 
         .expect("send_message");
     flush(member, relay).await;
 }
+
+/// Create a group: `creator` invites `invitees`, sets `admins` and
+/// `components`, and publishes the create plus its Welcomes.
+pub async fn group_as(
+    creator: &mut Member,
+    relay: &FakeRelay,
+    url: &str,
+    invitees: &[&Member],
+    name: &str,
+    admins: &[AccountId],
+    components: Vec<mk_core::ComponentUpdate>,
+) -> GroupId {
+    let invites = invitees
+        .iter()
+        .map(|member| mk_core::Invitee {
+            key_package: key_package_of(relay, url, &member.account_hex()),
+            inbox_relays: inbox_relays_of(relay, url, &member.account_hex()),
+        })
+        .collect();
+    let gid = creator
+        .session
+        .create_group(mk_core::CreateGroup {
+            name: name.to_owned(),
+            description: String::new(),
+            relays: vec![url.to_owned()],
+            invitees: invites,
+            admins: admins.to_vec(),
+            components,
+        })
+        .await
+        .expect("create_group");
+    flush(creator, relay).await;
+    gid
+}
+
+/// Create a plain group (no extra admins or components).
+pub async fn group_with(
+    creator: &mut Member,
+    relay: &FakeRelay,
+    url: &str,
+    invitees: &[&Member],
+    name: &str,
+) -> GroupId {
+    group_as(creator, relay, url, invitees, name, &[], Vec::new()).await
+}
+
+/// Join the group a published Welcome offers the member.
+pub async fn join_via_welcome(member: &mut Member, relay: &FakeRelay, url: &str) {
+    let welcomes = welcomes_for(relay, url, &member.account_hex());
+    assert!(!welcomes.is_empty(), "a welcome must be waiting");
+    ingest_backlog(member, &welcomes).await;
+    member.session.tick().await.expect("tick");
+    flush(member, relay).await;
+}

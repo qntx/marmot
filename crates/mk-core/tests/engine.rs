@@ -22,6 +22,7 @@
     clippy::useless_let_if_seq,
     clippy::unneeded_struct_pattern,
     clippy::shadow_unrelated,
+    clippy::excessive_nesting,
     clippy::missing_docs_in_private_items,
     clippy::too_many_lines,
     clippy::similar_names,
@@ -53,7 +54,7 @@ use openmls_rust_crypto as _;
 use proptest as _;
 use storage_sqlite as _;
 
-use cgka_traits::engine::{CgkaEngine, SendIntent};
+use cgka_traits::engine::{CgkaEngine, SendIntent, SendResult};
 use harness::*;
 use transport_nostr_peeler::KIND_MARMOT_GROUP_MESSAGE;
 
@@ -210,4 +211,106 @@ fn reopened_provider_interns_no_descriptions() {
         0,
         "known descriptions resolve to statics without interning"
     );
+}
+
+/// Pins the upstream same-second limitation the session's send pacing
+/// sidesteps — the Rust home of the retired wasm `same-second-burst`
+/// cases, which needed a sender that is not pace-limited. One member
+/// sends 250 app messages sharing a single `created_at` second. Ingested
+/// in `(created_at, id)` order — the order `Session::ingest_batch`
+/// produces — the shuffled ratchet generations push a tail past the
+/// 100-generation out-of-order tolerance and it lands `stale`; ingested in
+/// publish order all 250 deliver.
+#[tokio::test(flavor = "current_thread")]
+async fn same_second_burst_sorted_loses_tail_publish_order_delivers() {
+    const MESSAGES: usize = 250;
+
+    // A fresh pair per case: a message stamped stale never re-delivers.
+    for sorted in [true, false] {
+        let relay = FakeRelay::new();
+        let mut alice = Member::fresh("alice", "alice");
+        let mut bob = Member::fresh("bob", "bob");
+        publish_key_package(&mut bob, &relay).await;
+        let bob_kp = key_package_from_event(
+            relay
+                .fetch_key_packages(&bob.signer.keys().public_key().to_hex())
+                .first()
+                .expect("bob published a key package"),
+        );
+        let gid = create_group(&mut alice, &relay, "burst", vec![bob_kp]).await;
+        ingest_welcomes(&mut bob, &relay).await;
+        flush_outbound(&mut bob, &gid, &relay).await;
+        bob.drain_events();
+
+        // Every inner event carries the same `created_at`, and the peeler
+        // binds the outer kind-445 `created_at` to it, so the whole burst
+        // shares one second on the wire.
+        let second = now_secs();
+        let baseline = relay
+            .fetch_ascending(KIND_MARMOT_GROUP_MESSAGE, None, None)
+            .len();
+        let mut publish_order = Vec::with_capacity(MESSAGES);
+        for i in 0..MESSAGES {
+            let result = alice
+                .engine
+                .send(SendIntent::AppMessage {
+                    group_id: gid.clone(),
+                    payload: chat_payload(
+                        &alice.signer.keys().public_key().to_hex(),
+                        second,
+                        &format!("burst#{i}"),
+                    ),
+                    expected_epoch: None,
+                })
+                .await
+                .expect("send");
+            if let SendResult::ApplicationMessage { msg, .. } = &result {
+                publish_order.push(msg.id.clone());
+            }
+            publish_send_result(&mut alice, result, &relay).await;
+        }
+        assert_eq!(publish_order.len(), MESSAGES);
+
+        let all = relay.fetch_ascending(KIND_MARMOT_GROUP_MESSAGE, None, None);
+        let events = &all[baseline..];
+        assert_eq!(events.len(), MESSAGES, "one event per send");
+        assert!(
+            events.iter().all(|event| event.created_at == second),
+            "the burst shares one outer second"
+        );
+
+        // `fetch_ascending` already orders by `(created_at, id)` — the
+        // sorted ingest case. For publish order, re-sort the same events
+        // by send sequence.
+        let mut events: Vec<_> = events.to_vec();
+        if !sorted {
+            let rank: std::collections::BTreeMap<_, usize> = publish_order
+                .iter()
+                .enumerate()
+                .map(|(i, id)| (hex::encode(id.as_slice()), i))
+                .collect();
+            events.sort_by_key(|event| rank[&event.id]);
+        }
+
+        let mut stale = 0usize;
+        for event in &events {
+            let outcome = ingest_event(&mut bob, event).await;
+            if matches!(outcome, cgka_traits::ingest::IngestOutcome::Stale { .. }) {
+                stale += 1;
+            }
+        }
+        let delivered = bob.drain_received().len();
+
+        if sorted {
+            assert!(stale > 0, "a stale tail is lost beyond the tolerance");
+            assert_eq!(
+                delivered + stale,
+                MESSAGES,
+                "every message either delivered or reported stale (stale={stale})"
+            );
+        } else {
+            assert_eq!(stale, 0, "publish order stays inside the tolerance");
+            assert_eq!(delivered, MESSAGES, "all 250 deliver in publish order");
+        }
+    }
 }

@@ -1,11 +1,16 @@
 /**
- * Same-second-burst — pins the observed engine limitation behind the flaky catch-up stalls: fed
- * more than 100 application messages that share one `created_at` second in a single `ingest` call,
- * the engine loses part of the batch to `stale`/`stale_epoch`. `ingest_batch` sorts by
- * `(created_at, id)`, so same-second events go in by random event id instead of sender-ratchet
- * order, and OpenMLS refuses the stragglers that land beyond its 100-generation out-of-order
- * tolerance (`DEFAULT_OUT_OF_ORDER_TOLERANCE`). Feeding the same events one per `ingest` call in
- * publish order delivers all of them. mk-core/engine behavior, pinned — not worked around.
+ * Paced send burst — the upstream same-second input this file used to pin can no longer come from
+ * our session: per-group send pacing caps `created_at` at 50 messages per second and 30 seconds of
+ * forward skew, so a same-second flood of >100 events needs a sender that does not pace. That
+ * limitation — sorted ingest of a >100 same-second foreign batch loses its shuffled tail to
+ * `stale_epoch` — is now pinned in Rust against the raw MDK engine by
+ * `crates/mk-core/tests/engine.rs::same_second_burst_sorted_loses_tail_publish_order_delivers`.
+ *
+ * What this file pins instead: our own paced sender, clock frozen, produces a burst that spreads
+ * across distinct `created_at` seconds at the 50-per-second cap inside the 30-second skew bound,
+ * and a receiver that ingests the whole burst shuffled in ONE batch delivers every message with
+ * zero `stale` — the per-second blocks stay inside the out-of-order tolerance that defeated the old
+ * same-second flood.
  */
 
 import { writeFileSync } from "node:fs";
@@ -23,8 +28,10 @@ import { testSigner } from "../signer.ts";
 
 const RELAY = "wss://relay.example";
 const MESSAGES = 250;
-/** Same-second app messages beyond this many lose their shuffled tail to `stale_epoch`. */
-const OUT_OF_ORDER_TOLERANCE = 100;
+/** Send pacing: at most this many messages per `created_at` second per group. */
+const PER_SECOND_CAP = 50;
+/** Send pacing: `created_at` may lead the clock by at most this many seconds. */
+const SKEW_SECONDS = 30;
 
 async function publish(engine: Engine, network: FakeRelayNetwork): Promise<void> {
   const port = network.port("test");
@@ -142,7 +149,11 @@ async function openPair(): Promise<Pair> {
   return { a, b, aClock, bClock, relay, group };
 }
 
-/** A sends `count` messages without advancing its clock — every event shares one second. */
+/**
+ * A sends `count` messages as fast as the pacing allocator allows on its frozen clock: each send
+ * spills into a later `created_at` second once the current second is full. Returns the published
+ * events in relay order.
+ */
 async function sendBurst(pair: Pair, count: number): Promise<NostrEvent[]> {
   const route = await routeHex(pair.b, pair.group);
   const baseline = new Set(pair.relay.groupEvents(route, "b").map((event) => event.id));
@@ -152,12 +163,24 @@ async function sendBurst(pair: Pair, count: number): Promise<NostrEvent[]> {
     // oxlint-disable-next-line no-await-in-loop -- publish each before the next send
     await publish(pair.a, pair.relay);
   }
-  const events = pair.relay.groupEvents(route, "b").filter((event) => !baseline.has(event.id));
-  const seconds = new Set(events.map((event) => event.createdAt));
-  if (seconds.size !== 1) {
-    throw new Error(`burst spans ${seconds.size} created_at seconds, expected 1`);
+  return pair.relay.groupEvents(route, "b").filter((event) => !baseline.has(event.id));
+}
+
+/** Deterministic Fisher–Yates shuffle (seeded LCG — the lint gate bans bitwise ops). */
+function shuffled<T>(items: T[], seed: number): T[] {
+  const out = [...items];
+  let state = ((seed % 4294967296) + 4294967296) % 4294967296;
+  const next = (): number => {
+    state = (state * 1664525 + 1013904223) % 4294967296;
+    return state / 4294967296;
+  };
+  for (let i = out.length - 1; i > 0; i -= 1) {
+    const j = Math.floor(next() * (i + 1));
+    const tmp = out[i] as T;
+    out[i] = out[j] as T;
+    out[j] = tmp;
   }
-  return events;
+  return out;
 }
 
 /** Tick + drain until a round adds nothing — deferred peels are bounded by tick rounds. */
@@ -181,51 +204,41 @@ async function collectDelivered(
   throw new Error("drain did not quiesce in 64 rounds");
 }
 
-describe("same-second burst (release wasm)", () => {
+describe("paced send burst (release wasm)", () => {
   test(
-    "one ingest call fed >100 same-second messages reports a stale tail and loses it " +
-      "(engine limitation)",
+    "a 250-message paced burst spreads across seconds and delivers whole " +
+      "from one shuffled ingest",
     { timeout: 120_000 },
     async () => {
       const pair = await openPair();
       const events = await sendBurst(pair, MESSAGES);
       expect(events).toHaveLength(MESSAGES);
 
-      const reports = await pair.b.ingest(events);
+      // The burst must honour the pacing shape: >=5 distinct seconds at
+      // <=50 per second, inside the 30 s forward-skew bound.
+      const created = events.map((event) => Number(event.createdAt));
+      const distinct = [...new Set(created)];
+      const perSecond = distinct.map(
+        (second) => created.filter((value) => value === second).length,
+      );
+      expect(distinct.length).toBeGreaterThanOrEqual(5);
+      expect(Math.max(...perSecond)).toBeLessThanOrEqual(PER_SECOND_CAP);
+      expect(Math.max(...created) - Math.min(...created)).toBeLessThanOrEqual(SKEW_SECONDS);
+
+      // One shuffled ingest of the whole burst delivers every message.
+      const reports = await pair.b.ingest(shuffled(events, 0x5eed));
       const stale = reports.filter((report) => report.outcome.type === "stale").length;
-      const accepted = reports.filter((report) => report.outcome.type === "accepted").length;
       const delivered = await collectDelivered(pair.b, pair.bClock, await drainAck(pair.b));
 
       writeFileSync(
         fileURLToPath(new URL("../../../../target/same-second-burst.txt", import.meta.url)),
-        `one ingest call, ${MESSAGES} same-second events ` +
-          `(tolerance ${OUT_OF_ORDER_TOLERANCE} generations):\n` +
-          `  accepted=${accepted} stale=${stale} delivered=${delivered}\n`,
+        `${MESSAGES} paced sends on a frozen clock, one shuffled ingest:\n` +
+          `  created_at histogram: ${distinct
+            .toSorted((x, y) => x - y)
+            .map((second) => `${second}:${created.filter((value) => value === second).length}`)
+            .join(", ")}\n` +
+          `  delivered=${delivered} stale=${stale}\n`,
       );
-      expect(stale).toBeGreaterThan(0);
-      expect(delivered + stale).toBe(MESSAGES);
-    },
-  );
-
-  test(
-    "the same >100 same-second events, fed one per ingest call in publish order, all deliver",
-    { timeout: 120_000 },
-    async () => {
-      const pair = await openPair();
-      const events = await sendBurst(pair, MESSAGES);
-      expect(events).toHaveLength(MESSAGES);
-
-      let stale = 0;
-      let delivered = 0;
-      for (const event of events) {
-        // oxlint-disable-next-line no-await-in-loop -- ingest order is the variable under test
-        const reports = await pair.b.ingest([event]);
-        stale += reports.filter((report) => report.outcome.type === "stale").length;
-        // oxlint-disable-next-line no-await-in-loop -- ack per the host receive contract
-        delivered += await drainAck(pair.b);
-      }
-      delivered = await collectDelivered(pair.b, pair.bClock, delivered);
-
       expect(stale).toBe(0);
       expect(delivered).toBe(MESSAGES);
     },

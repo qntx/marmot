@@ -923,26 +923,71 @@ async fn colliding_checkpoints_differ_only_in_added_at() {
     assert_eq!(differing.len(), 1, "exactly one OpenMLS row differs");
     let (key, value_a, value_b) = &differing[0];
     assert!(contains(key, b"MessageSecrets"), "the MessageSecrets row");
-    assert_eq!(value_a.len(), value_b.len());
-    let span = |value: &[u8]| {
-        let start = rfind(value, b"\"added_at\":{").expect("an added_at stamp");
-        let end = start
-            + value[start..]
-                .iter()
-                .position(|byte| *byte == b'}')
-                .expect("closing brace");
-        start..end
+    // Compare the decoded rows, not their bytes: `added_at` is a serde
+    // `SystemTime` whose `nanos_since_epoch` prints in 1 to 9 digits, so two
+    // stamps straddling a power-of-ten nanosecond boundary differ in encoded
+    // width (`system_time_stamp_width_tracks_its_nanos`).
+    let (rest_a, stamps_a) = split_added_at(value_a);
+    let (rest_b, stamps_b) = split_added_at(value_b);
+    assert_eq!(rest_a, rest_b, "identical outside every added_at stamp");
+    assert_eq!(stamps_a.len(), stamps_b.len());
+    let changed = stamps_a
+        .iter()
+        .zip(&stamps_b)
+        .filter(|(stamp_a, stamp_b)| stamp_a != stamp_b)
+        .count();
+    assert_eq!(changed, 1, "exactly one added_at stamp differs");
+}
+
+/// The two encoded widths a merge-time stamp can take a few milliseconds
+/// apart: 99.99 ms and 100.01 ms past the same second encode one byte apart,
+/// the width difference behind the old byte-length assertion's flakes.
+#[test]
+fn system_time_stamp_width_tracks_its_nanos() {
+    use std::time::{Duration, SystemTime};
+    let at = |nanos: u32| {
+        serde_json::to_vec(&(SystemTime::UNIX_EPOCH + Duration::new(1_795_163_611, nanos)))
+            .expect("stamp json")
     };
-    let (span_a, span_b) = (span(value_a), span(value_b));
-    assert_eq!(span_a, span_b);
-    for (index, (byte_a, byte_b)) in value_a.iter().zip(value_b.iter()).enumerate() {
-        if byte_a != byte_b {
-            assert!(
-                span_a.contains(&index),
-                "byte {index} differs outside added_at"
-            );
+    assert_eq!(at(100_010_000).len(), at(99_990_000).len() + 1);
+    assert_eq!(at(999_990_000).len(), at(9_990_000).len() + 2);
+}
+
+/// An `OpenMLS` row (`u32 BE`-length fields: presence byte, group key, entity
+/// JSON) with every `added_at` value in its entity replaced by `null`, and the
+/// replaced values in traversal order. The leading fields stay as raw bytes.
+fn split_added_at(value: &[u8]) -> ((Vec<Vec<u8>>, serde_json::Value), Vec<serde_json::Value>) {
+    fn walk(node: &mut serde_json::Value, stamps: &mut Vec<serde_json::Value>) {
+        match node {
+            serde_json::Value::Object(map) => {
+                for (name, child) in map.iter_mut() {
+                    if name == "added_at" {
+                        stamps.push(child.take());
+                    } else {
+                        walk(child, stamps);
+                    }
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for item in items {
+                    walk(item, stamps);
+                }
+            }
+            _ => {}
         }
     }
+    let mut fields = Vec::new();
+    let mut rest = value;
+    while !rest.is_empty() {
+        let len = u32::from_be_bytes(rest[..4].try_into().expect("field length")) as usize;
+        fields.push(rest[4..4 + len].to_vec());
+        rest = &rest[4 + len..];
+    }
+    let entity = fields.pop().expect("entity field");
+    let mut node: serde_json::Value = serde_json::from_slice(&entity).expect("entity json");
+    let mut stamps = Vec::new();
+    walk(&mut node, &mut stamps);
+    ((fields, node), stamps)
 }
 
 /// The single checkpoint row on `host`, decoded to its `GroupStateImage`
@@ -980,10 +1025,4 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
     haystack
         .windows(needle.len())
         .any(|window| window == needle)
-}
-
-fn rfind(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    haystack
-        .windows(needle.len())
-        .rposition(|window| window == needle)
 }

@@ -228,11 +228,16 @@ impl KvStorageProvider {
         }
     }
 
-    fn put_row(&self, table: Table, segments: &[&[u8]], value: Vec<u8>) -> StorageResult<()> {
+    pub(crate) fn put_row(
+        &self,
+        table: Table,
+        segments: &[&[u8]],
+        value: Vec<u8>,
+    ) -> StorageResult<()> {
         self.store.put(keys::key(table, segments), value)
     }
 
-    fn del_row(&self, table: Table, segments: &[&[u8]]) -> StorageResult<()> {
+    pub(crate) fn del_row(&self, table: Table, segments: &[&[u8]]) -> StorageResult<()> {
         self.store.delete(&keys::key(table, segments))
     }
 
@@ -558,8 +563,16 @@ impl KvStorageProvider {
                     && epoch <= through.0
             }
             OpenMlsContentFilter::Commits => class == OPENMLS_CONTENT_COMMIT,
-            OpenMlsContentFilter::WithoutProcessedApplicationsThrough(_)
-            | OpenMlsContentFilter::WithoutProcessedApplications => {
+            // `WithoutProcessedApplicationsThrough` leaves out only the
+            // delivered applications at or below the bound — later ones stay
+            // admissible as branch witnesses, exactly as sqlite's
+            // `openmls_epoch > ?` arm lists them.
+            OpenMlsContentFilter::WithoutProcessedApplicationsThrough(at) => {
+                class != OPENMLS_CONTENT_APPLICATION
+                    || state != MessageState::Processed
+                    || epoch > at.0
+            }
+            OpenMlsContentFilter::WithoutProcessedApplications => {
                 class != OPENMLS_CONTENT_APPLICATION || state != MessageState::Processed
             }
         }
@@ -1274,6 +1287,8 @@ impl KvStorageProvider {
         self.del_prefix(Table::Snapshot, &[gid])?;
         self.del_prefix(Table::Checkpoint, &[gid])?;
         self.del_prefix(Table::MediaSecret, &[gid])?;
+        self.del_prefix(Table::DeliveredMessage, &[gid])?;
+        self.del_row(Table::SendPacing, &[gid])?;
         self.delete_group_openmls_rows(id)
     }
 }
@@ -2664,5 +2679,68 @@ impl StorageProvider for KvStorageProvider {
     /// the only honest answer the enum admits. Upstream gap.
     fn backend(&self) -> Backend {
         Backend::Sqlite
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `WithoutProcessedApplicationsThrough(at)` leaves out only the
+    /// delivered applications at or below `at`: sqlite's arm keeps a
+    /// Processed application while `openmls_epoch > at`, and branch
+    /// selection depends on re-admitting exactly those rows as
+    /// delivered-application witnesses (a losing branch's delivered app
+    /// can only be withdrawn when the pass lists it again).
+    #[test]
+    fn openmls_filter_through_keeps_processed_apps_above_the_bound() {
+        let through = OpenMlsContentFilter::WithoutProcessedApplicationsThrough(EpochId(2));
+        let cases = [
+            (
+                MessageState::Processed,
+                OPENMLS_CONTENT_APPLICATION,
+                Some(3),
+                true,
+            ),
+            (
+                MessageState::Processed,
+                OPENMLS_CONTENT_APPLICATION,
+                Some(2),
+                false,
+            ),
+            (
+                MessageState::Processed,
+                OPENMLS_CONTENT_COMMIT,
+                Some(1),
+                true,
+            ),
+            (
+                MessageState::ConvergenceDeferred,
+                OPENMLS_CONTENT_APPLICATION,
+                Some(1),
+                true,
+            ),
+            (
+                MessageState::Processed,
+                OPENMLS_CONTENT_UNCLASSIFIED,
+                None,
+                true,
+            ),
+        ];
+        for (state, class, epoch, want) in cases {
+            assert_eq!(
+                KvStorageProvider::openmls_filter_match_key(state, class, epoch, &through),
+                want,
+                "{state:?} class={class} epoch={epoch:?}"
+            );
+        }
+
+        let all = OpenMlsContentFilter::WithoutProcessedApplications;
+        assert!(!KvStorageProvider::openmls_filter_match_key(
+            MessageState::Processed,
+            OPENMLS_CONTENT_APPLICATION,
+            Some(9),
+            &all
+        ));
     }
 }

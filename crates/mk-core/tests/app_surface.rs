@@ -499,27 +499,28 @@ mod app_surface_tests {
             vec![vec!["e".to_owned(), react_b.message.id().to_hex()]]
         );
         assert_eq!(un.message.content, "");
-        // Never surfaced (kind 5 is unverifiable without a per-message
-        // author index): no delivery; it drops `unverifiable`.
+        // B authored the target reaction and A's index knows it: the kind
+        // 5 delivers to A as an `Unreact` over the honoured target.
         let a_events = collect(&mut a, &relay, &route).await;
         assert!(
-            !a_events.iter().any(|event| matches!(
+            a_events.iter().any(|event| matches!(
                 event,
                 SessionEvent::MessageReceived { message, .. } if message.kind == 5
+                    && message.sender == b.signer.account()
+                    && matches!(
+                        &message.semantics,
+                        Semantics::Unreact { reactions }
+                            if reactions == &[react_b.message.id()]
+                    )
             )),
-            "kind 5 is never delivered"
-        );
-        assert!(
-            dropped_reasons(&a_events).contains(&DropReason::Unverifiable),
-            "unreact drops unverifiable: {:?}",
-            dropped_reasons(&a_events)
+            "A sees B's unreact typed: {a_events:?}"
         );
 
         // A unreacting B's reaction: mk-core has no durable
         // reaction-ownership index to refuse this at the send site (the
         // design's validation list has no ownership rule); on the wire it
-        // is a plain kind 5, dropped `unverifiable` at every receiver —
-        // an unauthorized unreact is never honoured.
+        // is a plain kind 5 — but B's index knows the target is B's own
+        // message, so it drops `unauthorized` and is never honoured.
         a.session
             .send_intent(
                 &gid,
@@ -537,6 +538,11 @@ mod app_surface_tests {
                 SessionEvent::MessageReceived { message, .. } if message.kind == 5
             )),
             "the spoofed unreact is not delivered either"
+        );
+        assert!(
+            dropped_reasons(&b_events).contains(&DropReason::Unauthorized),
+            "the foreign unreact drops unauthorized: {:?}",
+            dropped_reasons(&b_events)
         );
 
         // Validation: malformed reaction emoji is refused before staging.
@@ -681,9 +687,10 @@ mod app_surface_tests {
     }
 
     /// Delete vs remove: an admin `Delete` lands as kind-4891 `Removal`;
-    /// a non-admin `Delete` is kind 5 and drops `unverifiable` with its
-    /// pending row released; a non-admin `Remove` is refused
-    /// `NotGroupAdmin` before staging.
+    /// a non-admin `Delete` is kind 5 and drops `unauthorized` (the index
+    /// knows its target is another account's message) with its pending row
+    /// released; a non-admin `Remove` is refused `NotGroupAdmin` before
+    /// staging.
     #[tokio::test(flavor = "current_thread")]
     async fn delete_remove_and_drop_hygiene() {
         let (relay, mut a, mut b, gid) = pair("moderation").await;
@@ -727,8 +734,10 @@ mod app_surface_tests {
             "B sees the admin removal typed"
         );
 
-        // Non-admin delete -> kind 5; A drops it `unverifiable` and
-        // releases its pending row in the drain's storage unit.
+        // Non-admin delete -> kind 5; A's index knows m1 is A's own
+        // message, so the target is known but fails authorization — the
+        // drop is `unauthorized` and releases its pending row in the
+        // drain's storage unit.
         let del_b = send_typed(
             &mut b,
             &relay,
@@ -741,8 +750,8 @@ mod app_surface_tests {
         let transport_id = transport_id_for(&relay, &route_b, del_b.message.created_at);
         let a_events = collect(&mut a, &relay, &route_a).await;
         assert!(
-            dropped_reasons(&a_events).contains(&DropReason::Unverifiable),
-            "non-admin delete drops unverifiable: {:?}",
+            dropped_reasons(&a_events).contains(&DropReason::Unauthorized),
+            "non-admin delete of another's message drops unauthorized: {:?}",
             dropped_reasons(&a_events)
         );
         assert!(

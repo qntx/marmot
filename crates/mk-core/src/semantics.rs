@@ -10,7 +10,7 @@ use cgka_traits::app_event::{
     MARMOT_APP_EVENT_KIND_REACTION, MARMOT_APP_EVENT_KIND_REMOVE,
 };
 
-use crate::types::EventId;
+use crate::types::{AccountId, EventId};
 
 /// The kind-4891 admin-removal payload, byte-identical to White Noise.
 const REMOVAL_CONTENT: &str = "{\"v\":1,\"action\":\"remove\"}";
@@ -92,6 +92,27 @@ pub enum Semantics {
         /// The removed message's inner event id.
         target: EventId,
     },
+    /// A kind-1009 edit the index authorized: `target` is a kind-9 message
+    /// the sender authored; `content` replaces its body.
+    Edit {
+        /// The edited message's inner event id.
+        target: EventId,
+        /// The replacement body.
+        content: String,
+    },
+    /// A kind-5 delete the index authorized; every listed target was
+    /// authored by the sender (chats, reactions, edits). Not all targets
+    /// are reactions — those are [`Semantics::Unreact`].
+    Deletion {
+        /// The honoured targets' inner event ids, in tag order.
+        targets: Vec<EventId>,
+    },
+    /// A kind-5 delete the index authorized whose honoured targets are all
+    /// reactions — a withdraw-own-reactions.
+    Unreact {
+        /// The honoured reaction ids, in tag order.
+        reactions: Vec<EventId>,
+    },
     /// Every other kind, delivered untyped.
     Other,
 }
@@ -102,13 +123,15 @@ pub enum Semantics {
 pub enum DropReason {
     /// The message's source-epoch retention elapsed before drain.
     Expired,
-    /// Kind 4891 without granted moderation authority.
+    /// Kind 4891 without granted moderation authority, or a kind 1009/5
+    /// whose known target was authored by another account or has the wrong
+    /// kind.
     Unauthorized,
-    /// Kind 5 or 1009: unverifiable on receive without a per-message author
-    /// index (not implementable without a schema change this milestone).
+    /// A kind 1009/5 whose target was still unknown when its hold expired
+    /// or overflowed the hold queue.
     Unverifiable,
     /// Kind 7 with an invalid target or emoji; kind 4891 whose removal
-    /// payload does not parse.
+    /// payload does not parse; a kind 1009 or 5 without a usable `e` tag.
     Malformed,
 }
 
@@ -163,6 +186,58 @@ pub(crate) enum Classified {
     Deliver(Semantics),
     /// Drop with this reason.
     Drop(DropReason),
+    /// A kind 1009/5 modifier — the session resolves it against the
+    /// delivered index (deliver / hold / drop).
+    Modifier(Modifier),
+}
+
+/// A kind-1009 edit or kind-5 delete parsed off the wire, awaiting
+/// authorization against the delivered index.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Modifier {
+    /// Kind 1009: replace `target`'s content.
+    Edit {
+        /// The target's inner event id.
+        target: EventId,
+        /// The replacement body.
+        content: String,
+    },
+    /// Kind 5: void `targets` — deduplicated `e`-tag ids in tag order.
+    Delete {
+        /// The targets' inner event ids.
+        targets: Vec<EventId>,
+    },
+}
+
+impl Modifier {
+    /// The inner ids the modifier needs indexed before it can resolve.
+    pub(crate) const fn targets(&self) -> &[EventId] {
+        match self {
+            Self::Edit { target, .. } => std::slice::from_ref(target),
+            Self::Delete { targets } => targets.as_slice(),
+        }
+    }
+}
+
+/// What the delivered index knows about a would-be modifier target.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct TargetFacts {
+    /// The indexed message's author.
+    pub author: AccountId,
+    /// The indexed message's kind.
+    pub kind: u64,
+}
+
+/// The outcome of resolving a modifier against the delivered index.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Resolution {
+    /// A target is still unknown and the attempt was not final: hold the
+    /// modifier.
+    Hold,
+    /// Authorized: deliver with this semantics.
+    Deliver(Semantics),
+    /// Refused: drop with this reason.
+    Drop(DropReason),
 }
 
 /// Classify a decoded inner event. `grant` is `authority.moderation_grant`
@@ -207,10 +282,115 @@ pub(crate) fn classify(
                     Classified::Deliver(Semantics::Removal { target })
                 })
         }
-        MARMOT_APP_EVENT_KIND_DELETE | MARMOT_APP_EVENT_KIND_EDIT => {
-            Classified::Drop(DropReason::Unverifiable)
+        MARMOT_APP_EVENT_KIND_EDIT => {
+            let e_tags: Vec<&Vec<String>> = tags
+                .iter()
+                .filter(|tag| tag.first().map(String::as_str) == Some("e"))
+                .collect();
+            match e_tags.as_slice() {
+                [tag] => tag.get(1).and_then(|raw| event_id_of_hex(raw)).map_or(
+                    Classified::Drop(DropReason::Malformed),
+                    |target| {
+                        Classified::Modifier(Modifier::Edit {
+                            target,
+                            content: content.to_owned(),
+                        })
+                    },
+                ),
+                _ => Classified::Drop(DropReason::Malformed),
+            }
+        }
+        MARMOT_APP_EVENT_KIND_DELETE => {
+            let mut targets: Vec<EventId> = Vec::new();
+            for tag in tags
+                .iter()
+                .filter(|tag| tag.first().map(String::as_str) == Some("e"))
+            {
+                if let Some(id) = tag.get(1).and_then(|raw| event_id_of_hex(raw))
+                    && !targets.contains(&id)
+                {
+                    targets.push(id);
+                }
+            }
+            if targets.is_empty() {
+                Classified::Drop(DropReason::Malformed)
+            } else {
+                Classified::Modifier(Modifier::Delete { targets })
+            }
         }
         _ => Classified::Deliver(Semantics::Other),
+    }
+}
+
+/// Kinds a kind-5 delete may honour: chat, reaction, edit.
+const DELETE_HONOURED_KINDS: [u64; 3] = [
+    MARMOT_APP_EVENT_KIND_CHAT,
+    MARMOT_APP_EVENT_KIND_REACTION,
+    MARMOT_APP_EVENT_KIND_EDIT,
+];
+
+/// Resolve a modifier against the delivered index. `lookup` answers the
+/// index's `(author, kind)` for a target's inner event id; `final_attempt`
+/// is the hold-expiry / overflow / release pass where unknown targets no
+/// longer wait.
+pub(crate) fn resolve(
+    modifier: &Modifier,
+    sender: &AccountId,
+    mut lookup: impl FnMut(&EventId) -> Option<TargetFacts>,
+    final_attempt: bool,
+) -> Resolution {
+    match modifier {
+        Modifier::Edit { target, content } => match lookup(target) {
+            Some(facts) if facts.author == *sender && facts.kind == MARMOT_APP_EVENT_KIND_CHAT => {
+                Resolution::Deliver(Semantics::Edit {
+                    target: *target,
+                    content: content.clone(),
+                })
+            }
+            Some(_) => Resolution::Drop(DropReason::Unauthorized),
+            None if final_attempt => Resolution::Drop(DropReason::Unverifiable),
+            None => Resolution::Hold,
+        },
+        Modifier::Delete { targets } => {
+            let mut honoured: Vec<(EventId, u64)> = Vec::with_capacity(targets.len());
+            let mut known_failed = false;
+            let mut any_unknown = false;
+            for target in targets {
+                match lookup(target) {
+                    Some(facts)
+                        if facts.author == *sender
+                            && DELETE_HONOURED_KINDS.contains(&facts.kind) =>
+                    {
+                        honoured.push((*target, facts.kind));
+                    }
+                    Some(_) => known_failed = true,
+                    None => any_unknown = true,
+                }
+            }
+            if any_unknown && !final_attempt {
+                return Resolution::Hold;
+            }
+            if honoured.is_empty() {
+                return Resolution::Drop(if known_failed {
+                    DropReason::Unauthorized
+                } else {
+                    DropReason::Unverifiable
+                });
+            }
+            let honoured_ids: Vec<EventId> = honoured.iter().map(|(target, _)| *target).collect();
+            if honoured
+                .iter()
+                .all(|(_, kind)| *kind == MARMOT_APP_EVENT_KIND_REACTION)
+            {
+                Resolution::Deliver(Semantics::Unreact {
+                    reactions: honoured_ids,
+                })
+            } else {
+                Resolution::Deliver(Semantics::Deletion {
+                    targets: honoured_ids,
+                })
+            }
+        }
     }
 }
 
@@ -539,11 +719,49 @@ mod tests {
             classify(4891, &tags, body, Some(true), None, 0),
             Classified::Deliver(Semantics::Removal { .. })
         ));
-        // 5/1009 -> unverifiable; 447 and unknown kinds -> Other.
-        for kind in [5, 1009] {
+        // 5 -> a `Delete` modifier over deduped valid `e` ids; no usable
+        // `e` tag -> malformed.
+        let tags = vec![
+            vec!["e".to_owned(), hex.clone()],
+            vec!["e".to_owned(), hex.clone()],
+            vec!["e".to_owned(), hex_id(0x0a)],
+        ];
+        assert!(matches!(
+            classify(5, &tags, "", None, None, 0),
+            Classified::Modifier(Modifier::Delete { ref targets })
+                if *targets == vec![id(0x09), id(0x0a)]
+        ));
+        for tags in [
+            vec![],
+            vec![vec!["e".to_owned(), "zz".to_owned()]],
+            vec![vec!["q".to_owned(), hex.clone()]],
+        ] {
             assert!(matches!(
-                classify(kind, &[], "", Some(true), None, 0),
-                Classified::Drop(DropReason::Unverifiable)
+                classify(5, &tags, "", None, None, 0),
+                Classified::Drop(DropReason::Malformed)
+            ));
+        }
+        // 1009 -> an `Edit` modifier on exactly one valid `e` tag; zero or
+        // two `e` tags, or an invalid id -> malformed.
+        let tags = vec![vec!["e".to_owned(), hex.clone()]];
+        assert!(matches!(
+            classify(1009, &tags, "new", None, None, 0),
+            Classified::Modifier(Modifier::Edit {
+                ref target,
+                ref content
+            }) if *target == id(0x09) && content == "new"
+        ));
+        for tags in [
+            vec![],
+            vec![
+                vec!["e".to_owned(), hex.clone()],
+                vec!["e".to_owned(), hex_id(0x0a)],
+            ],
+            vec![vec!["e".to_owned(), "zz".to_owned()]],
+        ] {
+            assert!(matches!(
+                classify(1009, &tags, "new", None, None, 0),
+                Classified::Drop(DropReason::Malformed)
             ));
         }
         for kind in [447, 1200, 9_999] {
@@ -566,8 +784,8 @@ mod tests {
     /// Every inner app event the White Noise 0.17.0 capture observed
     /// (`vectors/wn/capture-0.17.0.json`) classifies exactly as the design
     /// table pins: kind 9 plain/reply -> `Chat`, kind 7 -> `Reaction`,
-    /// kind 4891 (granted) -> `Removal`, kinds 5/1009 -> `unverifiable`,
-    /// everything else (kind 447) -> `Other`.
+    /// kind 4891 (granted) -> `Removal`, kinds 5/1009 -> a `Modifier`
+    /// (session-resolved), everything else (kind 447) -> `Other`.
     #[test]
     fn wn_fixture_events_classify() {
         let path = concat!(
@@ -624,12 +842,30 @@ mod tests {
                     Classified::Deliver(Semantics::Other) => {
                         assert!(!matches!(kind, 5 | 7 | 9 | 1009 | 4891), "kind {kind}");
                     }
+                    Classified::Deliver(
+                        Semantics::Edit { .. }
+                        | Semantics::Deletion { .. }
+                        | Semantics::Unreact { .. },
+                    ) => panic!("modifier semantics come from resolve, not classify"),
+                    Classified::Modifier(Modifier::Edit { target, .. }) => {
+                        assert_eq!(kind, 1009);
+                        let tagged = tags
+                            .iter()
+                            .find(|tag| tag.first().map(String::as_str) == Some("e"))
+                            .and_then(|tag| tag.get(1))
+                            .and_then(|raw| event_id_of_hex(raw));
+                        assert_eq!(Some(target), tagged);
+                    }
+                    Classified::Modifier(Modifier::Delete { targets }) => {
+                        assert_eq!(kind, 5);
+                        assert!(!targets.is_empty(), "a delete modifier has targets");
+                    }
                     Classified::Drop(reason) => {
                         assert!(
                             matches!(kind, 5 | 1009),
                             "fixture kind {kind} must not drop ({reason:?})"
                         );
-                        assert_eq!(reason, DropReason::Unverifiable);
+                        assert_eq!(reason, DropReason::Malformed);
                     }
                 }
             }
@@ -637,5 +873,144 @@ mod tests {
         for kind in [5, 7, 9, 447, 1009, 4891] {
             assert!(seen.contains_key(&kind), "fixture covers kind {kind}");
         }
+    }
+
+    /// `resolve` against a stub index: edit/deletion/unreact authorization,
+    /// wrong-kind and foreign-author refusals, holds while a target is
+    /// unknown, and the honoured-subset rule at a final attempt.
+    #[test]
+    fn resolve_table() {
+        let alice = AccountId([1; 32]);
+        let bob = AccountId([2; 32]);
+        let index: std::collections::HashMap<EventId, TargetFacts> = [
+            (
+                id(0x01),
+                TargetFacts {
+                    author: alice,
+                    kind: 9,
+                },
+            ),
+            (
+                id(0x02),
+                TargetFacts {
+                    author: bob,
+                    kind: 9,
+                },
+            ),
+            (
+                id(0x03),
+                TargetFacts {
+                    author: alice,
+                    kind: 7,
+                },
+            ),
+            (
+                id(0x04),
+                TargetFacts {
+                    author: alice,
+                    kind: 1009,
+                },
+            ),
+            (
+                id(0x05),
+                TargetFacts {
+                    author: alice,
+                    kind: 1200,
+                },
+            ),
+        ]
+        .into_iter()
+        .collect();
+        let lookup = |target: &EventId| index.get(target).copied();
+        let edit = |target| Modifier::Edit {
+            target,
+            content: "new".to_owned(),
+        };
+        let delete = |targets| Modifier::Delete { targets };
+
+        // Edit: authorized own-chat target delivers the content.
+        assert!(matches!(
+            resolve(&edit(id(0x01)), &alice, lookup, false),
+            Resolution::Deliver(Semantics::Edit { target, ref content })
+                if target == id(0x01) && content == "new"
+        ));
+        // Foreign author and wrong-kind targets are unauthorized.
+        for modifier in [
+            edit(id(0x02)),
+            edit(id(0x05)),
+            edit(id(0x03)),
+            edit(id(0x04)),
+        ] {
+            assert!(matches!(
+                resolve(&modifier, &alice, lookup, false),
+                Resolution::Drop(DropReason::Unauthorized)
+            ));
+        }
+        // Unknown target: hold, then `unverifiable` at the final attempt.
+        assert!(matches!(
+            resolve(&edit(id(0xaa)), &alice, lookup, false),
+            Resolution::Hold
+        ));
+        assert!(matches!(
+            resolve(&edit(id(0xaa)), &alice, lookup, true),
+            Resolution::Drop(DropReason::Unverifiable)
+        ));
+
+        // Delete: all-reaction honoured set -> Unreact; any non-reaction ->
+        // Deletion; a held edit voids as an honoured kind-1009 target.
+        assert!(matches!(
+            resolve(&delete(vec![id(0x03)]), &alice, lookup, false),
+            Resolution::Deliver(Semantics::Unreact { ref reactions })
+                if *reactions == vec![id(0x03)]
+        ));
+        assert!(matches!(
+            resolve(&delete(vec![id(0x01)]), &alice, lookup, false),
+            Resolution::Deliver(Semantics::Deletion { ref targets })
+                if *targets == vec![id(0x01)]
+        ));
+        assert!(matches!(
+            resolve(&delete(vec![id(0x04)]), &alice, lookup, false),
+            Resolution::Deliver(Semantics::Deletion { ref targets })
+                if *targets == vec![id(0x04)]
+        ));
+        // Mixed honoured set (reaction + edit) is a Deletion in tag order.
+        assert!(matches!(
+            resolve(&delete(vec![id(0x03), id(0x04)]), &alice, lookup, false),
+            Resolution::Deliver(Semantics::Deletion { ref targets })
+                if *targets == vec![id(0x03), id(0x04)]
+        ));
+        // A foreign target alone fails -> unauthorized.
+        assert!(matches!(
+            resolve(&delete(vec![id(0x02)]), &alice, lookup, false),
+            Resolution::Drop(DropReason::Unauthorized)
+        ));
+        // A foreign target mixed with honoured ones is dropped from the
+        // honoured set — the honoured subset still delivers.
+        assert!(matches!(
+            resolve(&delete(vec![id(0x02), id(0x03)]), &alice, lookup, false),
+            Resolution::Deliver(Semantics::Unreact { ref reactions })
+                if *reactions == vec![id(0x03)]
+        ));
+        // An unknown target holds the whole modifier; at a final attempt
+        // the honoured subset delivers and the unknown one is omitted.
+        assert!(matches!(
+            resolve(&delete(vec![id(0x03), id(0xaa)]), &alice, lookup, false),
+            Resolution::Hold
+        ));
+        assert!(matches!(
+            resolve(&delete(vec![id(0xaa), id(0x03)]), &alice, lookup, true),
+            Resolution::Deliver(Semantics::Unreact { ref reactions })
+                if *reactions == vec![id(0x03)]
+        ));
+        // Honoured empty at a final attempt: `unverifiable` when only
+        // unknown, `unauthorized` when a known target failed.
+        assert!(matches!(
+            resolve(&delete(vec![id(0xaa)]), &alice, lookup, true),
+            Resolution::Drop(DropReason::Unverifiable)
+        ));
+        assert!(matches!(
+            resolve(&delete(vec![id(0xaa), id(0x02)]), &alice, lookup, true),
+            Resolution::Drop(DropReason::Unauthorized)
+        ));
     }
 }

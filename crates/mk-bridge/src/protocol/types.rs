@@ -617,6 +617,29 @@ pub enum Semantics {
         #[serde(with = "hex_str")]
         target: [u8; 32],
     },
+    /// A kind-1009 edit the index authorized: `content` replaces
+    /// `target`'s body.
+    Edit {
+        /// The edited message's inner event id, hex.
+        #[serde(with = "hex_str")]
+        target: [u8; 32],
+        /// The replacement body.
+        content: String,
+    },
+    /// A kind-5 delete the index authorized whose honoured targets are
+    /// not all reactions.
+    Deletion {
+        /// The honoured targets' inner event ids, hex each, tag order.
+        #[serde(with = "hex_str_seq")]
+        targets: Vec<[u8; 32]>,
+    },
+    /// A kind-5 delete the index authorized whose honoured targets are
+    /// all reactions — a withdraw-own-reactions.
+    Unreact {
+        /// The honoured reaction ids, hex each, tag order.
+        #[serde(with = "hex_str_seq")]
+        reactions: Vec<[u8; 32]>,
+    },
     /// Every other kind, delivered untyped.
     Other,
     /// An `mk-core` semantics this wire version does not know.
@@ -634,6 +657,16 @@ impl From<core::Semantics> for Semantics {
                 emoji,
             },
             core::Semantics::Removal { target } => Self::Removal { target: target.0 },
+            core::Semantics::Edit { target, content } => Self::Edit {
+                target: target.0,
+                content,
+            },
+            core::Semantics::Deletion { targets } => Self::Deletion {
+                targets: targets.into_iter().map(|id| id.0).collect(),
+            },
+            core::Semantics::Unreact { reactions } => Self::Unreact {
+                reactions: reactions.into_iter().map(|id| id.0).collect(),
+            },
             core::Semantics::Other => Self::Other,
             // `Semantics` is `#[non_exhaustive]`.
             _ => Self::Unmapped,
@@ -1213,31 +1246,9 @@ pub struct AgentStreamAnchor {
     /// The prompt message this stream answers, when tagged, hex.
     #[serde(with = "opt_hex32")]
     pub parent: Option<[u8; 32]>,
-}
-
-impl AgentStreamAnchor {
-    /// `mk-core`'s anchor type lives in a private module (reachable only as
-    /// the `AgentStreamStarted` payload), so the conversion is field-based
-    /// rather than a named `From` impl.
-    fn from_fields(
-        id: String,
-        sender: core::AccountId,
-        created_at: u64,
-        epoch: u64,
-        transport_id: core::EventId,
-        stream_id: [u8; 32],
-        parent: Option<core::EventId>,
-    ) -> Self {
-        Self {
-            id,
-            sender: sender.0,
-            created_at,
-            epoch,
-            transport_id: transport_id.0,
-            stream_id,
-            parent: parent.map(|parent_id| parent_id.0),
-        }
-    }
+    /// Source-epoch retention expiry, decimal string or `null`.
+    #[serde(with = "opt_u64_str")]
+    pub expires_at: Option<u64>,
 }
 
 /// The state delta a `GroupStateChanged` event carries.
@@ -1359,6 +1370,19 @@ pub enum SessionEvent {
         /// Source epoch (decimal string).
         #[serde(with = "u64_str")]
         epoch: u64,
+    },
+    /// A delivered message's retention expiry fired inside `tick`; the
+    /// host should retire its copy.
+    MessageExpired {
+        /// The group, hex.
+        #[serde(with = "hex_bytes")]
+        group: Vec<u8>,
+        /// Inner event id of the expired message, hex.
+        #[serde(with = "hex_str")]
+        message: [u8; 32],
+        /// Transport event id of the expired message, hex.
+        #[serde(with = "hex_str")]
+        transport_id: [u8; 32],
     },
     /// This device created a group.
     GroupCreated {
@@ -1513,15 +1537,19 @@ impl From<core::SessionEvent> for SessionEvent {
             },
             core::SessionEvent::AgentStreamStarted { group, start } => Self::AgentStreamStarted {
                 group: group.0,
-                start: AgentStreamAnchor::from_fields(
-                    start.id,
-                    start.sender,
-                    start.created_at,
-                    start.epoch,
-                    start.transport_id,
-                    start.stream_id,
-                    start.parent,
-                ),
+                // `mk-core`'s anchor type lives in a private module (reachable
+                // only as the `AgentStreamStarted` payload), so the conversion
+                // is field-based rather than a named `From` impl.
+                start: AgentStreamAnchor {
+                    id: start.id,
+                    sender: start.sender.0,
+                    created_at: start.created_at,
+                    epoch: start.epoch,
+                    transport_id: start.transport_id.0,
+                    stream_id: start.stream_id,
+                    parent: start.parent.map(|id| id.0),
+                    expires_at: start.expires_at,
+                },
             },
             core::SessionEvent::MessageInvalidated {
                 group,
@@ -1531,6 +1559,15 @@ impl From<core::SessionEvent> for SessionEvent {
                 group: group.0,
                 message: message.0,
                 epoch,
+            },
+            core::SessionEvent::MessageExpired {
+                group,
+                message,
+                transport_id,
+            } => Self::MessageExpired {
+                group: group.0,
+                message: message.0,
+                transport_id: transport_id.0,
             },
             core::SessionEvent::GroupCreated { group } => Self::GroupCreated { group: group.0 },
             core::SessionEvent::GroupJoined { group } => Self::GroupJoined { group: group.0 },
@@ -1592,6 +1629,16 @@ impl From<core::SessionEvent> for SessionEvent {
                 intent_kind,
                 reason,
             },
+            other => Self::from_recovery(other),
+        }
+    }
+}
+
+impl SessionEvent {
+    /// The recovery/lifecycle half of the `core::SessionEvent` mapping, split
+    /// out of `From::from` to keep each match under the line limit.
+    fn from_recovery(event: core::SessionEvent) -> Self {
+        match event {
             core::SessionEvent::HydrationQuarantined { group } => {
                 Self::HydrationQuarantined { group: group.0 }
             }

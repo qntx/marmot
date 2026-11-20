@@ -36,7 +36,7 @@
     )
 )]
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
 use cgka_engine::account_identity_proof::{
@@ -90,6 +90,7 @@ use zeroize::Zeroizing;
 
 use crate::agent_stream::{AgentStreamPolicy, StreamRoles};
 use crate::clock::{Clock, EngineConvergenceClock, EngineMaintenanceRandom, EngineWallClock, Time};
+use crate::delivered::{self, ExpiryHeap, HeldModifier};
 use crate::events::{InputOutcome, InputReport, SessionEvent, input_outcome, session_event};
 use crate::key_package::{self, KeyPackageInfo, is_valid_client_name};
 use crate::kv::{CommitSeq, KvHost};
@@ -100,6 +101,7 @@ use crate::outbox::{
     Outbound, OutboundPurpose, PubTargetStatus, PublishResolution, RelayResult, RelayStatus,
     SessionPubPurpose, SessionPublication,
 };
+use crate::pacing::PacingMap;
 use crate::provider::KvStorageProvider;
 use crate::semantics::{self, MessageIntent};
 use crate::signer::{
@@ -348,6 +350,10 @@ impl PendingProof {
             handed: HashSet::new(),
             held: HashMap::new(),
             resolutions: Vec::new(),
+            held_modifiers: HashMap::new(),
+            tick_events: Vec::new(),
+            expiry_heap: None,
+            pacing: HashMap::new(),
         };
         open_session(session).map_err(|kind| ProofRejected {
             pending: Box::new(self),
@@ -494,6 +500,12 @@ pub enum SessionError {
     /// set.
     #[error("missing required capabilities")]
     MissingRequiredCapabilities,
+    /// A send was refused because the group's per-second pacing is already
+    /// as far ahead of the clock as the forward-skew bound allows. Typed
+    /// and retryable: nothing was staged, no KV batch was written, no
+    /// in-memory state changed — retry once the clock advances.
+    #[error("send rate exceeded")]
+    SendRateExceeded,
     /// The group does not require `marmot.group.lifecycle.v1`; call
     /// [`Session::enable_disbanding`] first.
     #[error("disbanding not enabled")]
@@ -851,7 +863,7 @@ pub struct GroupAvatar {
 /// exactly one writer, which is also the argument that makes engine
 /// `with_read_snapshot` scopes consistent.
 pub struct Session {
-    provider: KvStorageProvider,
+    pub(crate) provider: KvStorageProvider,
     engine: Engine<KvStorageProvider>,
     signer: Arc<dyn AccountSigner>,
     clock: Arc<dyn Clock>,
@@ -878,6 +890,18 @@ pub struct Session {
     /// armed around each kind-1059 ingest so a refused/failed unwrap can
     /// roll the span back instead of poisoning it as a permanent rejection.
     signer_latch: Arc<SignerLatch>,
+    /// Held kind 1009/5 modifiers per group, arrival order. Memory-only:
+    /// an unacked pending row re-presents the modifier after restart, so
+    /// holds are crash-safe without a durable table. Keyed by group bytes.
+    pub(crate) held_modifiers: HashMap<Vec<u8>, VecDeque<HeldModifier>>,
+    /// Events `tick` produced (hold expiries, retention sweeps) for the
+    /// next `drain_events`.
+    pub(crate) tick_events: Vec<SessionEvent>,
+    /// Lazily-built min-heap over index-row expiries — `None` until the
+    /// first `tick` seeds it from `Table::DeliveredMessage`.
+    pub(crate) expiry_heap: Option<ExpiryHeap>,
+    /// Per-group send-pacing allocator state, keyed by group bytes.
+    pub(crate) pacing: PacingMap,
 }
 
 impl std::fmt::Debug for Session {
@@ -960,6 +984,10 @@ impl Session {
                 handed: HashSet::new(),
                 held: HashMap::new(),
                 resolutions: Vec::new(),
+                held_modifiers: HashMap::new(),
+                tick_events: Vec::new(),
+                expiry_heap: None,
+                pacing: HashMap::new(),
             })
             .map(|session| Opened::Ready(Box::new(session)))
             .map_err(|kind| OpenError::Engine { kind }),
@@ -978,7 +1006,7 @@ impl Session {
         self.clock.now()
     }
 
-    fn now_ms(&self) -> u64 {
+    pub(crate) fn now_ms(&self) -> u64 {
         self.clock.now().unix_ms
     }
 
@@ -2052,6 +2080,7 @@ impl Session {
             .provider
             .queued_intent_links_for_group(&group_id)
             .map_err(SessionError::Storage)?;
+        self.drop_group_memory(group);
         self.provider
             .store()
             .transact(|| -> Result<(), StorageError> {
@@ -2138,7 +2167,11 @@ impl Session {
     }
 
     /// Build the inner event, send it, and wrap the outcome with the
-    /// host-rendered [`UnsignedEvent`].
+    /// host-rendered [`UnsignedEvent`]. The `created_at` second comes from
+    /// the pacing allocator — allocated only after the callers' input
+    /// validation, before the event is built — and a sent message records
+    /// its own delivered-index row so a sibling device can authorize a
+    /// modifier against it.
     async fn send_app_event(
         &mut self,
         group: &GroupId,
@@ -2147,9 +2180,10 @@ impl Session {
         content: String,
         expected_epoch: Option<EpochPin>,
     ) -> Result<SentMessage, SessionError> {
+        let created_at = self.allocate_send_second(&engine_gid(group))?;
         let app_event = cgka_traits::app_event::MarmotAppEvent::new(
             self.account().to_hex(),
-            self.clock.now().unix_ms / 1_000,
+            created_at,
             kind,
             tags,
             content,
@@ -2167,7 +2201,24 @@ impl Session {
             })
             .await
             .map_err(session_engine_error)?;
+        let sent = if let SendResult::ApplicationMessage { msg, retention, .. } = &result {
+            Some((msg.id.clone(), retention.expires_at))
+        } else {
+            None
+        };
         let outcome = self.finish_send(result)?;
+        if let Some((message_id, expires_at)) = sent {
+            let transport_id: [u8; 32] = message_id
+                .as_slice()
+                .try_into()
+                .map_err(|_| SessionError::Internal("transport id"))?;
+            let store = self.provider.store().clone();
+            store
+                .transact(|| {
+                    self.index_own_send(group, &message.id(), kind, transport_id, expires_at)
+                })
+                .map_err(SessionError::Storage)?;
+        }
         Ok(SentMessage { outcome, message })
     }
 
@@ -2357,9 +2408,10 @@ impl Session {
                 .to_imeta(),
             );
         }
+        let created_at = self.allocate_send_second(&group_id)?;
         let app_event = cgka_traits::app_event::MarmotAppEvent::new(
             self.account().to_hex(),
-            self.clock.now().unix_ms / 1_000,
+            created_at,
             MARMOT_APP_EVENT_KIND_CHAT,
             tags,
             message.caption,
@@ -2386,19 +2438,30 @@ impl Session {
             }
             Err(error) => return Err(session_engine_error(error)),
         };
-        let sent_message_id = if let SendResult::ApplicationMessage { msg, .. } = &result {
-            Some(msg.id.clone())
+        let sent = if let SendResult::ApplicationMessage { msg, retention, .. } = &result {
+            Some((msg.id.clone(), retention.expires_at))
         } else {
             None
         };
         let outcome = self.finish_send(result)?;
-        if let Some(message_id) = sent_message_id {
+        if let Some((message_id, expires_at)) = sent {
             let secret = self.media_secret(&group_id)?;
-            self.provider
-                .store()
+            let transport_id: [u8; 32] = message_id
+                .as_slice()
+                .try_into()
+                .map_err(|_| SessionError::Internal("transport id"))?;
+            let store = self.provider.store().clone();
+            store
                 .transact(|| -> Result<(), StorageError> {
                     self.provider
-                        .put_media_secret(&group_id, &message_id, &secret[..])
+                        .put_media_secret(&group_id, &message_id, &secret[..])?;
+                    self.index_own_send(
+                        group,
+                        &unsigned.id(),
+                        MARMOT_APP_EVENT_KIND_CHAT,
+                        transport_id,
+                        expires_at,
+                    )
                 })
                 .map_err(SessionError::Storage)?;
         }
@@ -2950,6 +3013,11 @@ impl Session {
         }
         // Fold each live, not-handed item's retry deadline into the wake.
         fold(self.retry_wake()?, &mut next);
+        // Held modifiers past their window resolve finally and expired
+        // index rows sweep (bounded), before `drive`: the produced events
+        // surface on the next `drain_events` and the earliest hold/sweep
+        // deadline folds into the wake.
+        fold(self.process_expiry_and_holds(self.now_ms())?, &mut next);
         self.drive().await?;
         Ok(TickReport { next_wake_ms: next })
     }
@@ -2967,12 +3035,20 @@ impl Session {
     /// between drain and ack replays both rather than leaving a message the
     /// host can never decrypt.
     ///
+    /// The delivered index lands in the same unit: every surfaced
+    /// `MessageReceived`/`AgentStreamStarted` writes its
+    /// `DeliveredMessage` row; a kind 1009/5 modifier resolves against it —
+    /// held when a target is still unknown, released when every target is
+    /// indexed — and an invalidation removes the row its transport id
+    /// maps to.
+    ///
     /// # Errors
     /// [`SessionError`] for storage failures — the events stay drained but
-    /// their secret rows were not persisted (the unit commits atomically or
-    /// not at all).
+    /// their rows were not persisted (the unit commits atomically or not at
+    /// all).
     pub fn drain_events(&mut self) -> Result<Vec<SessionEvent>, SessionError> {
         let now_secs = self.clock.now().unix_ms / 1_000;
+        let now_ms = self.now_ms();
         let mapped: Vec<crate::events::MappedEvent> = self
             .engine
             .drain_events()
@@ -2983,16 +3059,80 @@ impl Session {
             .iter()
             .filter_map(|item| item.drop_pending.clone())
             .collect();
-        self.provider
-            .store()
-            .transact(|| -> Result<(), StorageError> {
+        let store = self.provider.store().clone();
+        let mut out = store
+            .transact(|| -> Result<Vec<SessionEvent>, StorageError> {
                 self.persist_media_secret_effects(&mapped)?;
-                self.provider.delete_pending_application_events(&dropped)
+                self.provider.delete_pending_application_events(&dropped)?;
+                let mut out = Vec::new();
+                for item in mapped {
+                    self.process_mapped(item, now_ms, &mut out)?;
+                }
+                Ok(out)
             })
             .map_err(SessionError::Storage)?;
-        let mut out: Vec<SessionEvent> = mapped.into_iter().map(|item| item.event).collect();
+        out.extend(std::mem::take(&mut self.tick_events));
         out.extend(std::mem::take(&mut self.resolutions));
         Ok(out)
+    }
+
+    /// One mapped event's index/resolve/invalidation bookkeeping plus the
+    /// event the app sees. Runs inside [`Self::drain_events`]' unit.
+    fn process_mapped(
+        &mut self,
+        item: crate::events::MappedEvent,
+        now_ms: u64,
+        out: &mut Vec<SessionEvent>,
+    ) -> Result<(), StorageError> {
+        match (item.event, item.modifier) {
+            (SessionEvent::MessageReceived { group, message }, Some(modifier)) => self
+                .resolve_modifier(
+                    &group,
+                    HeldModifier {
+                        message,
+                        modifier,
+                        deadline_ms: now_ms.saturating_add(delivered::HOLD_WINDOW_MS),
+                    },
+                    false,
+                    out,
+                ),
+            (SessionEvent::MessageReceived { group, message }, None) => {
+                self.index_received(&group, &message)?;
+                out.push(SessionEvent::MessageReceived {
+                    group: group.clone(),
+                    message,
+                });
+                self.release_held(&group, out)
+            }
+            (SessionEvent::AgentStreamStarted { group, start }, _) => {
+                self.index_anchor(&group, &start)?;
+                out.push(SessionEvent::AgentStreamStarted {
+                    group: group.clone(),
+                    start,
+                });
+                self.release_held(&group, out)
+            }
+            (
+                SessionEvent::MessageInvalidated {
+                    group,
+                    message,
+                    epoch,
+                },
+                _,
+            ) => {
+                self.invalidate_transport(&group, &message)?;
+                out.push(SessionEvent::MessageInvalidated {
+                    group,
+                    message,
+                    epoch,
+                });
+                Ok(())
+            }
+            (event, _) => {
+                out.push(event);
+                Ok(())
+            }
+        }
     }
 
     /// Apply one drain's media-secret writes and deletes as the single

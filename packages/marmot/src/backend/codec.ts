@@ -603,7 +603,7 @@ export function encodeSentEvent(event: SentEvent): Json {
   };
 }
 
-const SEMANTICS_KEYS = ["type", "reply_to", "target", "emoji"];
+const SEMANTICS_KEYS = ["type", "reply_to", "target", "emoji", "content", "targets", "reactions"];
 
 export function decodeSemantics(value: unknown, path = "semantics"): Semantics {
   const o = rec(value, path, SEMANTICS_KEYS);
@@ -619,6 +619,22 @@ export function decodeSemantics(value: unknown, path = "semantics"): Semantics {
       };
     case "removal":
       return { type, target: hex32(field(o, "target", path), `${path}.target`) };
+    case "edit":
+      return {
+        type,
+        target: hex32(field(o, "target", path), `${path}.target`),
+        content: str(field(o, "content", path), `${path}.content`),
+      };
+    case "deletion":
+      return {
+        type,
+        targets: arr(field(o, "targets", path), `${path}.targets`, hex32),
+      };
+    case "unreact":
+      return {
+        type,
+        reactions: arr(field(o, "reactions", path), `${path}.reactions`, hex32),
+      };
     case "other":
     case "unmapped":
       return { type };
@@ -636,6 +652,13 @@ export function encodeSemantics(semantics: Semantics): Json {
       emoji: semantics.emoji,
     }),
     removal: (semantics) => ({ type: "removal", target: semantics.target }),
+    edit: (semantics) => ({
+      type: "edit",
+      target: semantics.target,
+      content: semantics.content,
+    }),
+    deletion: (semantics) => ({ type: "deletion", targets: semantics.targets }),
+    unreact: (semantics) => ({ type: "unreact", reactions: semantics.reactions }),
     other: (semantics) => ({ type: semantics.type }),
     unmapped: (semantics) => ({ type: semantics.type }),
   });
@@ -851,7 +874,16 @@ export function encodeReceivedMessage(message: ReceivedMessage): Json {
   };
 }
 
-const ANCHOR_KEYS = ["id", "sender", "created_at", "epoch", "transport_id", "stream_id", "parent"];
+const ANCHOR_KEYS = [
+  "id",
+  "sender",
+  "created_at",
+  "epoch",
+  "transport_id",
+  "stream_id",
+  "parent",
+  "expires_at",
+];
 
 export function decodeAgentStreamAnchor(value: unknown, path = "start"): AgentStreamAnchor {
   const o = rec(value, path, ANCHOR_KEYS);
@@ -863,6 +895,7 @@ export function decodeAgentStreamAnchor(value: unknown, path = "start"): AgentSt
     transportId: hex32(field(o, "transport_id", path), `${path}.transport_id`),
     streamId: hex32(field(o, "stream_id", path), `${path}.stream_id`),
     parent: optHex32(o["parent"], `${path}.parent`),
+    expiresAt: optU64(o["expires_at"], `${path}.expires_at`),
   };
 }
 
@@ -875,6 +908,7 @@ export function encodeAgentStreamAnchor(anchor: AgentStreamAnchor): Json {
     transport_id: anchor.transportId,
     stream_id: anchor.streamId,
     parent: anchor.parent ?? null,
+    expires_at: anchor.expiresAt === undefined ? null : anchor.expiresAt.toString(),
   };
 }
 
@@ -954,6 +988,7 @@ const SESSION_EVENT_KEYS = [
   "outbound",
   "resolution",
   "row_id",
+  "transport_id",
 ];
 
 export function decodeSessionEvent(value: unknown, path = "event"): SessionEvent {
@@ -979,6 +1014,13 @@ export function decodeSessionEvent(value: unknown, path = "event"): SessionEvent
         group: group(path),
         message: hex32(field(o, "message", path), `${path}.message`),
         epoch: u64(field(o, "epoch", path), `${path}.epoch`),
+      };
+    case "message_expired":
+      return {
+        type,
+        group: group(path),
+        message: hex32(field(o, "message", path), `${path}.message`),
+        transportId: hex32(field(o, "transport_id", path), `${path}.transport_id`),
       };
     case "group_created":
     case "group_joined":
@@ -1068,6 +1110,12 @@ export function encodeSessionEvent(event: SessionEvent): Json {
       group: event.group,
       message: event.message,
       epoch: event.epoch.toString(),
+    }),
+    message_expired: (event) => ({
+      type: "message_expired",
+      group: event.group,
+      message: event.message,
+      transport_id: event.transportId,
     }),
     group_created: (event) => ({ type: event.type, group: event.group }),
     group_joined: (event) => ({ type: event.type, group: event.group }),

@@ -164,6 +164,9 @@ pub enum BridgeError {
     DisbandingNotEnabled,
     /// A disband request or disband candidate is in progress for the group.
     GroupDisbanding,
+    /// The group's send pacing refused the send; retry after the clock
+    /// advances.
+    SendRateExceeded,
     /// The group carries no encrypted-media component.
     MediaNotEnabled,
     /// The pinned media epoch no longer matches the group's epoch.
@@ -232,6 +235,7 @@ impl fmt::Display for BridgeError {
             Self::ReservedAppEvent => f.write_str("reserved app event surface"),
             Self::DisbandingNotEnabled => f.write_str("disbanding not enabled"),
             Self::GroupDisbanding => f.write_str("group disbanding in progress"),
+            Self::SendRateExceeded => f.write_str("send rate exceeded"),
             Self::MediaNotEnabled => f.write_str("encrypted media not enabled"),
             Self::MediaEpochStale => f.write_str("media epoch stale"),
             Self::MediaEpochUnsettled => f.write_str("media epoch unsettled"),
@@ -287,6 +291,7 @@ pub(crate) fn session_error(error: &SessionError) -> BridgeError {
         SessionError::ReservedAppEvent => BridgeError::ReservedAppEvent,
         SessionError::DisbandingNotEnabled => BridgeError::DisbandingNotEnabled,
         SessionError::GroupDisbanding => BridgeError::GroupDisbanding,
+        SessionError::SendRateExceeded => BridgeError::SendRateExceeded,
         SessionError::MediaNotEnabled => BridgeError::MediaNotEnabled,
         SessionError::MediaEpochStale => BridgeError::MediaEpochStale,
         SessionError::MediaEpochUnsettled => BridgeError::MediaEpochUnsettled,

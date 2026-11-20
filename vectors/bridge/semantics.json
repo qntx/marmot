@@ -3,6 +3,17 @@
     "reply_to": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     "type": "chat"
   },
+  "deletion": {
+    "targets": [
+      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    ],
+    "type": "deletion"
+  },
+  "edit": {
+    "content": "edited",
+    "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "type": "edit"
+  },
   "other": {
     "type": "other"
   },
@@ -17,5 +28,11 @@
   },
   "unmapped": {
     "type": "unmapped"
+  },
+  "unreact": {
+    "reactions": [
+      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    ],
+    "type": "unreact"
   }
 }
