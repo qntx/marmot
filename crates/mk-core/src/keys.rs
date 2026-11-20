@@ -108,6 +108,15 @@ pub(crate) enum Table {
     /// item carrying `{ failures, not_before_ms }` — the session's
     /// exponential-backoff deadline for re-offering it to the host.
     OutboundRetry = 39,
+    /// Session-owned delivered-message index: one row per delivered (or
+    /// own-sent) application message, keyed `group/inner_event_id`, carrying
+    /// `{author, kind, transport_id, expires_at}` — durable modifier
+    /// authorization, target lookup and retention-sweep input.
+    DeliveredMessage = 40,
+    /// Session-owned send pacing: one row per group holding the last
+    /// `created_at` second the allocator issued — a restarted session treats
+    /// that second as full rather than risking a duplicate.
+    SendPacing = 41,
 }
 
 /// Meta row keys inside [`Table::Meta`].
@@ -121,7 +130,10 @@ pub(crate) const META_PENDING_HIGH_WATER: &[u8] = b"pending-ref-high-water";
 /// older or newer stores refuse to open (no migration code by design).
 /// v4: `Table::Group` rows are mk-core-owned `GroupRow` documents whose byte
 /// fields are base64, not the upstream `Group` decimal-array encoding.
-pub(crate) const SCHEMA_VERSION: u32 = 4;
+/// v5: `Table::DeliveredMessage` (per-message author/kind/transport/expiry
+/// index) and `Table::SendPacing` (per-group last allocated `created_at`
+/// second).
+pub(crate) const SCHEMA_VERSION: u32 = 5;
 
 /// Whether `key` names a row the `OpenMLS` store owns — the write set the
 /// engine's write generation counts (provider.rs `mls_write_generation`).

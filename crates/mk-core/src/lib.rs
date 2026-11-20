@@ -47,6 +47,7 @@
 
 pub mod agent_stream;
 mod clock;
+mod delivered;
 mod error;
 mod events;
 pub mod key_package;
@@ -55,6 +56,7 @@ pub mod kv;
 pub mod media;
 mod mls;
 mod outbox;
+mod pacing;
 mod provider;
 mod semantics;
 mod ser;
