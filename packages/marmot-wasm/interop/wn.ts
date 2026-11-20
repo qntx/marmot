@@ -47,8 +47,6 @@ const RELAY_LIST_KIND = 10002;
 const KEY_PACKAGE_KIND = 30443;
 const INBOX_RELAYS_KIND = 10050;
 const CHAT_KIND = 9;
-/** Wn's marmot-push-v1 notification kind — delivered as `other`, not an app surface event. */
-const PUSH_KIND = 447n;
 const WN_MESSAGE_LIMIT = 600;
 
 const startMs = Date.now();
@@ -704,29 +702,21 @@ async function run(): Promise<void> {
       return undefined;
     };
 
-    /** `action` must yield exactly one `unverifiable` drop for `gid` and no new message. */
-    async function expectUnverifiableDrop(
-      gid: string,
-      action: () => Promise<unknown>,
-    ): Promise<void> {
-      const dropsBefore = drops.filter((d) => d.group === gid).length;
-      const msgsBefore = received.filter(
-        (e) => e.group === gid && e.message.kind !== PUSH_KIND,
+    /** `unauthorized`/`unverifiable` drops collected for `gid` since `since` (a prior count). */
+    const badDrops = (gid: string): number =>
+      drops.filter(
+        (d) => d.group === gid && (d.reason === "unauthorized" || d.reason === "unverifiable"),
       ).length;
+
+    /** After `action` + settle, `gid` must show no new unauthorized/unverifiable drop. */
+    async function expectClean(gid: string, action: () => Promise<unknown>): Promise<void> {
+      const before = badDrops(gid);
       await action();
-      await waitFor(
-        () => drops.some((d) => d.group === gid && d.reason === "unverifiable") || undefined,
-        `unverifiable drop in ${gid.slice(0, 8)}`,
-      );
       await sleep(2000);
-      const newDrops = drops.filter((d) => d.group === gid).length - dropsBefore;
-      if (newDrops !== 1) {
-        throw new Error(`expected exactly 1 new drop for the group, saw ${newDrops}`);
-      }
-      const newMsgs =
-        received.filter((e) => e.group === gid && e.message.kind !== PUSH_KIND).length - msgsBefore;
-      if (newMsgs !== 0) {
-        throw new Error(`dropped event still produced ${newMsgs} onMessages entr(ies)`);
+      if (badDrops(gid) !== before) {
+        throw new Error(
+          `unexpected unauthorized/unverifiable drop(s) in ${gid.slice(0, 8)}: ${JSON.stringify(drops.filter((d) => d.group === gid))}`,
+        );
       }
     }
 
@@ -829,8 +819,8 @@ async function run(): Promise<void> {
       }
     });
 
-    // S6 — unreact: ours applies on wn's side; wn's is stopped at our decoder.
-    await scenario("S6 unreact ours applies, wn's dropped", async () => {
+    // S6 — unreact: ours applies on wn's side; wn's arrives as unreact{reactions:[its own id]}.
+    await scenario("S6 unreact both directions", async () => {
       await needGroups();
       const wnText = `s6-wn${stamp()}`;
       await wn(rig, ["messages", "send", g.w, wnText], rig.wnNpub);
@@ -851,7 +841,7 @@ async function run(): Promise<void> {
 
       // wn can only retract a live reaction of its own: give it one first.
       await wn(rig, ["messages", "react", g.w, wnMsg.message.id, "🔥"], rig.wnNpub);
-      await waitFor(
+      const wnReaction = await waitFor(
         () =>
           received.find(
             (entry) =>
@@ -861,13 +851,34 @@ async function run(): Promise<void> {
           ),
         "we receive wn's reaction to retract",
       );
-      await expectUnverifiableDrop(g.w, async () => {
+      let unreact: ClientMessage | undefined;
+      await expectClean(g.w, async () => {
         await wn(rig, ["messages", "unreact", g.w, wnMsg.message.id], rig.wnNpub);
+        unreact = await waitFor(
+          () =>
+            received.find(
+              (entry) => entry.group === g.w && entry.message.semantics.type === "unreact",
+            ),
+          "we receive wn's unreact",
+        );
       });
+      if (unreact === undefined) {
+        throw new Error("wn unreact was not received");
+      }
+      const unreactSem = unreact.message.semantics;
+      if (
+        unreactSem.type !== "unreact" ||
+        unreactSem.reactions.length !== 1 ||
+        unreactSem.reactions[0] !== wnReaction.message.id
+      ) {
+        throw new Error(
+          `unreact semantics ${JSON.stringify(unreactSem)} != [${wnReaction.message.id}]`,
+        );
+      }
     });
 
-    // S7 — edit: ours applies on wn's side; wn's edit is dropped unverifiable.
-    await scenario("S7 edit ours applies, wn's dropped", async () => {
+    // S7 — edit: ours applies on wn's side; wn's arrives as edit{target, content}.
+    await scenario("S7 edit both directions", async () => {
       await needGroups();
       const ourText = `s7-us${stamp()}`;
       const ourMsg = await client.sendChat(g.w, ourText);
@@ -889,13 +900,31 @@ async function run(): Promise<void> {
       const wnText = `s7-wn${stamp()}`;
       await wn(rig, ["messages", "send", g.w, wnText], rig.wnNpub);
       const wnMsg = await waitFor(() => findMsg(g.w, wnText), `we receive ${wnText}`);
-      await expectUnverifiableDrop(g.w, async () => {
-        await wn(
-          rig,
-          ["messages", "edit", g.w, wnMsg.message.id, `s7-wn-ed${stamp()}`],
-          rig.wnNpub,
+      const wnEdited = `s7-wn-ed${stamp()}`;
+      let wnEdit: ClientMessage | undefined;
+      await expectClean(g.w, async () => {
+        await wn(rig, ["messages", "edit", g.w, wnMsg.message.id, wnEdited], rig.wnNpub);
+        wnEdit = await waitFor(
+          () =>
+            received.find(
+              (entry) =>
+                entry.group === g.w &&
+                entry.message.semantics.type === "edit" &&
+                (entry.message.semantics as { target?: string }).target === wnMsg.message.id,
+            ),
+          "we receive wn's edit",
         );
       });
+      if (wnEdit === undefined) {
+        throw new Error("wn edit was not received");
+      }
+      const editSem = wnEdit.message.semantics;
+      if (editSem.type !== "edit" || editSem.target !== wnMsg.message.id) {
+        throw new Error(`edit semantics ${JSON.stringify(editSem)} != target ${wnMsg.message.id}`);
+      }
+      if (editSem.content !== wnEdited) {
+        throw new Error(`edit content ${JSON.stringify(editSem.content)} != ${wnEdited}`);
+      }
     });
 
     // S8 — deletes/removals in every authority class.
@@ -951,11 +980,12 @@ async function run(): Promise<void> {
         throw new Error(`removal semantics ${JSON.stringify(sem)} != target ${target.message.id}`);
       }
 
-      // wn non-admin kind-5 delete of its own message in our group -> dropped.
+      // wn non-admin kind-5 delete of its own message in our group -> deletion{targets:[id]}.
       const wnOwn = `s8-wnown${stamp()}`;
       await wn(rig, ["messages", "send", g.u, wnOwn], rig.wnNpub);
       const wnOwnMsg = await waitFor(() => findMsg(g.u, wnOwn), `we receive ${wnOwn}`);
-      await expectUnverifiableDrop(g.u, async () => {
+      let wnDelete: ClientMessage | undefined;
+      await expectClean(g.u, async () => {
         const reply = await wnTry(
           rig,
           ["messages", "delete", g.u, wnOwnMsg.message.id],
@@ -964,7 +994,28 @@ async function run(): Promise<void> {
         if (!reply.ok) {
           throw new Error(`wn refused its own non-admin delete locally: ${reply.raw}`);
         }
+        wnDelete = await waitFor(
+          () =>
+            received.find(
+              (entry) =>
+                entry.group === g.u &&
+                entry.message.semantics.type === "deletion" &&
+                (entry.message.semantics as { targets?: string[] }).targets?.includes(
+                  wnOwnMsg.message.id,
+                ) === true,
+            ),
+          "we receive wn's author deletion",
+        );
       });
+      if (wnDelete === undefined) {
+        throw new Error("wn delete was not received");
+      }
+      const deleteSem = wnDelete.message.semantics;
+      if (deleteSem.type !== "deletion" || !deleteSem.targets.includes(wnOwnMsg.message.id)) {
+        throw new Error(
+          `deletion semantics ${JSON.stringify(deleteSem)} != [${wnOwnMsg.message.id}]`,
+        );
+      }
     });
 
     // S9 — metadata both directions.
