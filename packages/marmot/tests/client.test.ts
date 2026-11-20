@@ -20,6 +20,7 @@ import type {
   NostrEvent,
   Outbound,
   PublishResolution,
+  Semantics,
   WireError,
 } from "../src/backend/protocol.ts";
 import { utf8Decode, utf8Encode } from "../src/backend/utf8.ts";
@@ -1405,6 +1406,74 @@ describe("MarmotClient", () => {
     });
     await expect(fixture.client.forgetGroup(GROUP)).rejects.toMatchObject({
       kind: "group_disbanding",
+    });
+    await fixture.client.close();
+  });
+
+  test("modifier semantics reach onMessages", async () => {
+    const script = freshScript();
+    const target = "dd".repeat(32);
+    const cases: Semantics[] = [
+      { type: "edit", target, content: "edited" },
+      { type: "deletion", targets: [target] },
+      { type: "unreact", reactions: [target] },
+    ];
+    script.drains.push(
+      { type: "events", events: [] },
+      { type: "events", events: [] },
+      {
+        type: "events",
+        events: cases.map((semantics, i) => ({
+          type: "message_received" as const,
+          group: GROUP,
+          message: { ...msg((i + 1).toString(16).padStart(2, "0").repeat(32)), semantics },
+        })),
+      },
+    );
+    script.groups = [snapshot()];
+    const fixture = await open(script, encodeClientState({ cursors: {}, inbox: [RELAY] }));
+    await settle(fixture.timer, 5000);
+    const batches: Array<Array<{ semantics: unknown }>> = [];
+    fixture.client.onMessages(async (batch) => {
+      batches.push(batch.map((entry) => entry.message));
+      return Promise.resolve();
+    });
+    await fixture.network.port("peer").publish(RELAY, groupEvent("34".repeat(32)));
+    await settle(fixture.timer, 5000);
+    expect(batches[0]?.map((entry) => entry.semantics)).toStrictEqual(cases);
+    await fixture.client.close();
+  });
+
+  test("message_expired reaches onGroupChange like message_invalidated", async () => {
+    const script = freshScript();
+    const message = "aa".repeat(32);
+    const transportId = "cc".repeat(32);
+    script.drains.push({
+      type: "events",
+      events: [{ type: "message_expired", group: GROUP, message, transportId }],
+    });
+    const fixture = await open(script);
+    const changes: Array<{ type: string; message?: string; transportId?: string }> = [];
+    const messages: unknown[] = [];
+    fixture.client.onGroupChange((event) => changes.push(event));
+    fixture.client.onMessages(async (batch) => {
+      messages.push(batch);
+      return Promise.resolve();
+    });
+    await settle(fixture.timer, 5000);
+    expect(changes).toStrictEqual([
+      { type: "message_expired", group: GROUP, message, transportId },
+    ]);
+    expect(messages).toHaveLength(0);
+    await fixture.client.close();
+  });
+
+  test("send_rate_exceeded maps to the client kind", async () => {
+    const script = freshScript();
+    script.errors["send_intent"] = "send_rate_exceeded";
+    const fixture = await open(script);
+    await expect(fixture.client.sendChat(GROUP, "hi")).rejects.toMatchObject({
+      kind: "send_rate_exceeded",
     });
     await fixture.client.close();
   });
