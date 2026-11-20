@@ -513,7 +513,7 @@ fn wn_group_id(created: &serde_json::Value) -> String {
 /// message each way, and observe our removal — every local action driven
 /// through `mk-bridge` request/response bytes.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "needs wn/wnd from the pinned MDK rev; see CONTRIBUTING"]
+#[ignore = "needs wn/wnd built from the upstream.json wn pin; see CONTRIBUTING"]
 async fn scenario7_bridge_wn_invites_us() {
     let start = Instant::now();
     let rig = Arc::new(rig("s7").await);

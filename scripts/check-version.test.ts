@@ -17,6 +17,7 @@ const MARMOT_WASM = {
   pkg: {
     name: "@qntx/marmot-wasm",
     version: "0.9.0",
+    dependencies: { "@qntx/marmot": "^0.9.0" } as Record<string, string>,
     peerDependencies: { "@qntx/marmot": "^0.9.0" } as Record<string, string>,
     devDependencies: { "@qntx/marmot": "0.9.0" } as Record<string, string>,
   },
@@ -109,6 +110,7 @@ const PACKAGES_11 = [
     pkg: {
       name: "@qntx/marmot-wasm",
       version: "0.11.0",
+      dependencies: { "@qntx/marmot": "^0.11.0" },
       peerDependencies: { "@qntx/marmot": "^0.11.0" },
       devDependencies: { "@qntx/marmot": "0.11.0" },
     },
@@ -147,6 +149,22 @@ describe("check-version", () => {
     expect(errors).toStrictEqual([
       'packages/marmot-wasm/package.json: missing string "version"',
       'bun.lock: workspaces["packages/marmot-wasm"] has version "0.9.0", expected undefined',
+    ]);
+  });
+
+  test("rejects a dependency range without a caret", () => {
+    const pkg = structuredClone(MARMOT_WASM.pkg);
+    pkg.dependencies["@qntx/marmot"] = "0.9.0";
+    const errors = checkVersion(
+      [MARMOT, { ...MARMOT_WASM, pkg }],
+      PARSED,
+      CARGO_TOML,
+      MEMBERS,
+      LOCK,
+      BUN_LOCK,
+    );
+    expect(errors).toStrictEqual([
+      'packages/marmot-wasm/package.json: dependencies["@qntx/marmot"] must be "^0.9.0", got "0.9.0"',
     ]);
   });
 
@@ -234,6 +252,43 @@ describe("check-version", () => {
       "version mismatch: packages/marmot-wasm/package.json has 0.9.1, Cargo.toml has 0.9.0",
       'bun.lock: workspaces["packages/marmot-wasm"] has version "0.9.0", expected "0.9.1"',
     ]);
+  });
+
+  test("rejects a member path dependency without an exact pin", () => {
+    const errors = checkVersion(
+      PACKAGES,
+      PARSED,
+      CARGO_TOML,
+      {
+        "crates/mk-bridge/Cargo.toml": {
+          package: { version: { workspace: true } },
+          dependencies: { "mk-core": { path: "../mk-core", version: "=0.8.0" } },
+        },
+      },
+      LOCK,
+      BUN_LOCK,
+    );
+    expect(errors).toStrictEqual([
+      'crates/mk-bridge/Cargo.toml: internal dependency "mk-core" must use version "=0.9.0", got "=0.8.0"',
+    ]);
+  });
+
+  test("accepts a member path dependency pinned to the workspace version", () => {
+    const errors = checkVersion(
+      PACKAGES,
+      PARSED,
+      CARGO_TOML,
+      {
+        "crates/mk-bridge/Cargo.toml": {
+          package: { version: { workspace: true } },
+          dependencies: { "mk-core": { path: "../mk-core", version: "=0.9.0" } },
+          "dev-dependencies": { "mk-core": { path: "../mk-core", version: "=0.9.0" } },
+        },
+      },
+      LOCK,
+      BUN_LOCK,
+    );
+    expect(errors).toStrictEqual([]);
   });
 
   test("rejects a member that does not inherit the workspace version", () => {

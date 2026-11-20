@@ -3,6 +3,13 @@ import { spawnSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
+import { excludedCrates } from "./check-version.ts";
+
+// The repo does not depend on @types/bun; declare the used surface.
+declare const Bun: {
+  TOML: { parse: (text: string) => unknown };
+};
+
 type JsonObject = Record<string, unknown>;
 
 function isRecord(value: unknown): value is JsonObject {
@@ -14,9 +21,10 @@ function asRecord(value: unknown): JsonObject {
 }
 
 /**
- * Rewrites a manifest's internal dependency ranges to `version`: `^<v>` in peerDependencies, `<v>`
- * in devDependencies. Returns the (possibly mutated) manifest; bumpp rewrites each package's own
- * `version` field, this covers the ranges bumpp cannot express in JSON.
+ * Rewrites a manifest's internal dependency ranges to `version`: `^<v>` in dependencies and
+ * peerDependencies, `<v>` in devDependencies. Returns the (possibly mutated) manifest; bumpp
+ * rewrites each package's own `version` field, this covers the ranges bumpp cannot express in
+ * JSON.
  */
 export function syncInternalDeps(
   pkg: JsonObject,
@@ -24,6 +32,7 @@ export function syncInternalDeps(
   internalNames: ReadonlySet<string>,
 ): JsonObject {
   for (const [section, prefix] of [
+    ["dependencies", "^"],
     ["peerDependencies", "^"],
     ["devDependencies", ""],
   ] as const) {
@@ -35,6 +44,24 @@ export function syncInternalDeps(
     }
   }
   return pkg;
+}
+
+/**
+ * Rewrites `version = "=<v>"` pins on internal path dependencies — Cargo.toml lines carrying `path
+ * = "../…"` (member and standalone manifests) or `path = "crates/…"` (the root workspace manifest)
+ * — to `version`. bumpp cannot reach these files, and without this `cargo update` fails right after
+ * a bump: member crates would still require the previous `=<v>`. A dep's own `version = "<v>"` (no
+ * `=` pin) is untouched, so standalone projects keep their independent `0.0.0`.
+ */
+export function syncInternalPins(manifest: string, version: string): string {
+  return manifest
+    .split("\n")
+    .map((line) =>
+      /\bpath\s*=\s*"(?:\.\.|crates\/)/.test(line)
+        ? line.replace(/\bversion(\s*=\s*)"=[^"]*"/, `version$1"=${version}"`)
+        : line,
+    )
+    .join("\n");
 }
 
 if (import.meta.main) {
@@ -64,6 +91,27 @@ if (import.meta.main) {
       writeFileSync(path, `${JSON.stringify(pkg, null, 2)}\n`);
     }
 
+    // Internal `=<v>` pins on path deps live in crate manifests bumpp never
+    // touches; they must move before `cargo update --workspace` can resolve.
+    const tomls = ["Cargo.toml"];
+    if (existsSync("crates")) {
+      for (const entry of readdirSync("crates", { withFileTypes: true })) {
+        if (entry.isDirectory()) {
+          tomls.push(join("crates", entry.name, "Cargo.toml"));
+        }
+      }
+    }
+    for (const path of tomls) {
+      if (!existsSync(path)) {
+        continue;
+      }
+      const text = readFileSync(path, "utf8");
+      const synced = syncInternalPins(text, version);
+      if (synced !== text) {
+        writeFileSync(path, synced);
+      }
+    }
+
     // bun.lock mirrors the workspace versions under `workspaces`; Cargo.lock
     // must record the new workspace version — but only once a lockfile
     // exists (no crates yet → `cargo update` has nothing to do). bumpp runs
@@ -72,7 +120,33 @@ if (import.meta.main) {
     // bump.config.ts.
     if (existsSync("Cargo.lock")) {
       const update = spawnSync("cargo", ["update", "--workspace"], { stdio: "inherit" });
-      if (update.status !== 0) {
+      if (update.status === 0) {
+        // The workspace-excluded standalone projects (crates/interop,
+        // crates/conformance, fuzz — dir names per root Cargo.toml `exclude`)
+        // carry their own Cargo.lock recording the member versions.
+        // `cargo metadata` re-resolves against the moved manifests and writes
+        // only the changed entries — unlike `cargo update -p` it can never
+        // upgrade an unrelated dependency.
+        const excluded = excludedCrates(Bun.TOML.parse(readFileSync("Cargo.toml", "utf8")));
+        for (const name of excluded) {
+          const dir = existsSync(join("crates", name)) ? join("crates", name) : name;
+          if (!existsSync(join(dir, "Cargo.toml")) || !existsSync(join(dir, "Cargo.lock"))) {
+            continue;
+          }
+          const metadata = spawnSync("cargo", ["metadata", "--format-version", "1"], {
+            cwd: dir,
+            stdio: ["ignore", "ignore", "inherit"],
+          });
+          if (metadata.status !== 0) {
+            const why =
+              metadata.error === undefined
+                ? `exit code ${String(metadata.status)}`
+                : metadata.error.message;
+            console.error(`sync-versions: cargo metadata failed in ${dir}: ${why}`);
+            process.exitCode = 1;
+          }
+        }
+      } else {
         const why =
           update.error === undefined ? `exit code ${String(update.status)}` : update.error.message;
         console.error(`sync-versions: cargo update --workspace failed: ${why}`);

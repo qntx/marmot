@@ -1,0 +1,180 @@
+name: Interop nightly
+
+# Advisory, never required: the same wn interop suites as CI, run against MDK
+# master and White Noise built from that same master commit. Each job repins
+# its checkout to master first (scripts/repin-mdk.ts rewrites upstream.json
+# and the MDK, OpenMLS and rust-nostr git pins to what master's Cargo.lock
+# resolves), so a red run is an early warning for the next pin bump, not a
+# regression on main. Opens no issues; every job uploads its logs.
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/interop-nightly.yml"
+      - ".github/actions/build-wn/**"
+      - "scripts/repin-mdk.ts"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  MDK_REPOSITORY: marmot-protocol/mdk
+
+jobs:
+  master:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      rev: ${{ steps.head.outputs.rev }}
+    steps:
+      - id: head
+        run: |
+          set -euo pipefail
+          rev="$(git ls-remote "https://github.com/${MDK_REPOSITORY}" refs/heads/master | cut -f1)"
+          echo "MDK master: ${rev}" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "rev=${rev}" >>"$GITHUB_OUTPUT"
+
+  wn:
+    needs: master
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/build-wn
+        with:
+          repository: ${{ env.MDK_REPOSITORY }}
+          rev: ${{ needs.master.outputs.rev }}
+          path: ${{ runner.temp }}/wn-bin
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: wn-master
+          path: ${{ runner.temp }}/wn-bin
+          retention-days: 1
+          if-no-files-found: error
+
+  interop-rust:
+    needs: [master, wn]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ env.MDK_REPOSITORY }}
+          ref: ${{ needs.master.outputs.rev }}
+          path: 3rdparty/mdk
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: "1.4"
+      - name: Repin to MDK master
+        run: |
+          set -euo pipefail
+          bun scripts/repin-mdk.ts 3rdparty/mdk
+          git diff --stat | tee -a "$GITHUB_STEP_SUMMARY"
+          mkdir -p "$RUNNER_TEMP/logs"
+          git diff >"$RUNNER_TEMP/logs/repin.diff"
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: "1.99.1"
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: wn-master
+          path: ${{ runner.temp }}/wn-bin
+      - run: |
+          set -euo pipefail
+          chmod +x "$RUNNER_TEMP/wn-bin/wn" "$RUNNER_TEMP/wn-bin/wnd"
+          install -d -m 0700 "$RUNNER_TEMP/tmp"
+      - name: wn/wnd scenarios
+        working-directory: crates/interop
+        env:
+          WN_BIN: ${{ runner.temp }}/wn-bin/wn
+          WND_BIN: ${{ runner.temp }}/wn-bin/wnd
+          TMPDIR: ${{ runner.temp }}/tmp
+        run: |
+          set -euo pipefail
+          cargo test --release -- --ignored --test-threads=1 --nocapture 2>&1 | tee "$RUNNER_TEMP/logs/interop-rust.log"
+      - if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: interop-rust-master-logs
+          path: |
+            ${{ runner.temp }}/logs
+            crates/interop/target/wn-logs
+          retention-days: 14
+
+  interop-wasm:
+    needs: [master, wn]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # The toolchain and package checks run before the repin rewrites
+      # Cargo.toml (they read the lockfile with --locked).
+      - uses: qntx/workflows/actions/setup-wasm@v2
+        with:
+          package-directory: packages/marmot-wasm
+          dist-export: .
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ env.MDK_REPOSITORY }}
+          ref: ${{ needs.master.outputs.rev }}
+          path: 3rdparty/mdk
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: "1.4"
+      - run: bun install --frozen-lockfile
+      - name: Repin to MDK master
+        run: |
+          set -euo pipefail
+          bun scripts/repin-mdk.ts 3rdparty/mdk
+          mkdir -p "$RUNNER_TEMP/logs"
+          git diff >"$RUNNER_TEMP/logs/repin.diff"
+          # build:wasm installs the wasm-bindgen CLI the re-resolved
+          # Cargo.lock names; the one setup-wasm installed matches main's.
+          rm -rf target/wasm-bindgen-cli
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: wn-master
+          path: ${{ runner.temp }}/wn-bin
+      - run: chmod +x "$RUNNER_TEMP/wn-bin/wn" "$RUNNER_TEMP/wn-bin/wnd"
+      - name: Release wasm and test:interop
+        working-directory: packages/marmot-wasm
+        env:
+          WN_BIN: ${{ runner.temp }}/wn-bin/wn
+          WND_BIN: ${{ runner.temp }}/wn-bin/wnd
+        run: |
+          set -euo pipefail
+          bun run build:wasm 2>&1 | tee "$RUNNER_TEMP/logs/build-wasm.log"
+          bun run test:interop
+      - if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: interop-wasm-master-logs
+          path: |
+            ${{ runner.temp }}/logs
+            target/interop-m3b.log
+            target/wn-logs
+          retention-days: 14

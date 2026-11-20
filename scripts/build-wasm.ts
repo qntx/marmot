@@ -4,13 +4,14 @@
  *
  * Release `cargo build -p mk-wasm --profile wasm --target wasm32-unknown-unknown`, glue →
  * packages/marmot-wasm/src/generated (committed); the .wasm lands next to it, gitignored, and is
- * copied into dist/ by the package's `build:wasm` script after `vp pack`. test-panic `cargo build
- * -p mk-wasm --profile wasm-test --features test-panic`, glue + .wasm →
- * packages/marmot-wasm/tests/generated (gitignored).
+ * staged into dist/ by scripts/stage-wasm.ts (prepack). test-panic `cargo build -p mk-wasm
+ * --profile wasm-test --features test-panic`, glue + .wasm → packages/marmot-wasm/tests/generated
+ * (gitignored).
  *
- * Flags: --glue-only skip wasm-opt (used by check:generated, which diffs the glue) --measure build
- * all four size variants (opt-level z/s × wasm-opt on/off) and log raw / gzip -9 / brotli -q 11
- * bytes to target/wasm-sizes.log
+ * Flags: --glue-only emit only the release glue to target/wasm-glue — no wasm-opt, no test-panic
+ * build, src/generated untouched (used by check:generated, which must not clobber the release
+ * artifact) --measure build all four size variants (opt-level z/s × wasm-opt on/off) and log raw /
+ * gzip -9 / brotli -q 11 bytes to target/wasm-sizes.log
  *
  * The wasm-bindgen CLI is pinned to the Cargo.lock `wasm-bindgen` version: it is installed under
  * target/wasm-bindgen-cli and the script fails on a version mismatch rather than emitting
@@ -26,6 +27,7 @@ import { brotliCompressSync, constants, gzipSync } from "node:zlib";
 const ROOT = resolve(import.meta.dirname, "..");
 const PACKAGE = join(ROOT, "packages/marmot-wasm");
 const GLUE = join(PACKAGE, "src/generated");
+const GLUE_ONLY_DIR = join(ROOT, "target/wasm-glue");
 const TEST_GLUE = join(PACKAGE, "tests/generated");
 const CLI_ROOT = join(ROOT, "target/wasm-bindgen-cli");
 const WASM_TARGET = "wasm32-unknown-unknown";
@@ -183,10 +185,19 @@ if (measureOnly) {
   process.exit(0);
 }
 
+// Glue-only: scratch output check:generated diffs against the committed glue —
+// the release artifact under src/generated stays untouched.
+if (glueOnly) {
+  const artifact = cargoBuild({ profile: "wasm", features: [], optLevel: SHIP_OPT_LEVEL });
+  bindgen(cli, artifact, GLUE_ONLY_DIR);
+  console.log(`glue-only output in ${GLUE_ONLY_DIR}`);
+  process.exit(0);
+}
+
 // Release variant: glue is committed, so it must be byte-identical every run.
 const artifact = cargoBuild({ profile: "wasm", features: [], optLevel: SHIP_OPT_LEVEL });
 const glued = bindgen(cli, artifact, GLUE);
-if (SHIP_WASM_OPT && !glueOnly) {
+if (SHIP_WASM_OPT) {
   wasmOpt(glued);
 }
 console.log(`release glue + wasm in ${GLUE}`);

@@ -62,6 +62,8 @@ const RECORDED: Record<string, RecordedRoot[]> = {
 export type PinProbe = {
   /** HEAD of a checkout directory, or undefined when the directory is absent. */
   checkoutHead: (checkout: string) => string | undefined;
+  /** Commit a tag resolves to in a checkout, or undefined when the tag is absent. */
+  tagCommit: (checkout: string, tag: string) => string | undefined;
   /** File names (not paths) directly under a directory; [] when absent. */
   listFiles: (dir: string) => string[];
   /** Raw bytes of a repo-relative path, or undefined when missing. */
@@ -81,7 +83,9 @@ function sameBytes(a: Uint8Array, b: Uint8Array): boolean {
  * Validates the upstream.json pin file: every pin needs an https repository, a full 40-hex rev and
  * a checkout path (optional `tag` for the pinned release name). For each pin whose checkout
  * directory exists locally, the checkout HEAD must equal the pinned rev; absent checkouts are
- * skipped with a note (CI has no 3rdparty). When a checkout is at the pin, every recorded copy
+ * skipped with a note (CI has no 3rdparty). A pin carrying `tag` also requires that tag to resolve
+ * to the pinned rev inside the checkout: a missing tag is a note (a shallow fetch may not carry
+ * it), a tag pointing elsewhere is an error. When a checkout is at the pin, every recorded copy
  * under the pin's `RECORDED` roots (spec `*.md`, mdk vector `*.json`) must match its upstream
  * source byte-for-byte (we record subsets of the source trees, not whole directories).
  */
@@ -123,6 +127,15 @@ export function checkPins(upstream: unknown, probe: PinProbe): PinsResult {
       continue;
     }
 
+    if (typeof tag === "string") {
+      const commit = probe.tagCommit(checkout, tag);
+      if (commit === undefined) {
+        notes.push(`${name}: tag ${tag} not present in ${checkout} — tag not verified`);
+      } else if (commit !== rev) {
+        errors.push(`${name}: ${tag} in ${checkout} is ${commit}, pinned rev is ${rev}`);
+      }
+    }
+
     // The checkout sits at the pinned rev: every recorded copy must be
     // byte-identical to its source under <checkout>/<source>/.
     for (const root of RECORDED[name] ?? []) {
@@ -157,6 +170,17 @@ if (import.meta.main) {
           encoding: "utf8",
           stdio: ["ignore", "pipe", "ignore"],
         }).trim();
+      } catch {
+        return undefined;
+      }
+    },
+    tagCommit(checkout, tag) {
+      try {
+        return execFileSync(
+          "git",
+          ["-C", checkout, "rev-parse", "--verify", "--quiet", `${tag}^{commit}`],
+          { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
+        ).trim();
       } catch {
         return undefined;
       }

@@ -45,7 +45,8 @@
   "scripts": {
     "build": "vp pack",
     "dev": "vp pack --watch",
-    "build:wasm": "bun ../../scripts/build-wasm.ts && vp pack && cp src/generated/marmot_wasm_bg.wasm dist/marmot_wasm_bg.wasm",
+    "build:wasm": "bun ../../scripts/build-wasm.ts && vp pack && bun ../../scripts/stage-wasm.ts",
+    "prepack": "bun ../../scripts/stage-wasm.ts",
     "test": "vp test tests/unit",
     "test:wasm": "vp test tests/wasm && bun test tests/bun",
     "check:size": "bun ../../scripts/check-wasm-size.ts",
