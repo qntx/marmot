@@ -4,6 +4,7 @@
     "start": {
       "created_at": "1700000000",
       "epoch": "2",
+      "expires_at": "1700003600",
       "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       "parent": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
       "sender": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -76,6 +77,12 @@
     "group": "dead",
     "type": "local_copy_terminated",
     "voluntary": true
+  },
+  "message_expired": {
+    "group": "dead",
+    "message": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "transport_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "type": "message_expired"
   },
   "message_invalidated": {
     "epoch": "2",

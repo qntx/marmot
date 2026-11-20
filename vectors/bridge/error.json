@@ -114,6 +114,9 @@
   "reserved_app_event": {
     "kind": "reserved_app_event"
   },
+  "send_rate_exceeded": {
+    "kind": "send_rate_exceeded"
+  },
   "signer": {
     "kind": "signer",
     "reason": "refused"
