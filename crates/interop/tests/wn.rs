@@ -363,6 +363,7 @@ async fn scenario3_bulk_and_membership() {
 
     // mk-core sends the rest.
     const MK_MSGS: usize = 500 - WN_MSGS;
+    let t_mk = Instant::now();
     for i in 0..MK_MSGS {
         a.session
             .send_message(&gid, chat(&format!("bulk-mk-{i}")))
@@ -370,6 +371,10 @@ async fn scenario3_bulk_and_membership() {
             .expect("send_message");
         flush(&mut a, &rig).await;
     }
+    eprintln!(
+        "s3: mk sent {MK_MSGS} in {:.1}s",
+        t_mk.elapsed().as_secs_f64()
+    );
 
     // One newest-first backlog ingest decodes every wn message.
     let route = a.route_hex(&gid);
@@ -393,17 +398,16 @@ async fn scenario3_bulk_and_membership() {
 
     // wn lists every mk-core message.
     let wn_gid_ref = &wn_gid;
-    until(
+    until_observed(
         || {
             let rig = Arc::clone(&rig);
             let wn_gid = wn_gid_ref;
             async move {
-                (wn_messages(&rig, wn_gid, 600)
+                let listed = wn_messages(&rig, wn_gid, 600)
                     .iter()
                     .filter(|m| m.to_string().contains("bulk-mk-"))
-                    .count()
-                    >= MK_MSGS)
-                    .then_some(())
+                    .count();
+                (listed >= MK_MSGS, listed)
             }
         },
         "wn lists mk bulk",

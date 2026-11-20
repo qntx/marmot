@@ -641,6 +641,32 @@ where
     }
 }
 
+/// Poll `f` like [`until`]; `f` yields `(done, observation)` and a timeout
+/// reports the last observation.
+pub async fn until_observed<F, Fut, O: std::fmt::Debug>(
+    mut f: F,
+    what: &str,
+    ms: u64,
+    step: u64,
+) -> O
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = (bool, O)>,
+{
+    let start = Instant::now();
+    loop {
+        let (done, observation) = f().await;
+        if done {
+            return observation;
+        }
+        assert!(
+            start.elapsed() < Duration::from_millis(ms),
+            "timeout waiting for {what} (last: {observation:?})"
+        );
+        tokio::time::sleep(Duration::from_millis(step)).await;
+    }
+}
+
 /// Poll `f` until it yields; `f` gets a fresh `&mut Member` every pass and
 /// decides what a pass does (fetch, ingest, `sync`, snapshot reads).
 pub async fn until_member<T, F>(member: &mut Member, mut f: F, what: &str, ms: u64) -> T
