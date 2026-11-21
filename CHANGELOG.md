@@ -54,7 +54,7 @@ trusted publishing / OIDC).
   nine-boundary crash-consistency tests, session flow tests, conformance
   vectors, and an engine-level reproduction test for an upstream MDK
   defect (`AlreadyExists` on re-confirm of a deterministic own commit
-  after convergence rewind — handled as typed `ConfirmConflict`).
+  after a rewind, mdk#3525 — handled as typed `ConfirmConflict`).
 
 ### Changed
 
