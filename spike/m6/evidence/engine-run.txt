@@ -1,0 +1,593 @@
+   Compiling m6-spike v0.0.0 (/Users/xu/Desktop/qntx/marmot-m6/spike/m6)
+    Finished `release` profile [optimized] target(s) in 7m 36s
+     Running unittests src/lib.rs (target/release/deps/m6_spike-b2aef9a94e867ac3)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/devices.rs (target/release/deps/devices-081e6373f0bcf295)
+
+running 4 tests
+test d1_inviter_adds_every_device_slot ... D1 required app components: AppComponentSet { ids: {32769, 32771, 32777, 32780, 32781} }
+D1 members: 3 leaves over 2 accounts
+    leaf account=4eea1c77 credential=70c45f89
+    leaf account=b774681c credential=06502f6b
+    leaf account=b774681c credential=c1506304
+    B -> receiver ingest: Processed
+    recv: GroupJoined(welcomer=4eea1c7754a13568590b377e37ba58fe9dd72212ac415e991ea6595d28aa42ff)
+    recv: MessageReceived
+    receiver sees sender=4eea1c77 leaf_index=Some(0) (expected account=4eea1c77)
+    B -> receiver ingest: Processed
+    recv: GroupJoined(welcomer=4eea1c7754a13568590b377e37ba58fe9dd72212ac415e991ea6595d28aa42ff)
+    recv: MessageReceived
+    receiver sees sender=4eea1c77 leaf_index=Some(0) (expected account=4eea1c77)
+    A1 -> receiver ingest: Processed
+    recv: GroupCreated
+    recv: MessageReceived
+    receiver sees sender=b774681c leaf_index=Some(1) (expected account=b774681c)
+    A1 -> receiver ingest: Processed
+    recv: MessageReceived
+    receiver sees sender=b774681c leaf_index=Some(1) (expected account=b774681c)
+    A2 -> receiver ingest: Processed
+    recv: MessageReceived
+    receiver sees sender=b774681c leaf_index=Some(2) (expected account=b774681c)
+    A2 -> receiver ingest: Processed
+    recv: MessageReceived
+    receiver sees sender=b774681c leaf_index=Some(2) (expected account=b774681c)
+ok
+test d2_founding_exemption_own_device ... D2 A2 joined via Welcome authored by its own account's device (A1)
+ok
+test d3_later_device_join_paths ... D3 group requires 0x800d; B admin=true A1 admin=false
+D3(a) A1 Invite of A3 KP -> Err(NotGroupAdmin { group_id: GroupId(875e15db5addad498fa05f4326da986d) })
+D3(b) A1 AddOwnAccountDevices without device group -> Err(Other("adding a sibling: this device is not tagged in a trusted device group"))
+    ingest commit outcome: Buffered { group_id: GroupId(875e15db5addad498fa05f4326da986d), epoch: EpochId(1) }
+D3(c) pre-join message 0 on A3 -> Stale { reason: PreMembership }
+D3(c) pre-join message 1 on A3 -> Stale { reason: PreMembership }
+D3(c) pre-join message 2 on A3 -> Stale { reason: PreMembership }
+D3(c) post-join message on A3 -> Processed
+D3(d) device-group path:
+    ingest commit outcome: Buffered { group_id: GroupId(d6d6d6d6d6d6d6d60000000000000000), epoch: EpochId(1) }
+    ingest commit outcome: Buffered { group_id: GroupId(d6d6d6d6d6d6d6d60000000000000000), epoch: EpochId(2) }
+    device group GroupId(d6d6d6d6d6d6d6d60000000000000000) roster: [[1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1], [2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2]]
+    A1 AddOwnAccountDevices -> Ok(GroupEvolution { msg: TransportMessage { id: MessageId(e07ab0a43c9e353994972044c1076d3694ace88c8271643c25d154d1a682134d), payload: [0, 1, 0, 1, 16, 18, 57, 18, 7, 255, 76, 1, 126, 1, 112, 50, 15, 54, 63, 126, 137, 0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 1, 0, 3, 66, 70, 1, 0, 1, 0, 1, 0, 1, 32, 113, 63, 74, 179, 69, 104, 198, 202, 58, 60, 158, 49, 202, 24, 189, 201, 34, 143, 118, 64, 142, 234, 153, 50, 100, 1, 19, 169, 226, 240, 71, 39, 32, 111, 33, 32, 68, 197, 126, 175, 195, 90, 201, 251, 96, 225, 11, 7, 181, 135, 1, 87, 238, 144, 149, 94, 159, 45, 177, 61, 74, 251, 225, 71, 12, 32, 83, 4, 80, 49, 222, 114, 211, 213, 215, 80, 65, 66, 117, 61, 12, 187, 138, 217, 121, 133, 251, 168, 17, 242, 33, 123, 173, 80, 158, 23, 74, 37, 0, 1, 32, 183, 116, 104, 28, 136, 49, 231, 86, 133, 236, 100, 27, 89, 161, 196, 88, 247, 218, 141, 210, 135, 225, 51, 130, 149, 120, 67, 56, 125, 81, 249, 205, 2, 0, 1, 2, 0, 1, 2, 0, 6, 4, 0, 10, 0, 8, 2, 0, 1, 1, 0, 0, 0, 0, 107, 1, 238, 77, 0, 0, 0, 0, 107, 41, 137, 93, 65, 16, 0, 6, 65, 12, 65, 10, 0, 1, 19, 18, 0, 1, 128, 1, 128, 3, 128, 4, 128, 9, 128, 12, 128, 13, 128, 14, 128, 15, 0, 2, 1, 0, 128, 9, 64, 104, 183, 116, 104, 28, 136, 49, 231, 86, 133, 236, 100, 27, 89, 161, 196, 88, 247, 218, 141, 210, 135, 225, 51, 130, 149, 120, 67, 56, 125, 81, 249, 205, 0, 0, 0, 0, 107, 1, 252, 92, 50, 120, 174, 215, 193, 228, 115, 241, 98, 19, 82, 133, 185, 21, 170, 251, 222, 82, 108, 61, 30, 90, 20, 92, 234, 43, 143, 208, 45, 240, 173, 133, 249, 41, 99, 146, 136, 149, 140, 138, 54, 128, 12, 2, 103, 160, 97, 212, 88, 69, 32, 133, 67, 98, 110, 183, 213, 106, 203, 27, 248, 64, 169, 189, 128, 15, 64, 128, 121, 187, 186, 43, 242, 28, 7, 4, 66, 10, 118, 172, 64, 114, 172, 180, 184, 111, 98, 5, 34, 94, 133, 255, 202, 183, 121, 121, 99, 246, 96, 113, 20, 170, 193, 11, 230, 31, 103, 102, 177, 241, 230, 255, 18, 241, 228, 203, 128, 209, 185, 16, 73, 58, 76, 190, 160, 129, 49, 240, 63, 200, 115, 184, 35, 240, 231, 208, 71, 121, 35, 187, 216, 8, 120, 19, 198, 249, 192, 43, 94, 192, 248, 194, 124, 172, 255, 209, 8, 154, 50, 101, 177, 143, 118, 196, 34, 37, 25, 25, 81, 246, 226, 53, 55, 58, 35, 141, 139, 49, 92, 181, 103, 222, 158, 241, 70, 200, 220, 129, 65, 100, 17, 147, 40, 250, 189, 121, 64, 64, 159, 77, 37, 105, 236, 108, 142, 66, 223, 232, 205, 74, 193, 214, 30, 160, 226, 100, 136, 89, 58, 50, 175, 147, 180, 171, 168, 120, 205, 202, 99, 222, 151, 192, 151, 198, 209, 30, 85, 180, 79, 209, 98, 18, 128, 50, 60, 84, 52, 85, 37, 184, 19, 197, 213, 30, 197, 124, 224, 247, 123, 238, 97, 7, 0, 64, 64, 157, 113, 247, 30, 192, 199, 230, 102, 163, 165, 43, 94, 186, 28, 231, 24, 13, 109, 110, 112, 34, 103, 97, 163, 87, 42, 239, 216, 122, 61, 206, 195, 73, 200, 101, 234, 185, 94, 222, 171, 36, 146, 165, 235, 211, 192, 64, 121, 80, 223, 203, 60, 152, 243, 247, 21, 69, 53, 176, 208, 173, 55, 24, 12, 0, 64, 64, 46, 244, 239, 1, 56, 14, 19, 95, 66, 18, 239, 139, 106, 60, 178, 128, 139, 58, 251, 108, 93, 3, 46, 82, 19, 5, 133, 165, 154, 59, 230, 78, 250, 7, 140, 71, 167, 180, 152, 35, 254, 164, 218, 52, 16, 203, 2, 103, 25, 79, 0, 254, 223, 148, 101, 39, 41, 95, 27, 44, 88, 0, 96, 4, 32, 102, 92, 164, 147, 185, 178, 206, 93, 222, 126, 250, 206, 12, 97, 31, 3, 75, 165, 39, 240, 142, 185, 247, 192, 7, 189, 201, 124, 69, 189, 192, 35, 32, 34, 43, 43, 200, 116, 169, 124, 44, 24, 208, 109, 184, 0, 227, 32, 36, 229, 243, 185, 90, 180, 67, 79, 67, 58, 219, 24, 163, 84, 55, 225, 32], timestamp: Timestamp(0), causal_deps: [], source: TransportSource("mock"), envelope: GroupMessage { transport_group_id: [67, 67, 67, 67, 67, 67, 67, 67, 67, 67, 67, 67, 67, 67, 67, 67, 67, 67, 67, 67, 67, 67, 67, 67, 67, 67, 67, 67, 67, 67, 67, 67] } }, welcomes: [], pending: PendingStateRef(2) })
+    ingest commit outcome: Buffered { group_id: GroupId(12391207ff4c017e0170320f363f7e89), epoch: EpochId(1) }
+    owed sibling welcomes: 1
+    join_sibling_welcome: Settled(Processed)
+    A3 message on B -> Processed
+    B: GroupCreated
+    B: EpochChanged(2)
+    B: MessageReceived
+ok
+test d4_device_removal ... D4(a) removing A2 leaf sig=07ff6d25
+    A1 RemoveOwnAccountDevices -> Ok(GroupEvolution { msg: TransportMessage { id: MessageId(fb51b2cb901fd4b23b9105f56d9c4aea0ae6bfeeaa7b31ca4f22e8be1bfd1d3c), payload: [0, 1, 0, 1, 16, 117, 49, 192, 126, 144, 88, 244, 71, 70, 56, 84, 97, 45, 252, 107, 95, 0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 1, 0, 3, 7, 1, 0, 3, 0, 0, 0, 2, 1, 32, 74, 123, 249, 187, 122, 31, 231, 159, 156, 2, 58, 103, 153, 47, 11, 3, 37, 91, 111, 194, 139, 23, 27, 97, 82, 130, 15, 99, 211, 37, 43, 113, 32, 78, 236, 144, 56, 133, 29, 15, 113, 186, 106, 150, 189, 61, 73, 17, 175, 186, 99, 145, 253, 102, 228, 182, 70, 212, 253, 70, 123, 153, 203, 217, 47, 0, 1, 32, 183, 116, 104, 28, 136, 49, 231, 86, 133, 236, 100, 27, 89, 161, 196, 88, 247, 218, 141, 210, 135, 225, 51, 130, 149, 120, 67, 56, 125, 81, 249, 205, 2, 0, 1, 2, 0, 1, 2, 0, 6, 4, 0, 10, 0, 8, 2, 0, 1, 3, 32, 191, 23, 44, 152, 201, 8, 99, 48, 230, 148, 169, 218, 185, 17, 7, 52, 10, 33, 46, 242, 162, 157, 244, 81, 201, 42, 134, 157, 12, 3, 148, 164, 64, 134, 0, 6, 64, 130, 64, 128, 0, 1, 13, 12, 0, 1, 128, 1, 128, 3, 128, 9, 128, 12, 128, 13, 0, 2, 1, 0, 128, 9, 64, 104, 183, 116, 104, 28, 136, 49, 231, 86, 133, 236, 100, 27, 89, 161, 196, 88, 247, 218, 141, 210, 135, 225, 51, 130, 149, 120, 67, 56, 125, 81, 249, 205, 0, 0, 0, 0, 107, 1, 252, 93, 55, 53, 133, 137, 163, 56, 185, 133, 243, 224, 55, 248, 73, 229, 125, 87, 49, 84, 249, 170, 165, 25, 133, 177, 116, 34, 151, 27, 111, 92, 10, 36, 139, 118, 134, 160, 129, 134, 85, 127, 58, 22, 175, 166, 167, 152, 134, 139, 0, 201, 161, 3, 111, 86, 213, 170, 191, 232, 155, 242, 69, 129, 63, 228, 64, 64, 29, 15, 108, 230, 113, 82, 180, 153, 196, 3, 111, 224, 65, 209, 174, 61, 242, 241, 28, 14, 245, 224, 28, 202, 226, 242, 49, 157, 162, 7, 212, 158, 195, 212, 207, 84, 86, 191, 185, 157, 41, 142, 211, 249, 120, 230, 41, 249, 248, 235, 115, 176, 126, 95, 167, 174, 84, 197, 161, 43, 236, 39, 225, 11, 64, 117, 32, 3, 51, 78, 115, 87, 51, 37, 194, 15, 208, 131, 217, 146, 201, 88, 200, 221, 69, 161, 206, 12, 217, 209, 126, 171, 49, 109, 151, 29, 209, 50, 43, 64, 82, 32, 226, 36, 143, 182, 99, 54, 74, 116, 50, 26, 22, 226, 79, 128, 227, 137, 166, 151, 165, 204, 168, 41, 152, 81, 71, 112, 233, 154, 19, 154, 187, 90, 48, 171, 49, 193, 111, 187, 168, 10, 224, 6, 154, 55, 245, 140, 144, 83, 146, 247, 59, 187, 241, 158, 193, 133, 142, 145, 29, 47, 192, 20, 255, 122, 174, 24, 150, 154, 97, 216, 150, 155, 106, 65, 112, 116, 255, 122, 68, 49, 192, 64, 64, 188, 69, 62, 34, 85, 122, 197, 190, 250, 113, 176, 146, 182, 21, 18, 127, 112, 20, 175, 66, 210, 131, 30, 115, 40, 69, 127, 224, 21, 71, 100, 104, 76, 41, 232, 246, 112, 154, 6, 177, 23, 140, 87, 149, 69, 151, 161, 0, 95, 130, 40, 173, 49, 165, 76, 143, 167, 161, 115, 108, 217, 193, 220, 8, 32, 133, 56, 57, 47, 187, 180, 34, 61, 151, 45, 111, 124, 168, 61, 159, 236, 26, 86, 159, 9, 228, 49, 170, 7, 57, 163, 89, 229, 54, 16, 31, 198, 32, 251, 100, 170, 64, 196, 127, 195, 232, 239, 49, 205, 159, 151, 1, 23, 152, 37, 183, 39, 244, 13, 5, 195, 149, 181, 193, 141, 26, 194, 58, 129, 72], timestamp: Timestamp(0), causal_deps: [], source: TransportSource("mock"), envelope: GroupMessage { transport_group_id: [117, 49, 192, 126, 144, 88, 244, 71, 70, 56, 84, 97, 45, 252, 107, 95] } }, welcomes: [], pending: PendingStateRef(1) })
+    A2 ingest removal commit: Buffered { group_id: GroupId(7531c07e9058f447463854612dfc6b5f), epoch: EpochId(1) }
+    A2: GroupJoined(welcomer=4eea1c7754a13568590b377e37ba58fe9dd72212ac415e991ea6595d28aa42ff)
+    A2: EpochChanged(2)
+    A2: GroupMemberLeavesRemoved(leaves=1)
+    A2: LocalGroupCopyTerminated(voluntary=false)
+    A2 group record: epoch=2 members=2 removed=true unrecoverable=false
+    A2 epoch_state: Some(Stable { epoch: EpochId(2) })
+    B ingest removal commit: Buffered { group_id: GroupId(7531c07e9058f447463854612dfc6b5f), epoch: EpochId(1) }
+    B: GroupCreated
+    B: EpochChanged(2)
+    B: GroupMemberLeavesRemoved(leaves=1)
+    B group record: epoch=2 members=2 removed=false unrecoverable=false
+    B epoch_state: Some(Stable { epoch: EpochId(2) })
+    A2 send after removal -> Err(InvalidTransition(InvalidTransition { from: "Removed", to: "app_message", reason: "local group copy is marked removed (self-evicted)" }))
+    B post-removal message on A2 -> LocalState { state: Removed }
+D4(b) RemoveMembers named by A2 leaf credential -> Err(UnknownMember { group_id: GroupId(a6c248d53a9074f0f12e54948ef71869), member: MemberId(1ab18883eee00dcfd73e1335f15827ec47d7e0dd39ddc4e8b4b828288ecc431f) })
+    RemoveMembers(account A) -> Ok(GroupEvolution { msg: TransportMessage { id: MessageId(243cde787887f89aa7ffd015cc8d5de04fd5964e7829a34a9aa4780f46ca6b5b), payload: [0, 1, 0, 1, 16, 166, 194, 72, 213, 58, 144, 116, 240, 241, 46, 84, 148, 142, 247, 24, 105, 0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 3, 14, 1, 0, 3, 0, 0, 0, 2, 1, 0, 3, 0, 0, 0, 1, 1, 32, 68, 18, 169, 22, 61, 150, 225, 69, 182, 136, 137, 86, 185, 210, 99, 179, 62, 131, 20, 42, 131, 155, 235, 4, 163, 119, 245, 117, 253, 30, 65, 66, 32, 139, 202, 66, 48, 178, 119, 252, 97, 184, 254, 219, 237, 126, 58, 33, 179, 195, 153, 239, 64, 172, 204, 138, 132, 210, 213, 116, 59, 208, 190, 232, 83, 0, 1, 32, 78, 234, 28, 119, 84, 161, 53, 104, 89, 11, 55, 126, 55, 186, 88, 254, 157, 215, 34, 18, 172, 65, 94, 153, 30, 166, 89, 93, 40, 170, 66, 255, 2, 0, 1, 2, 0, 1, 2, 0, 6, 4, 0, 10, 0, 8, 2, 0, 1, 3, 0, 64, 134, 0, 6, 64, 130, 64, 128, 0, 1, 13, 12, 0, 1, 128, 1, 128, 3, 128, 9, 128, 12, 128, 13, 0, 2, 1, 0, 128, 9, 64, 104, 78, 234, 28, 119, 84, 161, 53, 104, 89, 11, 55, 126, 55, 186, 88, 254, 157, 215, 34, 18, 172, 65, 94, 153, 30, 166, 89, 93, 40, 170, 66, 255, 0, 0, 0, 0, 107, 1, 252, 93, 212, 82, 1, 178, 121, 17, 249, 216, 5, 67, 96, 17, 186, 125, 157, 59, 177, 117, 95, 245, 163, 64, 60, 82, 86, 212, 20, 75, 48, 32, 225, 165, 23, 250, 237, 222, 148, 13, 249, 216, 173, 156, 113, 8, 157, 124, 56, 32, 231, 136, 163, 166, 33, 210, 230, 172, 244, 177, 253, 7, 251, 180, 125, 156, 64, 64, 162, 52, 75, 138, 24, 95, 78, 142, 230, 1, 105, 141, 10, 6, 118, 96, 39, 109, 29, 255, 109, 13, 237, 195, 118, 62, 6, 20, 124, 243, 240, 165, 140, 62, 48, 29, 177, 30, 102, 189, 165, 194, 201, 130, 117, 23, 93, 95, 73, 204, 211, 105, 72, 83, 249, 178, 96, 7, 96, 43, 9, 239, 111, 4, 0, 64, 64, 223, 70, 102, 238, 6, 55, 136, 26, 244, 225, 3, 56, 127, 88, 238, 245, 181, 74, 143, 233, 239, 177, 245, 174, 41, 136, 253, 212, 46, 189, 238, 125, 120, 137, 113, 180, 96, 201, 221, 0, 80, 100, 141, 221, 23, 151, 42, 145, 213, 165, 204, 128, 141, 178, 92, 171, 23, 192, 198, 0, 109, 239, 227, 9, 32, 131, 226, 65, 29, 109, 232, 242, 18, 239, 147, 87, 104, 62, 3, 182, 93, 70, 233, 167, 219, 43, 88, 17, 179, 153, 112, 57, 164, 245, 223, 4, 212, 32, 109, 33, 60, 222, 35, 8, 126, 41, 171, 243, 196, 113, 19, 95, 48, 187, 150, 227, 185, 68, 173, 194, 19, 190, 137, 231, 204, 249, 36, 180, 73, 117], timestamp: Timestamp(0), causal_deps: [], source: TransportSource("mock"), envelope: GroupMessage { transport_group_id: [166, 194, 72, 213, 58, 144, 116, 240, 241, 46, 84, 148, 142, 247, 24, 105] } }, welcomes: [], pending: PendingStateRef(1) })
+    B members after commit: 1
+    A1 ingest removal: Buffered { group_id: GroupId(a6c248d53a9074f0f12e54948ef71869), epoch: EpochId(1) }
+    A1: GroupJoined(welcomer=4eea1c7754a13568590b377e37ba58fe9dd72212ac415e991ea6595d28aa42ff)
+    A1: EpochChanged(2)
+    A1: GroupStateChanged(MemberRemoved { member: MemberId(b774681c8831e75685ec641b59a1c458f7da8dd287e13382957843387d51f9cd) })
+    A1: GroupMemberLeavesRemoved(leaves=2)
+    A1: LocalGroupCopyTerminated(voluntary=false)
+    A1 record: removed=true unrecoverable=false members=1
+    A2 ingest removal: Buffered { group_id: GroupId(a6c248d53a9074f0f12e54948ef71869), epoch: EpochId(1) }
+    A2: GroupJoined(welcomer=4eea1c7754a13568590b377e37ba58fe9dd72212ac415e991ea6595d28aa42ff)
+    A2: EpochChanged(2)
+    A2: GroupStateChanged(MemberRemoved { member: MemberId(b774681c8831e75685ec641b59a1c458f7da8dd287e13382957843387d51f9cd) })
+    A2: GroupMemberLeavesRemoved(leaves=2)
+    A2: LocalGroupCopyTerminated(voluntary=false)
+    A2 record: removed=true unrecoverable=false members=1
+D4(c) A2 Leave -> Ok(Proposal { msg: TransportMessage { id: MessageId(262f1c9f296b0bcf70f3ff145b05e1dbc1d91f627bb1ba5192f4784d066f9b5c), payload: [0, 1, 0, 1, 16, 154, 160, 89, 186, 219, 218, 176, 225, 184, 76, 244, 215, 113, 178, 125, 59, 0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 2, 0, 2, 0, 10, 64, 64, 39, 28, 183, 223, 44, 174, 102, 208, 1, 242, 248, 246, 160, 123, 123, 213, 87, 177, 82, 126, 102, 231, 161, 14, 195, 203, 179, 230, 79, 187, 10, 187, 139, 203, 77, 226, 189, 207, 126, 239, 125, 23, 65, 58, 195, 38, 170, 115, 111, 253, 235, 162, 57, 72, 54, 0, 51, 22, 67, 78, 111, 206, 111, 11, 32, 223, 3, 196, 124, 75, 86, 9, 192, 168, 21, 55, 169, 77, 125, 45, 95, 63, 93, 129, 128, 244, 50, 33, 62, 253, 45, 181, 67, 36, 205, 55, 30], timestamp: Timestamp(0), causal_deps: [], source: TransportSource("mock"), envelope: GroupMessage { transport_group_id: [154, 160, 89, 186, 219, 218, 176, 225, 184, 76, 244, 215, 113, 178, 125, 59] } } })
+    B ingest SelfRemove proposal: Processed
+    A1 ingest SelfRemove proposal: Processed
+    A1-after-proposal: GroupJoined(welcomer=4eea1c7754a13568590b377e37ba58fe9dd72212ac415e991ea6595d28aa42ff)
+    advance_convergence results: []
+    B drain_auto_publish: 1 item(s)
+    A1 ingest SelfRemove commit: Buffered { group_id: GroupId(9aa059badbdab0e1b84cf4d771b27d3b), epoch: EpochId(1) }
+    A1: EpochChanged(2)
+    A1: GroupMemberLeavesRemoved(leaves=1)
+    A1 record: epoch=2 members=2 removed=false
+    A2 ingest SelfRemove commit: Buffered { group_id: GroupId(9aa059badbdab0e1b84cf4d771b27d3b), epoch: EpochId(1) }
+    A2: GroupJoined(welcomer=4eea1c7754a13568590b377e37ba58fe9dd72212ac415e991ea6595d28aa42ff)
+    A2: EpochChanged(2)
+    A2: GroupMemberLeavesRemoved(leaves=1)
+    A2: LocalGroupCopyTerminated(voluntary=true)
+    A2 record: epoch=2 members=2 removed=true
+    B members after leave: 2
+ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.28s
+
+     Running tests/gift_wraps.rs (target/release/deps/gift_wraps-ae716bd79c602fe5)
+
+running 1 test
+test g1_non_welcome_gift_wraps ... G1(a) kind-452 pairing rumor ingest -> Ok(Ignored { category: InvalidEncoding })
+G1(b) kind-1159 recovery rumor ingest -> Ok(GroupRecovery { recovery: AuthenticatedGroupRecovery { sender: MemberId(b774681c8831e75685ec641b59a1c458f7da8dd287e13382957843387d51f9cd), message: GroupRecoveryMessage { group_id: GroupId(42424242424242424242424242424242), request_id: [9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9], expires_at: 1795378657, body: Request { device_key_hash: [7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7] } } } })
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.49s
+
+     Running tests/key_packages.rs (target/release/deps/key_packages-fc6590611744a3eb)
+
+running 5 tests
+test k1_fresh_key_package_is_last_resort ... K1 is_last_resort=true lifetime=[1795288660, 1797884260) delta=2595600s ref=a8ea7a16c32ae267e2ca2e9aed143b5ad7fdf3151791e10c72f15792b28ebf0a
+K1 durably_owned_key_packages: 1
+ok
+test k2_last_resort_reuse ... K2 owned before joins: 1
+K2 joined G1 GroupId(b42fa0341375c81abad12a53329bfdc7); owned after G1: 1
+K2 joined G2 GroupId(2560432fdbea97c971ee261f8ca5b139) with the SAME KeyPackage; owned after G2: 1
+ok
+test k3_rotation_and_late_welcome ... K3 owned after retirement: 1 (old deleted)
+K3 welcome from retired KP -> Ok(Ignored { category: MissingWelcomeKeyPackage })
+K3 welcome from replacement joined GroupId(8a94d93ecb4bc41263a24950159f5939) (was GroupId(d449a286323fa92b047c16339eb98a58))
+ok
+test k4_failed_welcome_leaves_key_package ...     ingest commit outcome: Buffered { group_id: GroupId(224cbcc83437ddce0902e680dd26e33e), epoch: EpochId(1) }
+K4(a) non-admin Invite send -> Err(NotGroupAdmin { group_id: GroupId(224cbcc83437ddce0902e680dd26e33e) })
+K4(a) non-admin Invite refused at send (finding)
+K4(b) corrupted Welcome -> Ok(Ignored { category: InvalidEncoding })
+K4(b) owned after corrupt Welcome: 1
+K4(b) valid Welcome with same KP joined
+ok
+test k5_delete_key_package ... K5 owned after delete: 0
+K5 welcome from deleted KP -> Ok(Ignored { category: MissingWelcomeKeyPackage })
+ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.66s
+
+     Running tests/recovery.rs (target/release/deps/recovery-cb9eb991eae7d4b0)
+
+running 11 tests
+test r1_offline_catch_up_in_order ... R1 n=3 commit 0 -> Buffered { group_id: GroupId(181191cbfdef3537891b1a54c60482f9), epoch: EpochId(1) }
+R1 n=3 msg 0 -> Processed
+R1 n=3 commit 1 -> Buffered { group_id: GroupId(181191cbfdef3537891b1a54c60482f9), epoch: EpochId(2) }
+R1 n=3 msg 1 -> Processed
+R1 n=3 commit 2 -> Buffered { group_id: GroupId(181191cbfdef3537891b1a54c60482f9), epoch: EpochId(3) }
+R1 n=3 msg 2 -> Processed
+R1 n=3: 3/3 messages processed, 3 MessageReceived events, bob epoch=4
+R1 n=5 commit 0 -> Buffered { group_id: GroupId(25f92054ef9621ef2aee164849c00540), epoch: EpochId(1) }
+R1 n=5 msg 0 -> Processed
+R1 n=5 commit 1 -> Buffered { group_id: GroupId(25f92054ef9621ef2aee164849c00540), epoch: EpochId(2) }
+R1 n=5 msg 1 -> Processed
+R1 n=5 commit 2 -> Buffered { group_id: GroupId(25f92054ef9621ef2aee164849c00540), epoch: EpochId(3) }
+R1 n=5 msg 2 -> Processed
+R1 n=5 commit 3 -> Buffered { group_id: GroupId(25f92054ef9621ef2aee164849c00540), epoch: EpochId(4) }
+R1 n=5 msg 3 -> Processed
+R1 n=5 commit 4 -> Buffered { group_id: GroupId(25f92054ef9621ef2aee164849c00540), epoch: EpochId(5) }
+R1 n=5 msg 4 -> Processed
+R1 n=5: 5/5 messages processed, 5 MessageReceived events, bob epoch=6
+R1 n=6 commit 0 -> Buffered { group_id: GroupId(120fb02cb1abbb363788a7012abf590e), epoch: EpochId(1) }
+R1 n=6 msg 0 -> Processed
+R1 n=6 commit 1 -> Buffered { group_id: GroupId(120fb02cb1abbb363788a7012abf590e), epoch: EpochId(2) }
+R1 n=6 msg 1 -> Processed
+R1 n=6 commit 2 -> Buffered { group_id: GroupId(120fb02cb1abbb363788a7012abf590e), epoch: EpochId(3) }
+R1 n=6 msg 2 -> Processed
+R1 n=6 commit 3 -> Buffered { group_id: GroupId(120fb02cb1abbb363788a7012abf590e), epoch: EpochId(4) }
+R1 n=6 msg 3 -> Processed
+R1 n=6 commit 4 -> Buffered { group_id: GroupId(120fb02cb1abbb363788a7012abf590e), epoch: EpochId(5) }
+R1 n=6 msg 4 -> Processed
+R1 n=6 commit 5 -> Buffered { group_id: GroupId(120fb02cb1abbb363788a7012abf590e), epoch: EpochId(6) }
+R1 n=6 msg 5 -> Processed
+R1 n=6: 6/6 messages processed, 6 MessageReceived events, bob epoch=7
+R1 n=10 commit 0 -> Buffered { group_id: GroupId(afe221ffb4b97347ae5250bb37e773c4), epoch: EpochId(1) }
+R1 n=10 msg 0 -> Processed
+R1 n=10 commit 1 -> Buffered { group_id: GroupId(afe221ffb4b97347ae5250bb37e773c4), epoch: EpochId(2) }
+R1 n=10 msg 1 -> Processed
+R1 n=10 commit 2 -> Buffered { group_id: GroupId(afe221ffb4b97347ae5250bb37e773c4), epoch: EpochId(3) }
+R1 n=10 msg 2 -> Processed
+R1 n=10 commit 3 -> Buffered { group_id: GroupId(afe221ffb4b97347ae5250bb37e773c4), epoch: EpochId(4) }
+R1 n=10 msg 3 -> Processed
+R1 n=10 commit 4 -> Buffered { group_id: GroupId(afe221ffb4b97347ae5250bb37e773c4), epoch: EpochId(5) }
+R1 n=10 msg 4 -> Processed
+R1 n=10 commit 5 -> Buffered { group_id: GroupId(afe221ffb4b97347ae5250bb37e773c4), epoch: EpochId(6) }
+R1 n=10 msg 5 -> Processed
+R1 n=10 commit 6 -> Buffered { group_id: GroupId(afe221ffb4b97347ae5250bb37e773c4), epoch: EpochId(7) }
+R1 n=10 msg 6 -> Processed
+R1 n=10 commit 7 -> Buffered { group_id: GroupId(afe221ffb4b97347ae5250bb37e773c4), epoch: EpochId(8) }
+R1 n=10 msg 7 -> Processed
+R1 n=10 commit 8 -> Buffered { group_id: GroupId(afe221ffb4b97347ae5250bb37e773c4), epoch: EpochId(9) }
+R1 n=10 msg 8 -> Processed
+R1 n=10 commit 9 -> Buffered { group_id: GroupId(afe221ffb4b97347ae5250bb37e773c4), epoch: EpochId(10) }
+R1 n=10 msg 9 -> Processed
+R1 n=10: 10/10 messages processed, 10 MessageReceived events, bob epoch=11
+ok
+test r2_offline_commits_first ... R2 n=3 commit 0 -> Buffered { group_id: GroupId(203fec06d596c7044908b62d2f7fb2ef), epoch: EpochId(1) }
+R2 n=3 commit 1 -> Buffered { group_id: GroupId(203fec06d596c7044908b62d2f7fb2ef), epoch: EpochId(2) }
+R2 n=3 commit 2 -> Buffered { group_id: GroupId(203fec06d596c7044908b62d2f7fb2ef), epoch: EpochId(3) }
+R2 n=3: fixpoint after passes [3, 0, 0, 0] -> tip epoch 4
+R2 n=3 msg 0 (sent at epoch 1) -> Processed
+R2 n=3 msg 1 (sent at epoch 2) -> Processed
+R2 n=3 msg 2 (sent at epoch 3) -> Processed
+R2 n=3: 3/3 messages processed at tip 4; first processed send-epoch=Some(1) (distance Some(3))
+R2 n=5 commit 0 -> Buffered { group_id: GroupId(c6c77986e08aa570136adfeef40a3a6f), epoch: EpochId(1) }
+R2 n=5 commit 1 -> Buffered { group_id: GroupId(c6c77986e08aa570136adfeef40a3a6f), epoch: EpochId(2) }
+R2 n=5 commit 2 -> Buffered { group_id: GroupId(c6c77986e08aa570136adfeef40a3a6f), epoch: EpochId(3) }
+R2 n=5 commit 3 -> Buffered { group_id: GroupId(c6c77986e08aa570136adfeef40a3a6f), epoch: EpochId(4) }
+R2 n=5 commit 4 -> Buffered { group_id: GroupId(c6c77986e08aa570136adfeef40a3a6f), epoch: EpochId(5) }
+R2 n=5: fixpoint after passes [5, 0, 0, 0] -> tip epoch 6
+R2 n=5 msg 0 (sent at epoch 1) -> Processed
+R2 n=5 msg 1 (sent at epoch 2) -> Processed
+R2 n=5 msg 2 (sent at epoch 3) -> Processed
+R2 n=5 msg 3 (sent at epoch 4) -> Processed
+R2 n=5 msg 4 (sent at epoch 5) -> Processed
+R2 n=5: 5/5 messages processed at tip 6; first processed send-epoch=Some(1) (distance Some(5))
+R2 n=6 commit 0 -> Buffered { group_id: GroupId(1852b2dfed3cbd73433441cfa0c7818b), epoch: EpochId(1) }
+R2 n=6 commit 1 -> Buffered { group_id: GroupId(1852b2dfed3cbd73433441cfa0c7818b), epoch: EpochId(2) }
+R2 n=6 commit 2 -> Buffered { group_id: GroupId(1852b2dfed3cbd73433441cfa0c7818b), epoch: EpochId(3) }
+R2 n=6 commit 3 -> Buffered { group_id: GroupId(1852b2dfed3cbd73433441cfa0c7818b), epoch: EpochId(4) }
+R2 n=6 commit 4 -> Buffered { group_id: GroupId(1852b2dfed3cbd73433441cfa0c7818b), epoch: EpochId(5) }
+R2 n=6 commit 5 -> Buffered { group_id: GroupId(1852b2dfed3cbd73433441cfa0c7818b), epoch: EpochId(6) }
+R2 n=6: fixpoint after passes [6, 0, 0, 0] -> tip epoch 7
+R2 n=6 msg 0 (sent at epoch 1) -> Processed
+R2 n=6 msg 1 (sent at epoch 2) -> Processed
+R2 n=6 msg 2 (sent at epoch 3) -> Processed
+R2 n=6 msg 3 (sent at epoch 4) -> Processed
+R2 n=6 msg 4 (sent at epoch 5) -> Processed
+R2 n=6 msg 5 (sent at epoch 6) -> Processed
+R2 n=6: 6/6 messages processed at tip 7; first processed send-epoch=Some(1) (distance Some(6))
+R2 n=10 commit 0 -> Buffered { group_id: GroupId(df91190c3bb2a9f15d70f0607242947b), epoch: EpochId(1) }
+R2 n=10 commit 1 -> Buffered { group_id: GroupId(df91190c3bb2a9f15d70f0607242947b), epoch: EpochId(2) }
+R2 n=10 commit 2 -> Buffered { group_id: GroupId(df91190c3bb2a9f15d70f0607242947b), epoch: EpochId(3) }
+R2 n=10 commit 3 -> Buffered { group_id: GroupId(df91190c3bb2a9f15d70f0607242947b), epoch: EpochId(4) }
+R2 n=10 commit 4 -> Buffered { group_id: GroupId(df91190c3bb2a9f15d70f0607242947b), epoch: EpochId(5) }
+R2 n=10 commit 5 -> Buffered { group_id: GroupId(df91190c3bb2a9f15d70f0607242947b), epoch: EpochId(6) }
+R2 n=10 commit 6 -> Buffered { group_id: GroupId(df91190c3bb2a9f15d70f0607242947b), epoch: EpochId(7) }
+R2 n=10 commit 7 -> Buffered { group_id: GroupId(df91190c3bb2a9f15d70f0607242947b), epoch: EpochId(8) }
+R2 n=10 commit 8 -> Buffered { group_id: GroupId(df91190c3bb2a9f15d70f0607242947b), epoch: EpochId(9) }
+R2 n=10 commit 9 -> Buffered { group_id: GroupId(df91190c3bb2a9f15d70f0607242947b), epoch: EpochId(10) }
+R2 n=10: fixpoint after passes [6, 0, 0, 0] -> tip epoch 7
+R2 n=10 msg 0 (sent at epoch 1) -> Processed
+R2 n=10 msg 1 (sent at epoch 2) -> Processed
+R2 n=10 msg 2 (sent at epoch 3) -> Processed
+R2 n=10 msg 3 (sent at epoch 4) -> Processed
+R2 n=10 msg 4 (sent at epoch 5) -> Processed
+R2 n=10 msg 5 (sent at epoch 6) -> Processed
+R2 n=10 msg 6 (sent at epoch 7) -> Buffered { group_id: GroupId(df91190c3bb2a9f15d70f0607242947b), epoch: EpochId(8) }
+R2 n=10 msg 7 (sent at epoch 8) -> Buffered { group_id: GroupId(df91190c3bb2a9f15d70f0607242947b), epoch: EpochId(9) }
+R2 n=10 msg 8 (sent at epoch 9) -> Buffered { group_id: GroupId(df91190c3bb2a9f15d70f0607242947b), epoch: EpochId(10) }
+R2 n=10 msg 9 (sent at epoch 10) -> Buffered { group_id: GroupId(df91190c3bb2a9f15d70f0607242947b), epoch: EpochId(11) }
+R2 n=10: 6/10 messages processed at tip 7; first processed send-epoch=Some(1) (distance Some(6))
+ok
+test r2b_commits_first_driven ... R2b commit 0 -> Ok(Buffered { group_id: GroupId(d2ec3231bd69d6ad2b1f1e33e33f4f94), epoch: EpochId(1) })
+R2b commit 1 -> Ok(Buffered { group_id: GroupId(d2ec3231bd69d6ad2b1f1e33e33f4f94), epoch: EpochId(2) })
+R2b commit 2 -> Ok(Buffered { group_id: GroupId(d2ec3231bd69d6ad2b1f1e33e33f4f94), epoch: EpochId(3) })
+R2b commit 3 -> Ok(Buffered { group_id: GroupId(d2ec3231bd69d6ad2b1f1e33e33f4f94), epoch: EpochId(4) })
+R2b commit 4 -> Ok(Buffered { group_id: GroupId(d2ec3231bd69d6ad2b1f1e33e33f4f94), epoch: EpochId(5) })
+R2b commit 5 -> Ok(Buffered { group_id: GroupId(d2ec3231bd69d6ad2b1f1e33e33f4f94), epoch: EpochId(6) })
+R2b commit 6 -> Ok(Buffered { group_id: GroupId(d2ec3231bd69d6ad2b1f1e33e33f4f94), epoch: EpochId(7) })
+R2b commit 7 -> Ok(Buffered { group_id: GroupId(d2ec3231bd69d6ad2b1f1e33e33f4f94), epoch: EpochId(8) })
+R2b commit 8 -> Ok(Buffered { group_id: GroupId(d2ec3231bd69d6ad2b1f1e33e33f4f94), epoch: EpochId(9) })
+R2b commit 9 -> Ok(Buffered { group_id: GroupId(d2ec3231bd69d6ad2b1f1e33e33f4f94), epoch: EpochId(10) })
+R2b drive pass 1:
+    drive iteration 0 (clock=3000ms): epoch 1->7 inputs_settled=true send_results=0 peel_drove=false owes=true
+    drive iteration 1 (clock=5000ms): epoch 7->11 inputs_settled=true send_results=0 peel_drove=false owes=false
+    drive iteration 2 (clock=7000ms): epoch 11->11 inputs_settled=true send_results=0 peel_drove=false owes=false
+R2b tip after first drive: 11 (target 11)
+R2b msg 0 (sent after commit 0) -> Stale { reason: BeyondAppRetention }
+R2b msg 1 (sent after commit 1) -> Stale { reason: BeyondAppRetention }
+R2b msg 2 (sent after commit 2) -> Stale { reason: BeyondAppRetention }
+R2b msg 3 (sent after commit 3) -> Stale { reason: BeyondAppRetention }
+R2b msg 4 (sent after commit 4) -> Processed
+R2b msg 5 (sent after commit 5) -> Processed
+R2b msg 6 (sent after commit 6) -> Processed
+R2b msg 7 (sent after commit 7) -> Processed
+R2b msg 8 (sent after commit 8) -> Processed
+R2b msg 9 (sent after commit 9) -> Processed
+R2b: 6/10 messages processed at tip 11
+ok
+test r2c_window_boundary ... R2c k=4 commit 0 -> Ok(Buffered { group_id: GroupId(f11f3dcbeb68e6d556c7abd17e6f6ac7), epoch: EpochId(1) })
+R2c k=4 commit 1 -> Ok(Buffered { group_id: GroupId(f11f3dcbeb68e6d556c7abd17e6f6ac7), epoch: EpochId(2) })
+R2c k=4 commit 2 -> Ok(Buffered { group_id: GroupId(f11f3dcbeb68e6d556c7abd17e6f6ac7), epoch: EpochId(3) })
+R2c k=4 commit 3 -> Ok(Buffered { group_id: GroupId(f11f3dcbeb68e6d556c7abd17e6f6ac7), epoch: EpochId(4) })
+    drive iteration 0 (clock=3000ms): epoch 1->5 inputs_settled=true send_results=0 peel_drove=false owes=false
+    drive iteration 1 (clock=5000ms): epoch 5->5 inputs_settled=true send_results=0 peel_drove=false owes=false
+R2c k=4: M sent at epoch 1, tip 5 (distance 4) -> Processed
+R2c k=5 commit 0 -> Ok(Buffered { group_id: GroupId(46adf5f5fd7a91128d609fa0adc4ac8d), epoch: EpochId(1) })
+R2c k=5 commit 1 -> Ok(Buffered { group_id: GroupId(46adf5f5fd7a91128d609fa0adc4ac8d), epoch: EpochId(2) })
+R2c k=5 commit 2 -> Ok(Buffered { group_id: GroupId(46adf5f5fd7a91128d609fa0adc4ac8d), epoch: EpochId(3) })
+R2c k=5 commit 3 -> Ok(Buffered { group_id: GroupId(46adf5f5fd7a91128d609fa0adc4ac8d), epoch: EpochId(4) })
+R2c k=5 commit 4 -> Ok(Buffered { group_id: GroupId(46adf5f5fd7a91128d609fa0adc4ac8d), epoch: EpochId(5) })
+    drive iteration 0 (clock=3000ms): epoch 1->6 inputs_settled=true send_results=0 peel_drove=false owes=false
+    drive iteration 1 (clock=5000ms): epoch 6->6 inputs_settled=true send_results=0 peel_drove=false owes=false
+R2c k=5: M sent at epoch 1, tip 6 (distance 5) -> Processed
+R2c k=6 commit 0 -> Ok(Buffered { group_id: GroupId(aad34438b9934ceaacd330c908e1b945), epoch: EpochId(1) })
+R2c k=6 commit 1 -> Ok(Buffered { group_id: GroupId(aad34438b9934ceaacd330c908e1b945), epoch: EpochId(2) })
+R2c k=6 commit 2 -> Ok(Buffered { group_id: GroupId(aad34438b9934ceaacd330c908e1b945), epoch: EpochId(3) })
+R2c k=6 commit 3 -> Ok(Buffered { group_id: GroupId(aad34438b9934ceaacd330c908e1b945), epoch: EpochId(4) })
+R2c k=6 commit 4 -> Ok(Buffered { group_id: GroupId(aad34438b9934ceaacd330c908e1b945), epoch: EpochId(5) })
+R2c k=6 commit 5 -> Ok(Buffered { group_id: GroupId(aad34438b9934ceaacd330c908e1b945), epoch: EpochId(6) })
+    drive iteration 0 (clock=3000ms): epoch 1->7 inputs_settled=true send_results=0 peel_drove=false owes=false
+    drive iteration 1 (clock=5000ms): epoch 7->7 inputs_settled=true send_results=0 peel_drove=false owes=false
+R2c k=6: M sent at epoch 1, tip 7 (distance 6) -> Stale { reason: BeyondAppRetention }
+R2c k=7 commit 0 -> Ok(Buffered { group_id: GroupId(739c749c52017a1ad3269c66265a40a8), epoch: EpochId(1) })
+R2c k=7 commit 1 -> Ok(Buffered { group_id: GroupId(739c749c52017a1ad3269c66265a40a8), epoch: EpochId(2) })
+R2c k=7 commit 2 -> Ok(Buffered { group_id: GroupId(739c749c52017a1ad3269c66265a40a8), epoch: EpochId(3) })
+R2c k=7 commit 3 -> Ok(Buffered { group_id: GroupId(739c749c52017a1ad3269c66265a40a8), epoch: EpochId(4) })
+R2c k=7 commit 4 -> Ok(Buffered { group_id: GroupId(739c749c52017a1ad3269c66265a40a8), epoch: EpochId(5) })
+R2c k=7 commit 5 -> Ok(Buffered { group_id: GroupId(739c749c52017a1ad3269c66265a40a8), epoch: EpochId(6) })
+R2c k=7 commit 6 -> Ok(Buffered { group_id: GroupId(739c749c52017a1ad3269c66265a40a8), epoch: EpochId(7) })
+    drive iteration 0 (clock=3000ms): epoch 1->7 inputs_settled=true send_results=0 peel_drove=false owes=true
+    drive iteration 1 (clock=5000ms): epoch 7->8 inputs_settled=true send_results=0 peel_drove=false owes=false
+    drive iteration 2 (clock=7000ms): epoch 8->8 inputs_settled=true send_results=0 peel_drove=false owes=false
+R2c k=7: M sent at epoch 1, tip 8 (distance 7) -> Stale { reason: BeyondAppRetention }
+ok
+test r3_missing_commit ... R3 commit 0 -> Buffered { group_id: GroupId(acbd9201b032e8a84e392ee2d916ab90), epoch: EpochId(1) }
+R3 msg 0 -> Processed
+R3 msg 1 (its commit missing) -> Buffered { group_id: GroupId(acbd9201b032e8a84e392ee2d916ab90), epoch: EpochId(3) }
+R3 commit 2 (gap behind it) -> Buffered { group_id: GroupId(acbd9201b032e8a84e392ee2d916ab90), epoch: EpochId(3) }
+R3 msg 2 -> Buffered { group_id: GroupId(acbd9201b032e8a84e392ee2d916ab90), epoch: EpochId(4) }
+R3 commit 3 (gap behind it) -> Buffered { group_id: GroupId(acbd9201b032e8a84e392ee2d916ab90), epoch: EpochId(4) }
+R3 msg 3 -> Buffered { group_id: GroupId(acbd9201b032e8a84e392ee2d916ab90), epoch: EpochId(5) }
+R3 bob epoch=2 epoch_state=Some(Stable { epoch: EpochId(2) }) events:
+    bob: EpochChanged(2)
+    bob: MessageReceived
+R3 late commit 1 -> Buffered { group_id: GroupId(acbd9201b032e8a84e392ee2d916ab90), epoch: EpochId(2) }
+    bob-after-late: EpochChanged(5)
+    bob-after-late: MessageReceived
+    bob-after-late: MessageReceived
+    bob-after-late: MessageReceived
+    bob-after-late: GroupStateRevalidated
+    bob-after-late: GroupStateRevalidated
+R3 after late commit: bob epoch=5 state=Some(Stable { epoch: EpochId(5) })
+R3 redelivered msg 1 -> Ignored { category: Duplicate }
+R3 redelivered msg 2 -> Ignored { category: Duplicate }
+R3 redelivered msg 3 -> Ignored { category: Duplicate }
+R3 total decoded contents: 0
+ok
+test r3b_missing_commit_epoch_sealed ... R3b commit 0 -> Ok(Buffered { group_id: GroupId(e61b3b9bbb93638a11b20750585f568b), epoch: EpochId(1) })
+R3b msg 0 -> Ok(Processed)
+R3b msg 1 (its commit missing) -> Ok(TransportDeferred { group_id: GroupId(e61b3b9bbb93638a11b20750585f568b), lineage: Uncontested })
+R3b commit 2 (gap behind it) -> Ok(TransportDeferred { group_id: GroupId(e61b3b9bbb93638a11b20750585f568b), lineage: Uncontested })
+R3b msg 2 (sealed under a future epoch) -> Ok(TransportDeferred { group_id: GroupId(e61b3b9bbb93638a11b20750585f568b), lineage: Uncontested })
+R3b commit 3 (gap behind it) -> Ok(TransportDeferred { group_id: GroupId(e61b3b9bbb93638a11b20750585f568b), lineage: Uncontested })
+R3b msg 3 (sealed under a future epoch) -> Ok(TransportDeferred { group_id: GroupId(e61b3b9bbb93638a11b20750585f568b), lineage: Uncontested })
+R3b fixpoint passes [0, 0, 0]; bob epoch=2 state=Some(Stable { epoch: EpochId(2) })
+    bob: EpochChanged(2)
+    bob: MessageReceived
+R3b late commit 1 -> Ok(Buffered { group_id: GroupId(e61b3b9bbb93638a11b20750585f568b), epoch: EpochId(2) })
+R3b after late commit: passes [1, 0, 0, 0]; epoch=3 state=Some(Stable { epoch: EpochId(3) })
+    bob-after-late: EpochChanged(3)
+R3b redelivered msg 1 -> Ok(Processed)
+R3b redelivered msg 2 -> Ok(TransportDeferred { group_id: GroupId(e61b3b9bbb93638a11b20750585f568b), lineage: Uncontested })
+R3b redelivered msg 3 -> Ok(TransportDeferred { group_id: GroupId(e61b3b9bbb93638a11b20750585f568b), lineage: Uncontested })
+R3b total decoded contents: 1 -> [[109, 115, 103, 45, 49]]
+ok
+test r3c_missing_commit_epoch_sealed_driven ... R3c commit 0 -> Ok(Buffered { group_id: GroupId(50e63426b06fa2f02701530ea22ff78d), epoch: EpochId(1) })
+    drive iteration 0 (clock=3000ms): epoch 1->2 inputs_settled=true send_results=0 peel_drove=false owes=false
+    drive iteration 1 (clock=5000ms): epoch 2->2 inputs_settled=true send_results=0 peel_drove=false owes=false
+R3c after commit 0: epoch=2 state=Some(Stable { epoch: EpochId(2) })
+    bob: EpochChanged(2)
+R3c msg 0 -> Ok(Processed)
+    drive iteration 0 (clock=7000ms): epoch 2->2 inputs_settled=true send_results=0 peel_drove=false owes=false
+R3c after msg 0: epoch=2 state=Some(Stable { epoch: EpochId(2) })
+    bob: MessageReceived
+R3c msg 1 (its commit missing) -> Ok(TransportDeferred { group_id: GroupId(50e63426b06fa2f02701530ea22ff78d), lineage: Uncontested })
+    drive deferred-peel cutoff +2591998000ms -> 0 SendResult(s)
+    drive iteration 0 (clock=9000ms): epoch 2->2 inputs_settled=true send_results=0 peel_drove=true owes=false
+    drive iteration 1 (clock=2592009000ms): epoch 2->2 inputs_settled=true send_results=0 peel_drove=false owes=false
+R3c after msg 1 (its commit missing): epoch=2 state=Some(Stable { epoch: EpochId(2) })
+    bob: TransportObjectResourceRefused
+R3c commit 2 -> Ok(TransportDeferred { group_id: GroupId(50e63426b06fa2f02701530ea22ff78d), lineage: Uncontested })
+    drive deferred-peel cutoff +2591998000ms -> 0 SendResult(s)
+    drive iteration 0 (clock=2592011000ms): epoch 2->2 inputs_settled=true send_results=0 peel_drove=true owes=false
+    drive iteration 1 (clock=5184011000ms): epoch 2->2 inputs_settled=true send_results=0 peel_drove=false owes=false
+R3c after commit 2: epoch=2 state=Some(Stable { epoch: EpochId(2) })
+    bob: TransportObjectResourceRefused
+R3c msg 2 -> Ok(TransportDeferred { group_id: GroupId(50e63426b06fa2f02701530ea22ff78d), lineage: Uncontested })
+    drive deferred-peel cutoff +2591998000ms -> 0 SendResult(s)
+    drive iteration 0 (clock=5184013000ms): epoch 2->2 inputs_settled=true send_results=0 peel_drove=true owes=false
+    drive iteration 1 (clock=7776013000ms): epoch 2->2 inputs_settled=true send_results=0 peel_drove=false owes=false
+R3c after msg 2: epoch=2 state=Some(Stable { epoch: EpochId(2) })
+    bob: TransportObjectResourceRefused
+R3c commit 3 -> Ok(TransportDeferred { group_id: GroupId(50e63426b06fa2f02701530ea22ff78d), lineage: Uncontested })
+    drive deferred-peel cutoff +2591998000ms -> 0 SendResult(s)
+    drive iteration 0 (clock=7776015000ms): epoch 2->2 inputs_settled=true send_results=0 peel_drove=true owes=false
+    drive iteration 1 (clock=10368015000ms): epoch 2->2 inputs_settled=true send_results=0 peel_drove=false owes=false
+R3c after commit 3: epoch=2 state=Some(Stable { epoch: EpochId(2) })
+    bob: TransportObjectResourceRefused
+R3c msg 3 -> Ok(TransportDeferred { group_id: GroupId(50e63426b06fa2f02701530ea22ff78d), lineage: Uncontested })
+    drive deferred-peel cutoff +2591998000ms -> 0 SendResult(s)
+    drive iteration 0 (clock=10368017000ms): epoch 2->2 inputs_settled=true send_results=0 peel_drove=true owes=false
+    drive iteration 1 (clock=12960017000ms): epoch 2->2 inputs_settled=true send_results=0 peel_drove=false owes=false
+R3c after msg 3: epoch=2 state=Some(Stable { epoch: EpochId(2) })
+    bob: TransportObjectResourceRefused
+R3c late commit 1 -> Ok(Buffered { group_id: GroupId(50e63426b06fa2f02701530ea22ff78d), epoch: EpochId(2) })
+    drive iteration 0 (clock=12960019000ms): epoch 2->3 inputs_settled=true send_results=0 peel_drove=false owes=false
+    drive iteration 1 (clock=12960021000ms): epoch 3->3 inputs_settled=true send_results=0 peel_drove=false owes=false
+R3c after late commit 1: epoch=3 state=Some(Stable { epoch: EpochId(3) })
+    bob: EpochChanged(3)
+R3c decoded after late commit (no redelivery): 0 -> []; epoch=3
+R3c redelivered msg 1 -> Ok(Processed)
+    drive iteration 0 (clock=12960023000ms): epoch 3->3 inputs_settled=true send_results=0 peel_drove=false owes=false
+R3c after redelivered msg 1: epoch=3 state=Some(Stable { epoch: EpochId(3) })
+    bob: MessageReceived
+R3c redelivered msg 2 -> Ok(TransportDeferred { group_id: GroupId(50e63426b06fa2f02701530ea22ff78d), lineage: Uncontested })
+    drive deferred-peel cutoff +2591998000ms -> 0 SendResult(s)
+    drive iteration 0 (clock=12960025000ms): epoch 3->3 inputs_settled=true send_results=0 peel_drove=true owes=false
+    drive iteration 1 (clock=15552025000ms): epoch 3->3 inputs_settled=true send_results=0 peel_drove=false owes=false
+R3c after redelivered msg 2: epoch=3 state=Some(Stable { epoch: EpochId(3) })
+    bob: TransportObjectResourceRefused
+R3c redelivered msg 3 -> Ok(TransportDeferred { group_id: GroupId(50e63426b06fa2f02701530ea22ff78d), lineage: Uncontested })
+    drive deferred-peel cutoff +2591998000ms -> 0 SendResult(s)
+    drive iteration 0 (clock=15552027000ms): epoch 3->3 inputs_settled=true send_results=0 peel_drove=true owes=false
+    drive iteration 1 (clock=18144027000ms): epoch 3->3 inputs_settled=true send_results=0 peel_drove=false owes=false
+R3c after redelivered msg 3: epoch=3 state=Some(Stable { epoch: EpochId(3) })
+    bob: TransportObjectResourceRefused
+R3c redelivered commit 2 -> Ok(Buffered { group_id: GroupId(50e63426b06fa2f02701530ea22ff78d), epoch: EpochId(3) })
+    drive iteration 0 (clock=18144029000ms): epoch 3->4 inputs_settled=true send_results=0 peel_drove=false owes=false
+    drive iteration 1 (clock=18144031000ms): epoch 4->4 inputs_settled=true send_results=0 peel_drove=false owes=false
+R3c after redelivered commit 2: epoch=4 state=Some(Stable { epoch: EpochId(4) })
+    bob: EpochChanged(4)
+R3c redelivered commit 3 -> Ok(Buffered { group_id: GroupId(50e63426b06fa2f02701530ea22ff78d), epoch: EpochId(4) })
+    drive iteration 0 (clock=18144033000ms): epoch 4->5 inputs_settled=true send_results=0 peel_drove=false owes=false
+    drive iteration 1 (clock=18144035000ms): epoch 5->5 inputs_settled=true send_results=0 peel_drove=false owes=false
+R3c after redelivered commit 3: epoch=5 state=Some(Stable { epoch: EpochId(5) })
+    bob: EpochChanged(5)
+R3c redelivered msg 2 again -> Ok(Processed)
+    drive iteration 0 (clock=18144037000ms): epoch 5->5 inputs_settled=true send_results=0 peel_drove=false owes=false
+R3c after redelivered msg 2 again: epoch=5 state=Some(Stable { epoch: EpochId(5) })
+    bob: MessageReceived
+R3c redelivered msg 3 again -> Ok(Processed)
+    drive iteration 0 (clock=18144039000ms): epoch 5->5 inputs_settled=true send_results=0 peel_drove=false owes=false
+R3c after redelivered msg 3 again: epoch=5 state=Some(Stable { epoch: EpochId(5) })
+    bob: MessageReceived
+R3c total decoded contents: 0 -> []
+ok
+test r4_restored_stale_state_after_own_commit ... R4 bob epoch before snapshot: 1
+R4 bob self-update epoch: 2
+    ingest commit outcome: Buffered { group_id: GroupId(0f9e393bcbc0736043fc01e7ecd216fa), epoch: EpochId(1) }
+R4 restored bob epoch=1 state=Some(Stable { epoch: EpochId(1) })
+R4 restored ingest own self-update commit -> Ok(Buffered { group_id: GroupId(0f9e393bcbc0736043fc01e7ecd216fa), epoch: EpochId(1) })
+R4 convergence after own self-update commit: CanonicalizationResult { previous_tip: 1, selected_tip: None, selected_fork_epoch: None, selected_branch_id: None, candidate_count: 0, eligible_count: 0, convergence_status: Settled, accepted_commits: [], accepted_proposals: [], accepted_app_messages: [], deferred_messages: [], invalidated_app_messages: [], dropped_messages: [DroppedMessage { message_id: "69a5ec36aa145e73e90da1606afaa99ca20d1167fe335ade656913874a902441", kind: Commit, reason: InvalidAgainstCandidateState, rejection_category: None }], already_seen: [], queued_outbound_intents: [], publishable_outbound_messages: [], errors: [CandidateStateUnavailable], selection_trace: Some(BranchSelectionTrace { selected_branch_id: None, candidates: [], rule_trace: [], losing_branch_ids: [] }) }
+    restored: GroupJoined(welcomer=b774681c8831e75685ec641b59a1c458f7da8dd287e13382957843387d51f9cd)
+R4 restored record: epoch=1 removed=false unrecoverable=false state=Some(Stable { epoch: EpochId(1) })
+R4 restored ingest alice commit -> Ok(Buffered { group_id: GroupId(0f9e393bcbc0736043fc01e7ecd216fa), epoch: EpochId(2) })
+R4 convergence after alice commit: CanonicalizationResult { previous_tip: 1, selected_tip: None, selected_fork_epoch: None, selected_branch_id: None, candidate_count: 0, eligible_count: 0, convergence_status: Settled, accepted_commits: [], accepted_proposals: [], accepted_app_messages: [], deferred_messages: [DeferredMessage { message_id: "57b9d40efb2aca0a821a6455e38fc30208e8402733c95549bab72dd5639879bb", kind: Commit, reason: MissingCandidateParent }], invalidated_app_messages: [], dropped_messages: [], already_seen: [], queued_outbound_intents: [], publishable_outbound_messages: [], errors: [CandidateStateUnavailable], selection_trace: Some(BranchSelectionTrace { selected_branch_id: None, candidates: [], rule_trace: [], losing_branch_ids: [] }) }
+R4 restored record: epoch=1 removed=false unrecoverable=false state=Some(Stable { epoch: EpochId(1) })
+R4 restored ingest alice message -> Ok(Buffered { group_id: GroupId(0f9e393bcbc0736043fc01e7ecd216fa), epoch: EpochId(3) })
+R4 convergence after alice message: CanonicalizationResult { previous_tip: 1, selected_tip: None, selected_fork_epoch: None, selected_branch_id: None, candidate_count: 0, eligible_count: 0, convergence_status: Settled, accepted_commits: [], accepted_proposals: [], accepted_app_messages: [], deferred_messages: [], invalidated_app_messages: [], dropped_messages: [], already_seen: [], queued_outbound_intents: [], publishable_outbound_messages: [], errors: [], selection_trace: None }
+R4 restored record: epoch=1 removed=false unrecoverable=false state=Some(Stable { epoch: EpochId(1) })
+ok
+test r4b_restored_state_epoch_sealed ... R4b bob epoch before snapshot: 1
+R4b bob self-update epoch: 2
+R4b alice ingest bob's own commit -> Ok(Buffered { group_id: GroupId(686acd296b903fb55bcecaea8b2f6a1f), epoch: EpochId(1) })
+R4b alice converge passes [1, 0, 0, 0] -> epoch 2
+R4b restored bob epoch=1 state=Some(Stable { epoch: EpochId(1) })
+R4b restored ingest own self-update commit -> Ok(Buffered { group_id: GroupId(686acd296b903fb55bcecaea8b2f6a1f), epoch: EpochId(1) })
+R4b convergence after own self-update commit: CanonicalizationResult { previous_tip: 1, selected_tip: None, selected_fork_epoch: None, selected_branch_id: None, candidate_count: 0, eligible_count: 0, convergence_status: Settled, accepted_commits: [], accepted_proposals: [], accepted_app_messages: [], deferred_messages: [], invalidated_app_messages: [], dropped_messages: [DroppedMessage { message_id: "249fc0ecc788a251866dd3e809effec8b92a6fe9d02c1ef49b228eee089e25ae", kind: Commit, reason: InvalidAgainstCandidateState, rejection_category: None }], already_seen: [], queued_outbound_intents: [], publishable_outbound_messages: [], errors: [CandidateStateUnavailable], selection_trace: Some(BranchSelectionTrace { selected_branch_id: None, candidates: [], rule_trace: [], losing_branch_ids: [] }) }
+    restored: GroupJoined(welcomer=b774681c8831e75685ec641b59a1c458f7da8dd287e13382957843387d51f9cd)
+R4b restored record: epoch=1 removed=false unrecoverable=false state=Some(Stable { epoch: EpochId(1) })
+R4b restored ingest alice commit -> Ok(TransportDeferred { group_id: GroupId(686acd296b903fb55bcecaea8b2f6a1f), lineage: Uncontested })
+R4b convergence after alice commit: CanonicalizationResult { previous_tip: 1, selected_tip: None, selected_fork_epoch: None, selected_branch_id: None, candidate_count: 0, eligible_count: 0, convergence_status: Settled, accepted_commits: [], accepted_proposals: [], accepted_app_messages: [], deferred_messages: [], invalidated_app_messages: [], dropped_messages: [], already_seen: [], queued_outbound_intents: [], publishable_outbound_messages: [], errors: [], selection_trace: None }
+R4b restored record: epoch=1 removed=false unrecoverable=false state=Some(Stable { epoch: EpochId(1) })
+R4b restored ingest alice message -> Ok(TransportDeferred { group_id: GroupId(686acd296b903fb55bcecaea8b2f6a1f), lineage: Uncontested })
+R4b convergence after alice message: CanonicalizationResult { previous_tip: 1, selected_tip: None, selected_fork_epoch: None, selected_branch_id: None, candidate_count: 0, eligible_count: 0, convergence_status: Settled, accepted_commits: [], accepted_proposals: [], accepted_app_messages: [], deferred_messages: [], invalidated_app_messages: [], dropped_messages: [], already_seen: [], queued_outbound_intents: [], publishable_outbound_messages: [], errors: [], selection_trace: None }
+R4b restored record: epoch=1 removed=false unrecoverable=false state=Some(Stable { epoch: EpochId(1) })
+ok
+test r5_rejoin_after_removed_and_second_leaf ... R5 bob removal ingest -> Buffered { group_id: GroupId(4830d48284e60db997c6e8b27f64054f), epoch: EpochId(1) }
+    bob-removed: EpochChanged(2)
+    bob-removed: GroupStateChanged(MemberRemoved { member: MemberId(4eea1c7754a13568590b377e37ba58fe9dd72212ac415e991ea6595d28aa42ff) })
+    bob-removed: GroupMemberLeavesRemoved(leaves=1)
+    bob-removed: LocalGroupCopyTerminated(voluntary=false)
+R5 bob record after removal: removed=true unrecoverable=false
+R5 welcome after removal -> Processed
+R5 pending_group_rejoins_for: 0 offer(s): []
+    bob-rejoin: GroupJoined(welcomer=b774681c8831e75685ec641b59a1c458f7da8dd287e13382957843387d51f9cd)
+R5 bob record post-rejoin: epoch=3 removed=false members=2
+R5 alice msg on rejoined bob -> Processed
+R5 bob msg on alice -> Processed
+R5 second-leaf Welcome on bob (healthy) -> Ok(Ignored { category: MissingWelcomeKeyPackage })
+R5 second-leaf Welcome on bob2 -> Processed
+    bob2: GroupJoined(welcomer=b774681c8831e75685ec641b59a1c458f7da8dd287e13382957843387d51f9cd)
+R5 bob2 offers: 0 -> []
+    bob-healthy: MessageReceived
+R5 bob members after healthy-copy welcome: Ok(2)
+ok
+test r5b_rejoin_stale_active_copy ... R5b bob believes active at epoch 1 (alice at 2)
+R5b invite fresh KP of same device -> Err(Other("the invite adds no device: each one is already in the group"))
+R5b welcome on stale active copy -> Ok(LocalState { state: RejoinConfirmationRequired })
+R5b rejoin offers: 1 -> [PendingWelcome { message_id: MessageId(8f5ca1a6316e63b1f59373c67f9143eef96803b3a9209657a09db20b8942a318), group_id: GroupId(82ceba9eab323e3d3d4575075aae3fe4), welcome_bytes: [123, 34, 105, 100, 34, 58, 91, 49, 52, 51, 44, 57, 50, 44, 49, 54, 49, 44, 49, 54, 54, 44, 52, 57, 44, 49, 49, 48, 44, 57, 57, 44, 49, 55, 55, 44, 50, 52, 53, 44, 49, 52, 55, 44, 49, 49, 53, 44, 49, 57, 56, 44, 49, 50, 55, 44, 49, 52, 53, 44, 54, 55, 44, 50, 51, 56, 44, 50, 52, 57, 44, 49, 48, 52, 44, 51, 44, 49, 55, 57, 44, 49, 54, 57, 44, 51, 50, 44, 49, 53, 48, 44, 56, 55, 44, 49, 54, 48, 44, 49, 53, 55, 44, 49, 55, 56, 44, 49, 49, 44, 49, 51, 55, 44, 54, 54, 44, 49, 54, 51, 44, 50, 52, 93, 44, 34, 112, 97, 121, 108, 111, 97, 100, 34, 58, 91, 48, 44, 49, 44, 48, 44, 51, 44, 48, 44, 49, 44, 54, 52, 44, 49, 53, 50, 44, 51, 50, 44, 53, 54, 44, 50, 49, 49, 44, 49, 48, 57, 44, 49, 53, 51, 44, 49, 51, 51, 44, 56, 50, 44, 55, 49, 44, 54, 54, 44, 51, 52, 44, 53, 52, 44, 50, 50, 48, 44, 49, 52, 55, 44, 49, 51, 57, 44, 52, 50, 44, 49, 55, 51, 44, 49, 50, 51, 44, 50, 49, 50, 44, 50, 49, 57, 44, 50, 51, 55, 44, 56, 49, 44, 51, 44, 53, 57, 44, 49, 54, 53, 44, 50, 49, 48, 44, 49, 49, 56, 44, 49, 55, 48, 44, 50, 48, 49, 44, 49, 54, 57, 44, 49, 57, 54, 44, 49, 53, 55, 44, 50, 50, 48, 44, 56, 50, 44, 51, 50, 44, 49, 51, 56, 44, 49, 50, 53, 44, 49, 49, 54, 44, 50, 49, 50, 44, 49, 51, 49, 44, 49, 48, 52, 44, 49, 56, 54, 44, 52, 48, 44, 57, 52, 44, 53, 52, 44, 49, 51, 55, 44, 57, 57, 44, 49, 51, 48, 44, 50, 50, 54, 44, 49, 51, 55, 44, 50, 51, 55, 44, 49, 48, 48, 44, 49, 52, 49, 44, 49, 52, 52, 44, 57, 54, 44, 57, 50, 44, 49, 53, 57, 44, 49, 54, 48, 44, 49, 52, 48, 44, 56, 55, 44, 57, 51, 44, 49, 56, 55, 44, 50, 50, 51, 44, 49, 49, 51, 44, 51, 48, 44, 51, 57, 44, 57, 48, 44, 54, 52, 44, 56, 52, 44, 49, 48, 48, 44, 50, 50, 54, 44, 53, 53, 44, 52, 50, 44, 49, 56, 51, 44, 49, 57, 57, 44, 50, 48, 57, 44, 50, 50, 44, 49, 54, 54, 44, 49, 56, 54, 44, 52, 54, 44, 49, 55, 57, 44, 54, 53, 44, 49, 51, 55, 44, 50, 52, 56, 44, 53, 55, 44, 49, 49, 50, 44, 50, 48, 56, 44, 49, 55, 49, 44, 50, 49, 44, 55, 54, 44, 49, 49, 53, 44, 49, 49, 54, 44, 49, 51, 49, 44, 49, 53, 52, 44, 50, 52, 57, 44, 50, 48, 48, 44, 57, 53, 44, 50, 51, 50, 44, 49, 56, 49, 44, 56, 57, 44, 50, 51, 52, 44, 49, 56, 51, 44, 49, 49, 52, 44, 51, 54, 44, 54, 53, 44, 53, 52, 44, 49, 51, 52, 44, 49, 49, 56, 44, 49, 55, 54, 44, 49, 54, 51, 44, 53, 55, 44, 49, 55, 55, 44, 49, 52, 52, 44, 52, 53, 44, 49, 49, 54, 44, 49, 53, 51, 44, 50, 51, 54, 44, 57, 44, 50, 49, 56, 44, 49, 53, 57, 44, 49, 51, 55, 44, 49, 49, 49, 44, 53, 57, 44, 50, 50, 52, 44, 53, 53, 44, 49, 50, 51, 44, 49, 53, 52, 44, 50, 50, 50, 44, 55, 44, 49, 56, 48, 44, 53, 55, 44, 56, 51, 44, 52, 51, 44, 51, 50, 44, 49, 57, 55, 44, 49, 54, 52, 44, 49, 52, 54, 44, 50, 50, 54, 44, 54, 48, 44, 51, 51, 44, 49, 54, 53, 44, 49, 55, 56, 44, 52, 49, 44, 49, 51, 51, 44, 49, 49, 55, 44, 49, 53, 56, 44, 49, 57, 49, 44, 49, 48, 53, 44, 50, 49, 48, 44, 49, 51, 56, 44, 49, 50, 54, 44, 57, 44, 49, 52, 52, 44, 54, 56, 44, 49, 52, 44, 49, 49, 56, 44, 49, 54, 48, 44, 49, 52, 55, 44, 49, 57, 51, 44, 49, 56, 52, 44, 50, 53, 49, 44, 53, 50, 44, 49, 50, 48, 44, 50, 52, 50, 44, 49, 55, 44, 49, 52, 57, 44, 49, 51, 44, 50, 54, 44, 49, 57, 51, 44, 50, 53, 49, 44, 49, 57, 50, 44, 49, 52, 50, 44, 49, 53, 51, 44, 49, 55, 48, 44, 53, 56, 44, 54, 53, 44, 50, 50, 52, 44, 53, 44, 57, 44, 50, 52, 44, 49, 52, 50, 44, 51, 55, 44, 50, 48, 49, 44, 49, 55, 53, 44, 55, 54, 44, 49, 57, 49, 44, 49, 50, 53, 44, 49, 49, 56, 44, 49, 50, 52, 44, 49, 53, 55, 44, 51, 51, 44, 49, 57, 50, 44, 57, 53, 44, 50, 49, 53, 44, 53, 53, 44, 49, 54, 51, 44, 50, 50, 51, 44, 49, 52, 56, 44, 49, 57, 49, 44, 49, 57, 52, 44, 53, 50, 44, 50, 51, 56, 44, 50, 48, 56, 44, 49, 51, 51, 44, 50, 52, 44, 54, 52, 44, 50, 52, 57, 44, 49, 48, 51, 44, 49, 56, 53, 44, 50, 50, 49, 44, 57, 44, 49, 48, 55, 44, 49, 51, 55, 44, 55, 48, 44, 54, 51, 44, 56, 54, 44, 53, 52, 44, 50, 52, 51, 44, 57, 44, 50, 49, 49, 44, 50, 49, 44, 50, 51, 56, 44, 49, 52, 52, 44, 50, 48, 44, 49, 53, 44, 49, 48, 52, 44, 50, 51, 48, 44, 49, 56, 44, 53, 51, 44, 49, 54, 56, 44, 49, 52, 52, 44, 50, 52, 54, 44, 50, 53, 49, 44, 54, 49, 44, 56, 56, 44, 50, 48, 52, 44, 49, 52, 44, 50, 48, 54, 44, 49, 53, 44, 49, 55, 50, 44, 49, 51, 51, 44, 48, 44, 52, 57, 44, 49, 51, 56, 44, 50, 48, 50, 44, 49, 55, 50, 44, 49, 56, 51, 44, 56, 56, 44, 56, 55, 44, 49, 54, 56, 44, 50, 50, 49, 44, 49, 57, 54, 44, 49, 49, 57, 44, 57, 52, 44, 49, 48, 44, 49, 51, 52, 44, 49, 50, 44, 50, 51, 50, 44, 49, 54, 50, 44, 49, 56, 53, 44, 55, 55, 44, 56, 51, 44, 52, 51, 44, 50, 48, 54, 44, 50, 51, 49, 44, 50, 49, 48, 44, 49, 48, 56, 44, 51, 52, 44, 53, 52, 44, 50, 52, 49, 44, 49, 50, 50, 44, 49, 55, 52, 44, 53, 51, 44, 49, 53, 44, 52, 51, 44, 49, 49, 49, 44, 56, 49, 44, 50, 53, 50, 44, 49, 49, 49, 44, 54, 50, 44, 53, 54, 44, 49, 48, 50, 44, 49, 50, 50, 44, 50, 52, 57, 44, 57, 54, 44, 49, 57, 53, 44, 50, 50, 57, 44, 51, 52, 44, 50, 53, 52, 44, 49, 57, 49, 44, 55, 57, 44, 56, 44, 49, 52, 53, 44, 49, 54, 54, 44, 51, 56, 44, 50, 48, 54, 44, 49, 53, 51, 44, 50, 54, 44, 49, 54, 48, 44, 49, 56, 48, 44, 52, 48, 44, 51, 44, 52, 53, 44, 50, 49, 57, 44, 50, 50, 53, 44, 56, 56, 44, 50, 51, 52, 44, 56, 54, 44, 52, 52, 44, 53, 53, 44, 50, 50, 53, 44, 49, 54, 50, 44, 50, 49, 53, 44, 55, 53, 44, 49, 48, 50, 44, 49, 54, 44, 56, 57, 44, 49, 49, 56, 44, 49, 56, 52, 44, 49, 51, 53, 44, 56, 56, 44, 49, 56, 54, 44, 49, 53, 50, 44, 50, 52, 51, 44, 49, 48, 54, 44, 50, 48, 50, 44, 49, 55, 54, 44, 50, 50, 50, 44, 55, 57, 44, 50, 52, 51, 44, 57, 50, 44, 49, 56, 48, 44, 50, 50, 55, 44, 51, 56, 44, 49, 53, 52, 44, 52, 48, 44, 49, 48, 51, 44, 49, 54, 48, 44, 50, 50, 50, 44, 49, 57, 57, 44, 50, 48, 52, 44, 55, 48, 44, 49, 48, 57, 44, 49, 55, 56, 44, 49, 49, 48, 44, 49, 52, 51, 44, 50, 52, 44, 56, 44, 49, 52, 53, 44, 50, 52, 44, 49, 49, 50, 44, 53, 57, 44, 51, 56, 44, 49, 54, 56, 44, 49, 53, 57, 44, 55, 54, 44, 49, 53, 55, 44, 49, 53, 53, 44, 51, 56, 44, 49, 52, 54, 44, 49, 55, 51, 44, 52, 53, 44, 57, 57, 44, 55, 56, 44, 53, 49, 44, 49, 52, 50, 44, 49, 56, 56, 44, 57, 53, 44, 49, 49, 52, 44, 50, 52, 44, 49, 44, 49, 55, 51, 44, 49, 48, 51, 44, 56, 48, 44, 49, 51, 55, 44, 57, 48, 44, 50, 51, 55, 44, 50, 48, 57, 44, 55, 57, 44, 49, 55, 48, 44, 49, 54, 57, 44, 50, 51, 54, 44, 50, 49, 55, 44, 49, 49, 52, 44, 49, 49, 49, 44, 49, 50, 44, 50, 52, 50, 44, 50, 53, 52, 44, 49, 49, 49, 44, 53, 48, 44, 49, 48, 44, 56, 48, 44, 50, 48, 57, 44, 54, 48, 44, 50, 49, 48, 44, 49, 51, 55, 44, 50, 52, 50, 44, 52, 50, 44, 49, 51, 49, 44, 50, 52, 48, 44, 50, 49, 48, 44, 50, 51, 53, 44, 53, 48, 44, 49, 51, 50, 44, 54, 50, 44, 49, 50, 44, 50, 52, 53, 44, 49, 54, 57, 44, 50, 49, 50, 44, 56, 44, 49, 53, 51, 44, 50, 48, 53, 44, 53, 57, 44, 49, 48, 48, 44, 56, 49, 44, 49, 48, 53, 44, 49, 50, 51, 44, 49, 53, 53, 44, 50, 50, 55, 44, 49, 57, 50, 44, 49, 50, 54, 44, 53, 44, 49, 50, 57, 44, 49, 48, 51, 44, 49, 56, 50, 44, 49, 49, 55, 44, 52, 55, 44, 50, 50, 56, 44, 50, 49, 48, 44, 57, 44, 50, 51, 50, 44, 50, 51, 48, 44, 50, 50, 44, 50, 52, 44, 51, 55, 44, 49, 55, 51, 44, 50, 55, 44, 50, 48, 51, 44, 49, 57, 51, 44, 56, 53, 44, 50, 50, 51, 44, 49, 52, 53, 44, 54, 50, 44, 49, 51, 48, 44, 49, 53, 52, 44, 49, 55, 50, 44, 49, 57, 54, 44, 50, 48, 53, 44, 49, 55, 50, 44, 53, 48, 44, 49, 57, 52, 44, 55, 48, 44, 49, 49, 56, 44, 50, 50, 48, 44, 49, 55, 55, 44, 49, 57, 54, 44, 54, 52, 44, 49, 50, 48, 44, 49, 54, 53, 44, 49, 49, 44, 49, 51, 54, 44, 55, 56, 44, 49, 48, 52, 44, 50, 53, 44, 49, 50, 48, 44, 51, 54, 44, 57, 55, 44, 49, 55, 56, 44, 49, 55, 52, 44, 50, 44, 57, 49, 44, 50, 49, 49, 44, 49, 53, 53, 44, 49, 54, 57, 44, 50, 50, 57, 44, 54, 53, 44, 49, 54, 49, 44, 49, 57, 48, 44, 49, 49, 52, 44, 50, 50, 49, 44, 49, 48, 52, 44, 56, 51, 44, 49, 49, 55, 44, 55, 49, 44, 50, 56, 44, 49, 57, 49, 44, 55, 53, 44, 49, 56, 54, 44, 56, 44, 50, 49, 49, 44, 55, 52, 44, 50, 48, 48, 44, 53, 55, 44, 49, 49, 55, 44, 49, 54, 44, 49, 50, 51, 44, 50, 52, 56, 44, 55, 48, 44, 50, 49, 52, 44, 50, 53, 48, 44, 54, 50, 44, 49, 51, 48, 44, 55, 44, 49, 57, 52, 44, 54, 50, 44, 49, 48, 53, 44, 56, 52, 44, 50, 49, 57, 44, 50, 49, 57, 44, 50, 51, 55, 44, 49, 49, 56, 44, 54, 56, 44, 57, 55, 44, 50, 52, 51, 44, 50, 53, 53, 44, 52, 57, 44, 50, 50, 50, 44, 49, 55, 54, 44, 49, 51, 50, 44, 50, 55, 44, 49, 51, 53, 44, 49, 54, 54, 44, 51, 53, 44, 49, 52, 56, 44, 49, 50, 53, 44, 50, 53, 50, 44, 54, 44, 50, 51, 50, 44, 49, 52, 44, 49, 53, 52, 44, 49, 50, 44, 49, 52, 56, 44, 54, 56, 44, 50, 51, 56, 44, 52, 56, 44, 49, 53, 51, 44, 49, 57, 48, 44, 53, 53, 44, 50, 50, 49, 44, 49, 55, 49, 44, 50, 49, 55, 44, 49, 50, 50, 44, 57, 44, 54, 52, 44, 51, 51, 44, 50, 50, 44, 52, 44, 50, 50, 57, 44, 49, 55, 53, 44, 50, 50, 56, 44, 49, 56, 57, 44, 49, 51, 44, 50, 48, 52, 44, 53, 50, 44, 49, 57, 51, 44, 49, 50, 55, 44, 49, 54, 50, 44, 56, 52, 44, 50, 51, 49, 44, 51, 50, 44, 56, 48, 44, 50, 53, 44, 49, 51, 57, 44, 49, 56, 55, 44, 49, 51, 52, 44, 56, 51, 44, 49, 50, 56, 44, 49, 53, 54, 44, 50, 56, 44, 50, 51, 51, 44, 55, 52, 44, 50, 50, 52, 44, 49, 50, 50, 44, 49, 48, 57, 44, 54, 57, 44, 49, 57, 51, 44, 57, 53, 44, 53, 44, 50, 52, 54, 44, 53, 52, 44, 50, 49, 55, 44, 50, 50, 51, 44, 52, 57, 44, 49, 54, 50, 44, 52, 56, 44, 51, 55, 44, 50, 50, 57, 44, 49, 50, 50, 44, 56, 51, 44, 54, 57, 44, 57, 54, 44, 49, 50, 57, 44, 50, 50, 52, 44, 49, 52, 54, 44, 51, 48, 44, 50, 51, 44, 52, 52, 44, 49, 57, 48, 44, 50, 52, 44, 50, 49, 56, 44, 49, 54, 55, 44, 49, 57, 52, 44, 50, 53, 49, 44, 56, 50, 44, 57, 52, 44, 50, 52, 49, 44, 50, 50, 57, 44, 49, 48, 54, 44, 53, 44, 49, 48, 53, 44, 50, 50, 49, 44, 49, 50, 50, 44, 50, 52, 44, 50, 53, 51, 44, 50, 57, 44, 49, 49, 53, 44, 49, 55, 54, 44, 50, 48, 57, 44, 49, 54, 49, 44, 49, 52, 56, 44, 50, 48, 55, 44, 55, 49, 44, 50, 50, 53, 44, 50, 52, 56, 44, 53, 52, 44, 49, 54, 55, 44, 49, 44, 50, 51, 52, 44, 50, 50, 54, 44, 50, 50, 55, 44, 56, 53, 44, 50, 49, 51, 44, 52, 56, 44, 57, 53, 44, 53, 56, 44, 51, 52, 44, 50, 52, 56, 44, 50, 52, 57, 44, 49, 52, 50, 44, 50, 52, 49, 44, 49, 48, 57, 44, 56, 56, 44, 49, 48, 56, 44, 49, 55, 56, 44, 50, 48, 57, 44, 55, 48, 44, 52, 55, 44, 50, 44, 49, 49, 44, 49, 55, 52, 44, 49, 56, 50, 44, 49, 49, 57, 44, 50, 50, 44, 49, 54, 48, 44, 57, 49, 44, 49, 51, 51, 44, 49, 56, 50, 44, 49, 48, 53, 44, 52, 57, 44, 49, 53, 53, 44, 50, 48, 56, 44, 57, 44, 49, 50, 49, 44, 55, 48, 44, 49, 44, 49, 49, 50, 44, 49, 56, 51, 44, 49, 56, 44, 49, 49, 55, 44, 49, 51, 55, 44, 49, 55, 57, 44, 49, 52, 50, 44, 49, 51, 53, 44, 49, 48, 54, 44, 50, 51, 52, 44, 52, 50, 44, 49, 54, 53, 44, 49, 52, 48, 44, 50, 50, 49, 44, 49, 50, 56, 44, 49, 54, 50, 44, 49, 48, 56, 44, 49, 55, 50, 44, 50, 52, 54, 44, 49, 52, 51, 44, 49, 53, 56, 44, 50, 56, 44, 55, 57, 44, 49, 52, 48, 44, 49, 57, 49, 44, 54, 52, 44, 49, 56, 55, 44, 49, 51, 48, 44, 50, 48, 54, 44, 49, 51, 50, 44, 50, 50, 57, 44, 49, 52, 57, 44, 50, 51, 49, 44, 49, 54, 57, 44, 49, 51, 57, 44, 50, 50, 51, 44, 49, 50, 49, 44, 50, 48, 50, 44, 54, 44, 49, 57, 48, 44, 50, 48, 53, 44, 50, 49, 49, 44, 50, 49, 53, 44, 49, 52, 55, 44, 49, 51, 57, 44, 49, 49, 49, 44, 57, 44, 49, 51, 52, 44, 55, 51, 44, 55, 49, 44, 49, 57, 49, 44, 49, 54, 54, 44, 57, 57, 44, 56, 56, 44, 50, 51, 53, 44, 50, 54, 44, 56, 52, 44, 49, 50, 50, 44, 55, 49, 44, 56, 51, 44, 49, 51, 57, 44, 50, 50, 56, 44, 50, 52, 51, 44, 50, 48, 48, 44, 57, 55, 44, 49, 54, 48, 44, 55, 44, 50, 53, 50, 44, 49, 52, 48, 44, 52, 53, 44, 49, 54, 54, 44, 49, 56, 44, 52, 56, 44, 49, 48, 50, 44, 49, 49, 44, 52, 56, 44, 50, 50, 56, 44, 49, 49, 48, 44, 52, 55, 44, 49, 56, 55, 44, 52, 52, 44, 54, 56, 44, 50, 49, 57, 44, 49, 53, 52, 44, 50, 48, 57, 44, 50, 49, 51, 44, 50, 52, 57, 44, 49, 53, 48, 44, 49, 48, 54, 44, 49, 54, 54, 44, 53, 51, 44, 49, 50, 50, 44, 50, 53, 51, 44, 49, 56, 49, 44, 49, 54, 53, 44, 49, 53, 52, 44, 49, 51, 56, 44, 54, 52, 44, 56, 50, 44, 55, 50, 44, 57, 48, 44, 50, 52, 54, 44, 49, 44, 57, 55, 44, 52, 52, 44, 50, 52, 51, 44, 50, 50, 56, 44, 49, 55, 55, 44, 53, 50, 44, 50, 48, 50, 44, 49, 56, 52, 44, 50, 53, 53, 44, 50, 48, 44, 50, 49, 49, 44, 49, 48, 55, 44, 49, 56, 57, 44, 50, 49, 52, 44, 50, 51, 52, 44, 52, 51, 44, 49, 55, 54, 44, 50, 50, 51, 44, 50, 52, 53, 44, 49, 54, 54, 44, 56, 57, 44, 50, 57, 44, 49, 55, 57, 44, 49, 53, 44, 49, 56, 55, 44, 53, 51, 44, 49, 49, 54, 44, 49, 51, 51, 44, 49, 50, 51, 44, 49, 52, 49, 44, 50, 53, 51, 44, 49, 53, 44, 49, 55, 48, 44, 50, 50, 54, 44, 49, 55, 53, 44, 49, 52, 49, 44, 49, 57, 44, 50, 49, 53, 44, 56, 50, 44, 49, 54, 49, 44, 49, 51, 54, 44, 56, 51, 44, 49, 51, 57, 44, 51, 53, 44, 50, 52, 49, 44, 50, 52, 48, 44, 55, 56, 44, 50, 44, 52, 52, 44, 49, 54, 51, 44, 50, 48, 53, 44, 49, 53, 54, 44, 49, 50, 50, 44, 50, 53, 51, 44, 54, 57, 44, 50, 51, 48, 44, 49, 55, 49, 44, 53, 49, 44, 49, 52, 50, 44, 53, 51, 44, 50, 49, 49, 44, 49, 54, 51, 44, 50, 52, 51, 44, 49, 48, 44, 49, 49, 54, 44, 49, 49, 56, 44, 57, 56, 44, 50, 50, 51, 44, 49, 53, 53, 44, 49, 57, 57, 44, 49, 49, 44, 50, 51, 44, 49, 57, 48, 44, 52, 52, 44, 49, 55, 51, 44, 49, 54, 44, 50, 48, 53, 44, 54, 56, 44, 49, 57, 49, 44, 49, 54, 52, 44, 51, 55, 44, 50, 49, 48, 44, 49, 52, 44, 50, 49, 53, 44, 51, 53, 44, 52, 56, 44, 50, 52, 49, 44, 55, 53, 44, 49, 56, 54, 44, 49, 51, 48, 44, 50, 49, 53, 44, 53, 44, 55, 57, 44, 49, 49, 50, 44, 49, 51, 53, 44, 49, 48, 48, 44, 55, 44, 49, 51, 50, 44, 50, 51, 49, 44, 50, 51, 54, 44, 49, 53, 48, 44, 49, 51, 56, 44, 49, 57, 51, 44, 56, 51, 44, 49, 56, 53, 44, 55, 55, 44, 50, 49, 44, 49, 54, 48, 44, 49, 44, 52, 55, 44, 49, 51, 56, 44, 49, 50, 51, 44, 49, 56, 48, 44, 55, 50, 44, 50, 52, 54, 44, 51, 44, 56, 56, 44, 49, 48, 51, 44, 52, 55, 44, 49, 54, 48, 44, 50, 53, 48, 44, 50, 51, 44, 50, 49, 51, 44, 49, 56, 48, 44, 51, 55, 44, 49, 52, 44, 49, 48, 57, 44, 49, 50, 53, 44, 49, 53, 57, 44, 56, 53, 44, 50, 48, 44, 49, 56, 57, 44, 50, 49, 44, 49, 48, 48, 44, 49, 57, 55, 44, 49, 51, 52, 44, 50, 52, 53, 44, 56, 56, 44, 50, 51, 54, 44, 49, 49, 55, 44, 52, 51, 44, 49, 52, 56, 44, 49, 56, 51, 44, 52, 52, 44, 51, 57, 44, 50, 52, 44, 50, 53, 48, 44, 54, 55, 44, 49, 56, 55, 44, 49, 56, 50, 44, 51, 53, 44, 49, 50, 44, 51, 49, 44, 49, 56, 57, 44, 50, 56, 44, 50, 49, 48, 44, 55, 48, 44, 49, 57, 44, 49, 50, 44, 50, 57, 44, 57, 55, 44, 49, 50, 44, 55, 56, 44, 55, 52, 44, 51, 49, 44, 57, 54, 44, 53, 50, 44, 49, 57, 55, 44, 54, 55, 44, 50, 48, 51, 44, 53, 53, 44, 49, 55, 54, 44, 50, 48, 55, 44, 55, 51, 44, 50, 53, 48, 44, 49, 49, 54, 44, 55, 57, 44, 49, 48, 53, 44, 53, 57, 44, 50, 57, 44, 54, 57, 44, 50, 48, 50, 44, 49, 50, 54, 44, 49, 51, 50, 44, 49, 56, 49, 44, 50, 52, 50, 44, 57, 56, 44, 50, 51, 50, 44, 53, 44, 50, 50, 49, 44, 56, 57, 44, 57, 52, 44, 52, 52, 44, 51, 48, 44, 54, 50, 44, 55, 44, 50, 49, 50, 44, 53, 44, 49, 56, 54, 44, 50, 44, 49, 54, 56, 44, 50, 50, 55, 44, 50, 52, 52, 44, 49, 56, 52, 44, 51, 55, 44, 49, 55, 57, 44, 49, 57, 56, 44, 55, 50, 44, 50, 48, 49, 44, 49, 55, 56, 44, 49, 55, 51, 44, 49, 48, 53, 44, 49, 54, 57, 44, 50, 53, 44, 56, 48, 44, 49, 54, 54, 44, 49, 53, 52, 44, 49, 57, 53, 44, 57, 54, 44, 49, 56, 54, 44, 50, 50, 49, 44, 49, 44, 49, 55, 51, 44, 49, 53, 44, 50, 52, 52, 44, 54, 56, 44, 54, 44, 49, 51, 56, 44, 50, 52, 52, 44, 49, 48, 48, 44, 54, 44, 50, 50, 57, 44, 51, 56, 44, 49, 53, 54, 44, 54, 57, 44, 57, 49, 44, 54, 54, 44, 49, 56, 48, 44, 56, 48, 44, 49, 49, 55, 44, 55, 51, 44, 50, 50, 49, 44, 57, 48, 44, 55, 52, 44, 49, 50, 52, 44, 49, 52, 55, 44, 49, 50, 57, 44, 50, 52, 48, 44, 49, 52, 57, 44, 49, 54, 52, 44, 51, 57, 44, 53, 49, 44, 49, 51, 50, 44, 49, 48, 53, 44, 49, 55, 57, 44, 48, 44, 49, 52, 57, 44, 52, 48, 44, 50, 50, 57, 44, 57, 53, 44, 49, 50, 44, 49, 53, 50, 44, 50, 48, 53, 44, 49, 55, 52, 44, 54, 49, 44, 49, 56, 57, 44, 54, 56, 44, 49, 50, 52, 44, 49, 53, 53, 44, 49, 53, 52, 44, 55, 55, 44, 49, 54, 44, 55, 48, 44, 50, 48, 57, 44, 50, 51, 49, 44, 49, 55, 53, 44, 54, 50, 44, 49, 54, 53, 44, 50, 52, 49, 44, 49, 52, 51, 44, 57, 53, 44, 49, 53, 54, 44, 49, 49, 57, 44, 50, 53, 48, 44, 49, 53, 51, 44, 49, 50, 56, 44, 55, 52, 44, 54, 48, 44, 49, 50, 53, 44, 49, 50, 55, 44, 54, 53, 44, 50, 49, 44, 49, 53, 50, 44, 49, 51, 54, 44, 57, 51, 44, 53, 53, 44, 49, 51, 53, 44, 50, 55, 44, 49, 55, 54, 44, 50, 54, 44, 50, 50, 51, 44, 49, 49, 55, 44, 50, 49, 49, 44, 50, 50, 50, 44, 55, 56, 44, 49, 55, 53, 44, 49, 57, 49, 44, 49, 56, 54, 44, 50, 50, 56, 44, 49, 50, 57, 44, 49, 53, 53, 44, 51, 55, 44, 49, 55, 52, 44, 49, 53, 51, 44, 55, 57, 44, 50, 50, 52, 44, 56, 49, 44, 49, 49, 53, 44, 53, 57, 44, 49, 53, 50, 44, 52, 54, 44, 49, 57, 44, 49, 50, 54, 44, 49, 50, 52, 44, 57, 48, 44, 49, 53, 44, 53, 44, 53, 56, 44, 51, 44, 49, 52, 54, 44, 57, 48, 44, 49, 57, 51, 44, 51, 50, 44, 49, 50, 50, 44, 50, 50, 48, 44, 49, 48, 44, 49, 57, 51, 44, 50, 50, 52, 44, 55, 44, 49, 49, 49, 44, 49, 52, 55, 44, 49, 57, 50, 44, 49, 48, 49, 44, 50, 52, 56, 44, 49, 55, 51, 44, 49, 57, 48, 44, 50, 52, 57, 44, 50, 51, 55, 44, 54, 44, 49, 53, 53, 44, 55, 55, 44, 54, 51, 44, 57, 53, 44, 49, 55, 52, 44, 49, 51, 53, 44, 50, 51, 52, 44, 49, 57, 51, 44, 50, 51, 53, 44, 49, 49, 55, 44, 50, 48, 44, 52, 55, 44, 49, 57, 51, 44, 50, 50, 44, 49, 53, 44, 49, 57, 48, 44, 51, 48, 44, 49, 57, 49, 44, 52, 57, 44, 49, 48, 56, 44, 49, 48, 48, 44, 49, 49, 50, 44, 50, 51, 50, 44, 49, 52, 44, 52, 54, 44, 49, 54, 55, 44, 49, 48, 50, 44, 49, 57, 56, 44, 49, 56, 51, 44, 49, 57, 44, 53, 57, 44, 49, 48, 56, 44, 49, 57, 44, 50, 51, 56, 44, 52, 49, 44, 50, 50, 55, 44, 49, 48, 50, 44, 57, 51, 44, 52, 51, 44, 49, 54, 48, 44, 49, 50, 48, 44, 49, 53, 51, 44, 49, 53, 50, 44, 50, 49, 48, 44, 55, 55, 44, 50, 52, 56, 44, 50, 50, 51, 44, 50, 49, 52, 44, 50, 53, 52, 44, 53, 54, 44, 55, 49, 44, 49, 53, 54, 44, 49, 56, 50, 44, 49, 54, 51, 44, 49, 51, 50, 44, 55, 53, 44, 50, 52, 51, 44, 57, 57, 44, 50, 49, 57, 44, 57, 54, 44, 49, 51, 55, 44, 54, 56, 44, 50, 49, 54, 44, 50, 48, 50, 44, 54, 57, 44, 54, 54, 44, 50, 51, 55, 44, 56, 57, 44, 50, 49, 44, 51, 50, 44, 57, 56, 44, 50, 49, 52, 44, 52, 55, 44, 49, 53, 54, 44, 57, 44, 55, 52, 93, 44, 34, 116, 105, 109, 101, 115, 116, 97, 109, 112, 34, 58, 48, 44, 34, 99, 97, 117, 115, 97, 108, 95, 100, 101, 112, 115, 34, 58, 91, 93, 44, 34, 115, 111, 117, 114, 99, 101, 34, 58, 34, 109, 111, 99, 107, 34, 44, 34, 101, 110, 118, 101, 108, 111, 112, 101, 34, 58, 123, 34, 87, 101, 108, 99, 111, 109, 101, 34, 58, 123, 34, 114, 101, 99, 105, 112, 105, 101, 110, 116, 34, 58, 91, 55, 56, 44, 50, 51, 52, 44, 50, 56, 44, 49, 49, 57, 44, 56, 52, 44, 49, 54, 49, 44, 53, 51, 44, 49, 48, 52, 44, 56, 57, 44, 49, 49, 44, 53, 53, 44, 49, 50, 54, 44, 53, 53, 44, 49, 56, 54, 44, 56, 56, 44, 50, 53, 52, 44, 49, 53, 55, 44, 50, 49, 53, 44, 51, 52, 44, 49, 56, 44, 49, 55, 50, 44, 54, 53, 44, 57, 52, 44, 49, 53, 51, 44, 51, 48, 44, 49, 54, 54, 44, 56, 57, 44, 57, 51, 44, 52, 48, 44, 49, 55, 48, 44, 54, 54, 44, 50, 53, 53, 93, 125, 125, 125], rejoin: Some(RejoinWelcome { epoch: EpochId(4), content_id: MessageId(38f34229149ed39889bc27f6784928eead84f81ddf2691292c6e893d4f0228c8), welcomer: MemberId(b774681c8831e75685ec641b59a1c458f7da8dd287e13382957843387d51f9cd), local_state_token: [187, 76, 172, 34, 36, 65, 218, 156, 218, 146, 48, 139, 186, 57, 216, 128, 176, 217, 32, 94, 209, 40, 42, 33, 91, 177, 8, 198, 128, 45, 194, 179] }) }]
+R5b confirm_group_rejoin wrong token -> Err(InvalidTransition(InvalidTransition { from: "ActiveMember", to: "JoinWelcome", reason: "replacement Welcome requires trusted removal evidence or explicit recipient confirmation" }))
+R5b confirm_group_rejoin -> Ok(GroupId(82ceba9eab323e3d3d4575075aae3fe4))
+    bob-rejoin: GroupJoined(welcomer=b774681c8831e75685ec641b59a1c458f7da8dd287e13382957843387d51f9cd)
+R5b bob record post-rejoin: epoch=4 removed=false unrecoverable=false members=2
+R5b alice->bob -> Processed
+R5b bob->alice -> Processed
+ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 8.36s
+
+     Running tests/self_update.rs (target/release/deps/self_update-db09f75b356812a1)
+
+running 5 tests
+test s1_self_update_immediately_after_join_while_peer_sends ... S1 old-epoch msg 0 on bob (post-commit) -> Processed
+S1 old-epoch msg 1 on bob (post-commit) -> Processed
+S1 old-epoch msg 2 on bob (post-commit) -> Processed
+    ingest commit outcome: Buffered { group_id: GroupId(83fa0ccefb0fa02813980526f1090dac), epoch: EpochId(1) }
+S1 bob reply on alice -> Processed
+S1 final epochs: alice=2 bob=2
+ok
+test s1b_new_epoch_message_before_commit ... S1b-A transport timestamps: commit=Timestamp(0) message=Timestamp(0) (MockPeeler stamps Timestamp(0); the engine does not set it — the transport owns created_at)
+S1b-A message before commit -> Ok(Buffered { group_id: GroupId(f23b81d4154bed1a5041aba9f9d9ccbf), epoch: EpochId(2) })
+S1b-A commit after message -> Ok(Buffered { group_id: GroupId(f23b81d4154bed1a5041aba9f9d9ccbf), epoch: EpochId(1) })
+S1b-A convergence: CanonicalizationResult { previous_tip: 1, selected_tip: Some(2), selected_fork_epoch: Some(1), selected_branch_id: Some("path:bf142bfbff81a1dde2606c161c5d06d3"), candidate_count: 1, eligible_count: 1, convergence_status: Settled, accepted_commits: ["91e3d031729de452505666b040850879cd3974315f48d18046c36438115a6b9e"], accepted_proposals: [], accepted_app_messages: ["7e413b61f872cbc6657e795bebdd8fb6d3da34139b71470f6ba1c0a3e9cb393e"], deferred_messages: [], invalidated_app_messages: [], dropped_messages: [], already_seen: [], queued_outbound_intents: [], publishable_outbound_messages: [], errors: [], selection_trace: Some(BranchSelectionTrace { selected_branch_id: Some("path:bf142bfbff81a1dde2606c161c5d06d3"), candidates: [CandidateEvaluation { branch_id: "path:bf142bfbff81a1dde2606c161c5d06d3", fork_epoch: 1, tip_epoch: 2, tip_priority: Ordinary, tip_committer: [78, 234, 28, 119, 84, 161, 53, 104, 89, 11, 55, 126, 55, 186, 88, 254, 157, 215, 34, 18, 172, 65, 94, 153, 30, 166, 89, 93, 40, 170, 66, 255], tip_digest: [145, 227, 208, 49, 114, 157, 228, 82, 80, 86, 102, 176, 64, 133, 8, 121, 205, 57, 116, 49, 95, 72, 209, 128, 70, 195, 100, 56, 17, 90, 107, 158], app_witnesses: [AppWitness { epoch: 2, sender: [78, 234, 28, 119, 84, 161, 53, 104, 89, 11, 55, 126, 55, 186, 88, 254, 157, 215, 34, 18, 172, 65, 94, 153, 30, 166, 89, 93, 40, 170, 66, 255] }], eligible: true, rejection_reasons: [], score: BranchScore { valid_commit_depth: 1, effective_commit_depth: 1, witness_quorum_met: false, app_witness_score: 1, tip_priority: Ordinary, tip_committer: [78, 234, 28, 119, 84, 161, 53, 104, 89, 11, 55, 126, 55, 186, 88, 254, 157, 215, 34, 18, 172, 65, 94, 153, 30, 166, 89, 93, 40, 170, 66, 255], tip_digest: [145, 227, 208, 49, 114, 157, 228, 82, 80, 86, 102, 176, 64, 133, 8, 121, 205, 57, 116, 49, 95, 72, 209, 128, 70, 195, 100, 56, 17, 90, 107, 158] } }], rule_trace: [], losing_branch_ids: [] }) }
+    alice-A: EpochChanged(2)
+    alice-A: MessageReceived
+S1b-A message redelivered -> Ok(Ignored { category: Duplicate })
+S1b-A decoded contents on alice: []
+S1b-B batch: message -> Ok(Buffered { group_id: GroupId(3089f8a083f3cce77d39fe43740744fd), epoch: EpochId(2) }) ; commit -> Ok(Buffered { group_id: GroupId(3089f8a083f3cce77d39fe43740744fd), epoch: EpochId(1) })
+S1b-B convergence: CanonicalizationResult { previous_tip: 1, selected_tip: Some(2), selected_fork_epoch: Some(1), selected_branch_id: Some("path:8494d884615f12b98d2bd60ba7599419"), candidate_count: 1, eligible_count: 1, convergence_status: Settled, accepted_commits: ["830732795ba0bfc69342ddb72cb7540e0598bf280ca81fcd8533c55b79aa3c48"], accepted_proposals: [], accepted_app_messages: ["421203b4f04346a70fdf6a742799b830383d3fb2a02f82ac3fd9e5ca493b2694"], deferred_messages: [], invalidated_app_messages: [], dropped_messages: [], already_seen: [], queued_outbound_intents: [], publishable_outbound_messages: [], errors: [], selection_trace: Some(BranchSelectionTrace { selected_branch_id: Some("path:8494d884615f12b98d2bd60ba7599419"), candidates: [CandidateEvaluation { branch_id: "path:8494d884615f12b98d2bd60ba7599419", fork_epoch: 1, tip_epoch: 2, tip_priority: Ordinary, tip_committer: [78, 234, 28, 119, 84, 161, 53, 104, 89, 11, 55, 126, 55, 186, 88, 254, 157, 215, 34, 18, 172, 65, 94, 153, 30, 166, 89, 93, 40, 170, 66, 255], tip_digest: [131, 7, 50, 121, 91, 160, 191, 198, 147, 66, 221, 183, 44, 183, 84, 14, 5, 152, 191, 40, 12, 168, 31, 205, 133, 51, 197, 91, 121, 170, 60, 72], app_witnesses: [AppWitness { epoch: 2, sender: [78, 234, 28, 119, 84, 161, 53, 104, 89, 11, 55, 126, 55, 186, 88, 254, 157, 215, 34, 18, 172, 65, 94, 153, 30, 166, 89, 93, 40, 170, 66, 255] }], eligible: true, rejection_reasons: [], score: BranchScore { valid_commit_depth: 1, effective_commit_depth: 1, witness_quorum_met: false, app_witness_score: 1, tip_priority: Ordinary, tip_committer: [78, 234, 28, 119, 84, 161, 53, 104, 89, 11, 55, 126, 55, 186, 88, 254, 157, 215, 34, 18, 172, 65, 94, 153, 30, 166, 89, 93, 40, 170, 66, 255], tip_digest: [131, 7, 50, 121, 91, 160, 191, 198, 147, 66, 221, 183, 44, 183, 84, 14, 5, 152, 191, 40, 12, 168, 31, 205, 133, 51, 197, 91, 121, 170, 60, 72] } }], rule_trace: [], losing_branch_ids: [] }) }
+    alice-B: EpochChanged(2)
+    alice-B: MessageReceived
+S1b-B decoded contents on alice: []
+ok
+test s2_concurrent_commits_after_join ... S2 fork base epoch 1
+S2 alice ingest bob's commit -> Buffered { group_id: GroupId(c5ba36d4aa33a8bcc4ec74e4a2dc7656), epoch: EpochId(1) }
+S2 bob ingest alice's commit -> Buffered { group_id: GroupId(c5ba36d4aa33a8bcc4ec74e4a2dc7656), epoch: EpochId(1) }
+S2 alice convergence: accepted=["d593292163c3f7693d4367185b0bf0743bedffbf7e30444047479b01eb751a31"] dropped=0 status=Settled
+S2 bob convergence: accepted=["d593292163c3f7693d4367185b0bf0743bedffbf7e30444047479b01eb751a31"] dropped=0 status=Settled
+    alice: EpochChanged(2)
+    alice: CommitRolledBack
+    alice: GroupStateInvalidated
+    bob: EpochChanged(2)
+    bob: CommitRolledBack
+    bob: GroupStateInvalidated
+S2 alice drain_auto_publish: 0
+S2 bob drain_auto_publish: 0
+S2 final epochs: alice=2 bob=2
+S2 a->b -> Processed
+S2 b->a -> Processed
+ok
+test s3_delayed_self_update_after_peer_traffic ...     ingest commit outcome: Buffered { group_id: GroupId(6d4afba979385132574440b70ede50f4), epoch: EpochId(1) }
+S3 bob post-update msg on alice -> Processed
+S3 alice reply on bob -> Processed
+ok
+test s4_post_join_obligation_rows ... S4 bob after join: 1 obligation row(s)
+    trigger=PostJoin phase=CatchUp group_match=true
+S4 bob after confirmed self_update: 1 obligation row(s)
+    trigger=PostJoin phase=CatchUp group_match=true
+S4 PostJoin obligation: 1 row(s) before -> 1 after; phases after: [CatchUp]
+ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.36s
+
+     Running tests/smoke.rs (target/release/deps/smoke-38f2691246fe9177)
+
+running 1 test
+test alice_creates_group_bob_joins_and_receives_message ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.13s
+
+     Running tests/wnd.rs (target/release/deps/wnd-5da3f9053ad789cb)
+
+running 6 tests
+test w1_two_wn_devices_of_one_account ... ignored, needs WN_BIN/WND_BIN
+test w2_device_link_into_existing_chat ... ignored, needs WN_BIN/WND_BIN
+test w3_sign_out_removes_device_leaf ... ignored, needs WN_BIN/WND_BIN
+test w4_foreign_slot_engine_device ... ignored, needs WN_BIN/WND_BIN
+test w5_keypackage_rotation_by_wn ... ignored, needs WN_BIN/WND_BIN
+test w6_post_join_self_update_timing ... ignored, needs WN_BIN/WND_BIN
+
+test result: ok. 0 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests m6_spike
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
