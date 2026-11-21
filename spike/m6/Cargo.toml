@@ -1,0 +1,36 @@
+[workspace]
+members  = ["."]
+resolver = "3"
+
+
+[package]
+name         = "m6-spike"
+description  = "Research spike: minimal cgka-engine (MDK v0.18.0) create/join/send round trip."
+version      = "0.0.0"
+edition      = "2024"
+rust-version = "1.99"
+license      = "MIT OR Apache-2.0"
+publish      = false
+
+[dev-dependencies]
+cgka-traits             = { git = "https://github.com/marmot-protocol/mdk", rev = "34646a577807f2b112ee031f3c164ec58aa18b64" }
+cgka-engine             = { git = "https://github.com/marmot-protocol/mdk", rev = "34646a577807f2b112ee031f3c164ec58aa18b64", features = ["test-policy-overrides"] }
+marmot-forensics        = { git = "https://github.com/marmot-protocol/mdk", rev = "34646a577807f2b112ee031f3c164ec58aa18b64" }
+storage-sqlite          = { git = "https://github.com/marmot-protocol/mdk", rev = "34646a577807f2b112ee031f3c164ec58aa18b64", features = ["test-support"] }
+transport-nostr-peeler  = { git = "https://github.com/marmot-protocol/mdk", rev = "34646a577807f2b112ee031f3c164ec58aa18b64" }
+transport-nostr-adapter = { git = "https://github.com/marmot-protocol/mdk", rev = "34646a577807f2b112ee031f3c164ec58aa18b64" }
+openmls                 = { git = "https://github.com/openmls/openmls.git", rev = "6100df3fb1d8c3eeab53e349fcbd621f98c44fe2", features = ["extensions-draft"] }
+openmls_basic_credential = { git = "https://github.com/openmls/openmls.git", rev = "6100df3fb1d8c3eeab53e349fcbd621f98c44fe2" }
+openmls_rust_crypto     = { git = "https://github.com/openmls/openmls.git", rev = "6100df3fb1d8c3eeab53e349fcbd621f98c44fe2", features = ["extensions-draft"] }
+openmls_traits          = { git = "https://github.com/openmls/openmls.git", rev = "6100df3fb1d8c3eeab53e349fcbd621f98c44fe2", features = ["extensions-draft"] }
+tls_codec               = "~0.5"
+nostr                   = { git = "https://github.com/erskingardner/rust-nostr", rev = "e93cc06b5624f06c21ecd8111a124176eb0c7589", default-features = false, features = ["std", "rand", "os-rng", "nip04", "nip49", "nip59"] }
+nostr-sdk               = { git = "https://github.com/erskingardner/rust-nostr", rev = "e93cc06b5624f06c21ecd8111a124176eb0c7589", features = ["local-relay"] }
+async-trait             = "0.1"
+chacha20poly1305        = "0.10"
+k256                    = { version = "0.14", default-features = false, features = ["schnorr"] }
+sha2                    = "0.10"
+hex                     = "0.4"
+serde_json              = "1"
+tempfile                = "3"
+tokio                   = { version = "1", features = ["macros", "rt-multi-thread", "time", "net", "io-util", "process"] }
