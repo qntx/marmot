@@ -95,6 +95,56 @@ async fn main() {
         kp_json.as_bytes(),
     );
 
+    // key_package_selection: the publication plus a kind-5 request covering
+    // it (slot `a` and id `e`), framed as the target decodes — unsigned
+    // halves only; the target re-signs with its own fixed account.
+    let unsigned = |event: &mk_core::Event| {
+        serde_json::json!({
+            "pubkey": event.pubkey.to_hex(),
+            "created_at": event.created_at.to_string(),
+            "kind": event.kind,
+            "tags": event.tags,
+            "content": event.content,
+        })
+    };
+    let slot = key_package
+        .event
+        .tags
+        .iter()
+        .find(|tag| tag.first().map(String::as_str) == Some("d"))
+        .and_then(|tag| tag.get(1))
+        .cloned()
+        .unwrap_or_default();
+    let deletion = mk_core::UnsignedEvent {
+        pubkey: signer.account(),
+        created_at: key_package.event.created_at,
+        kind: 5,
+        tags: vec![
+            vec![
+                "a".to_owned(),
+                format!("30443:{}:{slot}", signer.account().to_hex()),
+            ],
+            vec!["e".to_owned(), key_package.event.id.to_hex()],
+        ],
+        content: String::new(),
+    };
+    let deletion = signer
+        .sign_event(deletion)
+        .await
+        .expect("sign deletion seed");
+    let seed = serde_json::json!({
+        "now": key_package.event.created_at,
+        "events": [unsigned(&key_package.event), unsigned(&deletion)],
+    });
+    write(
+        &corpus,
+        "key_package_selection",
+        "selection-0",
+        serde_json::to_string(&seed)
+            .expect("seed encodes")
+            .as_bytes(),
+    );
+
     // A real durable batch as emitted by the host boundary.
     let batch = host
         .batches()

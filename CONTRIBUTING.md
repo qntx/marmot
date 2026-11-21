@@ -181,9 +181,11 @@ surface wasm and C hosts use.
 
 ## Fuzzing (`fuzz/`)
 
-Nine libFuzzer targets cover every decoder we own (kv batch, kv rows,
-event JSON, account proof, key-package event, imeta parse, agent-stream
-tags, plus the mk-bridge request and config decoders). The seed corpus is generated
+Fourteen libFuzzer targets cover every decoder we own (kv batch, kv rows,
+event JSON, account proof, key-package event, key-package selection,
+imeta parse, agent-stream tags, semantics, session rows, media decrypt,
+plus the mk-bridge request, config and FFI call decoders). The seed
+corpus is generated
 from real session artifacts and is gitignored — regenerate it when the row
 formats change:
 
