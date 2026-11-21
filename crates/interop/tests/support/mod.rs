@@ -49,10 +49,13 @@ use mk_core::{
 use nostr::prelude::{
     Event as NostrEvent, Filter, FromBech32, Kind, PublicKey, RelayUrl, SingleLetterTag, ToBech32,
 };
+use nostr_directory as _;
 use nostr_sdk::client::Client;
 use nostr_sdk::local_relay::{LocalRelay, RateLimit};
 use serde_json::Value;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use transport_nostr as _;
+use transport_nostr_peeler as _;
 
 pub const KIND_GROUP_MESSAGE: u16 = 445;
 pub const KIND_GIFT_WRAP: u16 = 1059;
