@@ -46,6 +46,7 @@ import type { RelayFilter, RelayPort, SubscriptionHandlers } from "../src/transp
 
 const ACCOUNT = "a".repeat(64);
 const RELAY = "wss://r1.example";
+const RELAY2 = "wss://r2.example";
 const GROUP = "cc".repeat(32);
 const ROUTE = "dd".repeat(32);
 const DONE: BridgeResponse = { type: "ok", result: { type: "done" } };
@@ -371,7 +372,6 @@ const popGate = (gates: IngestGate[]): IngestGate => {
   return gate;
 };
 
-
 describe("malicious relay", () => {
   test("an event flood while ingest is held is dropped past the pending cap", async () => {
     const script = freshScript();
@@ -592,4 +592,186 @@ describe("malicious relay", () => {
     await fixture.client.close();
   });
 
+  test("an EOSE with no events moves nothing and saves nothing", async () => {
+    const script = freshScript();
+    script.groups = [snapshot()];
+    const key = groupCursorKey(ROUTE, RELAY);
+    const seeded = encodeClientState({ cursors: { [key]: 500 }, inbox: [] });
+    const fixture = await open(script, seeded);
+    await settle(fixture.timer, 5000);
+    const sub = mustSub(groupSubs(fixture.network));
+
+    pushEose(sub);
+    await settle(fixture.timer, 25);
+    expect(decodeClientState(fixture.cursors.bytes()).cursors[key]).toBe(500);
+    // An empty backlog never schedules a save — the persisted blob is the seeded one.
+    expect(fixture.cursors.bytes()).toStrictEqual(seeded);
+    await fixture.client.close();
+  });
+
+  test("a duplicate EOSE is idempotent", async () => {
+    const script = freshScript();
+    script.groups = [snapshot()];
+    const key = groupCursorKey(ROUTE, RELAY);
+    const fixture = await open(script, encodeClientState({ cursors: { [key]: 500 }, inbox: [] }));
+    await settle(fixture.timer, 5000);
+    const sub = mustSub(groupSubs(fixture.network));
+
+    push(sub, groupEvent("01".repeat(32), 2000n));
+    pushEose(sub);
+    pushEose(sub);
+    await settle(fixture.timer, 25);
+    expect(decodeClientState(fixture.cursors.bytes()).cursors[key]).toBe(2000);
+    expect(ingested(script)).toHaveLength(1);
+    await fixture.client.close();
+  });
+
+  test("live events after an early EOSE advance the cursor normally", async () => {
+    const script = freshScript();
+    script.groups = [snapshot()];
+    const key = groupCursorKey(ROUTE, RELAY);
+    const fixture = await open(script, encodeClientState({ cursors: { [key]: 500 }, inbox: [] }));
+    await settle(fixture.timer, 5000);
+    const sub = mustSub(groupSubs(fixture.network));
+
+    pushEose(sub);
+    push(sub, groupEvent("01".repeat(32), 3000n));
+    await settle(fixture.timer, 25);
+    expect(decodeClientState(fixture.cursors.bytes()).cursors[key]).toBe(3000);
+    await fixture.client.close();
+  });
+
+  test("a subscription that never sends EOSE never moves the cursor and stays bounded", async () => {
+    const script = freshScript();
+    script.groups = [snapshot()];
+    const key = groupCursorKey(ROUTE, RELAY);
+    const fixture = await open(script, encodeClientState({ cursors: { [key]: 500 }, inbox: [] }));
+    await settle(fixture.timer, 5000);
+    const sub = mustSub(groupSubs(fixture.network));
+
+    // Ten batches' worth of backlog while ingest is held — the pending cap binds.
+    let releaseIngest: () => void = () => undefined;
+    const hold = new Promise<void>((resolve) => {
+      releaseIngest = resolve;
+    });
+    script.ingestGate = async () => hold;
+    for (let i = 0; i < 10 * INGEST_BATCH_MAX; i += 1) {
+      push(sub, groupEvent(i.toString(16).padStart(64, "0"), BigInt(i % 4000)));
+    }
+    await macrotask();
+    expect(sub.open).toBe(false);
+    releaseIngest();
+    await settle(fixture.timer, RESUBSCRIBE_DELAY_MS);
+
+    expect(ingested(script).length).toBeLessThanOrEqual(4 * INGEST_BATCH_MAX);
+    // No EOSE ever arrived on either sub — nothing folded, the seed cursor stands.
+    expect(decodeClientState(fixture.cursors.bytes()).cursors[key]).toBe(500);
+    await fixture.client.close();
+  }, 30_000);
+
+  test("live events older than the cursor do not move it back", async () => {
+    const script = freshScript();
+    script.groups = [snapshot()];
+    const key = groupCursorKey(ROUTE, RELAY);
+    const fixture = await open(script, encodeClientState({ cursors: { [key]: 5000 }, inbox: [] }));
+    await settle(fixture.timer, 5000);
+    const sub = mustSub(groupSubs(fixture.network));
+
+    pushEose(sub);
+    push(sub, groupEvent("01".repeat(32), 4000n));
+    await settle(fixture.timer, 25);
+    expect(decodeClientState(fixture.cursors.bytes()).cursors[key]).toBe(5000);
+    await fixture.client.close();
+  });
+
+  test("a duplicate event id through two relays ingests once and credits both keys", async () => {
+    const script = freshScript();
+    script.groups = [snapshot([RELAY, RELAY2])];
+    const key1 = groupCursorKey(ROUTE, RELAY);
+    const key2 = groupCursorKey(ROUTE, RELAY2);
+    const fixture = await open(
+      script,
+      encodeClientState({ cursors: { [key1]: 500, [key2]: 500 }, inbox: [] }),
+    );
+    await settle(fixture.timer, 5000);
+    const subs = groupSubs(fixture.network);
+    expect(subs).toHaveLength(2);
+
+    // The same id arrives pre-EOSE through both relays: one ingest, both keys credited.
+    const shared = groupEvent("02".repeat(32), 3000n);
+    for (const sub of subs) {
+      push(sub, shared);
+    }
+    await settle(fixture.timer, 25);
+    expect(ingested(script).map((e) => e.id)).toStrictEqual(["02".repeat(32)]);
+    for (const sub of subs) {
+      pushEose(sub);
+    }
+    await settle(fixture.timer, 25);
+    const { cursors } = decodeClientState(fixture.cursors.bytes());
+    expect(cursors[key1]).toBe(3000);
+    expect(cursors[key2]).toBe(3000);
+    await fixture.client.close();
+  });
+
+  test("events off the subscription's route or kind are ignored", async () => {
+    const script = freshScript();
+    script.groups = [snapshot()];
+    const key = groupCursorKey(ROUTE, RELAY);
+    const fixture = await open(script, encodeClientState({ cursors: { [key]: 500 }, inbox: [] }));
+    await settle(fixture.timer, 5000);
+    const sub = mustSub(groupSubs(fixture.network));
+
+    push(
+      sub,
+      event({ id: "03".repeat(32), kind: 445, createdAt: 3000n, tags: [["h", "z".repeat(64)]] }),
+    );
+    push(sub, event({ id: "04".repeat(32), kind: 1059, createdAt: 3000n, tags: [["h", ROUTE]] }));
+    await settle(fixture.timer, 25);
+    expect(ingested(script)).toHaveLength(0);
+    expect(decodeClientState(fixture.cursors.bytes()).cursors[key]).toBe(500);
+    await fixture.client.close();
+  });
+
+  test("a future createdAt clamps to the clock", async () => {
+    const script = freshScript();
+    script.groups = [snapshot()];
+    const key = groupCursorKey(ROUTE, RELAY);
+    const fixture = await open(script, encodeClientState({ cursors: { [key]: 500 }, inbox: [] }));
+    await settle(fixture.timer, 5000);
+    const sub = mustSub(groupSubs(fixture.network));
+
+    pushEose(sub);
+    push(sub, groupEvent("05".repeat(32), 1_800_000_000n));
+    await settle(fixture.timer, 25);
+    expect(decodeClientState(fixture.cursors.bytes()).cursors[key]).toBe(1_700_000_000);
+    await fixture.client.close();
+  });
+
+  test("an unavailable outcome in the backlog caps the key at earliest createdAt − 1", async () => {
+    const script = freshScript();
+    script.groups = [snapshot()];
+    script.reports = [
+      { event: "06".repeat(32), outcome: { type: "accepted" } },
+      {
+        event: "07".repeat(32),
+        outcome: { type: "unavailable", category: "transport_deferred" },
+      },
+    ];
+    const key = groupCursorKey(ROUTE, RELAY);
+    const fixture = await open(script, encodeClientState({ cursors: { [key]: 5000 }, inbox: [] }));
+    await settle(fixture.timer, 5000);
+    const sub = mustSub(groupSubs(fixture.network));
+
+    push(sub, groupEvent("06".repeat(32), 6000n));
+    push(sub, groupEvent("07".repeat(32), 2000n));
+    await settle(fixture.timer, 25);
+    // The backlog folds only at EOSE.
+    expect(decodeClientState(fixture.cursors.bytes()).cursors[key]).toBe(5000);
+    pushEose(sub);
+    await settle(fixture.timer, 25);
+    // max(5000, 6000) capped at 2000 − 1.
+    expect(decodeClientState(fixture.cursors.bytes()).cursors[key]).toBe(1999);
+    await fixture.client.close();
+  });
 });
