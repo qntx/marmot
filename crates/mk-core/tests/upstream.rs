@@ -110,12 +110,11 @@ fn open_sqlite_member_with_features(
 /// `SelfRemove` auto-commit; `UpdateGroupData` shares the same deterministic
 /// path). The transport wrapper is signed per publish, so the wrapped bytes
 /// differ — the commit digest that keys the checkpoint does not.
-async fn send_deterministic_commit(
-    member: &mut SqliteMember,
+async fn send_deterministic_commit<S: cgka_traits::StorageProvider + 'static>(
+    engine: &mut Engine<S>,
     group_id: &GroupId,
 ) -> PendingStateRef {
-    let result = member
-        .engine
+    let result = engine
         .send(SendIntent::UpdateGroupData {
             group_id: group_id.clone(),
             name: Some("pinned".into()),
@@ -133,10 +132,14 @@ async fn send_deterministic_commit(
     pending
 }
 
-/// mdk defect: a re-confirm of an own commit collides on its own-commit
-/// checkpoint. This test reaches the state with a manual rollback; the
-/// production paths are `refused_step_down_staged_again_collides_after_the_next_pass`
-/// and `crashed_step_down_redriven_before_the_pass_collides` below.
+/// mdk defect (mdk#3525, still open at v0.18.0): a re-confirm of an own
+/// commit collides on its own-commit checkpoint. This test reaches the
+/// state with a manual rollback. The production routes that used to reach
+/// it — the convergence pass re-issuing a stranded or refused own commit,
+/// exercised by the `*_stays_confirmed*` tests below — are closed by
+/// mdk#3531 (v0.18.0), which removed `Sent` from
+/// `OPENMLS_COMMIT_INPUT_STATES`; the checkpoint collision itself is not
+/// fixed.
 ///
 /// `confirm_published` keys the checkpoint by commit digest
 /// (`openmls-own-commit-v1-…`) and captures the full openmls state as the
@@ -183,7 +186,7 @@ async fn reconfirm_of_same_own_commit_after_rewind_errors_already_exists() {
         .storage
         .create_group_snapshot(&group_id, "repro-anchor")
         .expect("anchor snapshot");
-    let first_pending = send_deterministic_commit(&mut member, &group_id).await;
+    let first_pending = send_deterministic_commit(&mut member.engine, &group_id).await;
     member
         .engine
         .confirm_published(first_pending)
@@ -214,7 +217,7 @@ async fn reconfirm_of_same_own_commit_after_rewind_errors_already_exists() {
     );
     assert_eq!(checkpoints[0].resulting_epoch.0, 1);
 
-    let second_pending = send_deterministic_commit(&mut member, &group_id).await;
+    let second_pending = send_deterministic_commit(&mut member.engine, &group_id).await;
 
     // A relay accepted the artifact; the merge lands, but the checkpoint
     // insert collides on the retained row — the byte-identical inner commit
@@ -567,13 +570,16 @@ fn is_admin(member: &SqliteMember, group_id: &GroupId) -> bool {
         .any(|admin| admin.as_slice() == own.as_slice())
 }
 
-/// mdk defect: a rolled-back own commit is applied by a later convergence
-/// pass. `publish_failed` rewinds the MLS state but leaves the commit's own
-/// `Sent` message row, and `Sent` is a convergence graph input
-/// (`OPENMLS_GRAPH_INPUT_STATES`, `PASS_OPENING_STATES`): the next pass takes
-/// the row as a branch candidate and applies the commit no relay accepted.
+/// mdk#3524 (fixed by mdk#3531, v0.18.0): a rolled-back own commit is no
+/// longer applied by a later convergence pass. `publish_failed` rewinds the
+/// MLS state and leaves the commit's `Sent` message row, but `Sent` is no
+/// longer a commit input (`OPENMLS_COMMIT_INPUT_STATES` excludes it), so
+/// the pass takes no branch candidate from the stranded row. v0.17.0
+/// asserted the opposite — epoch advanced to 1, the name became "pinned",
+/// and the row turned `Processed`; the pass now leaves all three
+/// untouched.
 #[tokio::test(flavor = "current_thread")]
-async fn rolled_back_own_commit_is_applied_by_a_later_pass() {
+async fn rolled_back_own_commit_stays_unapplied_after_a_later_pass() {
     let dir = temp_dir("rolled-back");
     let mut member = open_hydrated(&dir.join("m.db"), "rolled-back");
     let group_id = found_alone(&mut member).await;
@@ -599,20 +605,21 @@ async fn rolled_back_own_commit_is_applied_by_a_later_pass() {
 
     let (staged, _) = wake(&mut member, &group_id).await;
 
-    assert!(staged.is_empty(), "nothing was confirmed");
-    assert_eq!(record_epoch(&member, &group_id), 1);
+    assert!(staged.is_empty(), "nothing was staged or confirmed");
+    assert_eq!(record_epoch(&member, &group_id), 0);
     assert_eq!(
         member.engine.group_record(&group_id).expect("record").name,
-        "pinned"
+        "repro"
     );
-    assert_eq!(row_state(&member, &msg.id), MessageState::Processed);
+    assert_eq!(row_state(&member, &msg.id), MessageState::Sent);
 }
 
-/// The same defect through reopen: hydration clears a stranded pending
+/// The same fix through reopen: hydration clears a stranded pending
 /// commit (`PendingCommitRecovered`, `engine.rs` "A staged commit that
-/// survived process restart") but not its `Sent` row.
+/// survived process restart") but not its `Sent` row, and the row is no
+/// longer a convergence input either.
 #[tokio::test(flavor = "current_thread")]
-async fn own_commit_cleared_at_reopen_is_applied_by_a_later_pass() {
+async fn own_commit_cleared_at_reopen_stays_unapplied_after_a_later_pass() {
     let dir = temp_dir("cleared-at-reopen");
     let path = dir.join("m.db");
     let mut member = open_hydrated(&path, "cleared-at-reopen");
@@ -648,23 +655,28 @@ async fn own_commit_cleared_at_reopen_is_applied_by_a_later_pass() {
 
     let (staged, _) = wake(&mut member, &group_id).await;
 
-    assert!(staged.is_empty(), "nothing was confirmed");
-    assert_eq!(record_epoch(&member, &group_id), 1);
+    assert!(staged.is_empty(), "nothing was staged or confirmed");
+    assert_eq!(record_epoch(&member, &group_id), 0);
     assert_eq!(
         member.engine.group_record(&group_id).expect("record").name,
-        "pinned"
+        "repro"
     );
-    assert_eq!(row_state(&member, &commit), MessageState::Processed);
+    assert_eq!(row_state(&member, &commit), MessageState::Sent);
 }
 
-/// The production trigger of the own-commit checkpoint collision, with no
-/// crash: the leave re-drive stages a refused step-down again (mdk#3014) and
-/// the second, byte-identical step-down is confirmed. The next pass takes the
-/// refused copy's `Sent` row as the branch (same commit digest), invalidates
-/// the confirmed copy, rewinds the group to the parent epoch and re-issues
-/// the step-down; that confirm meets the first confirm's checkpoint.
+/// The production trigger of the own-commit checkpoint collision (mdk#3014
+/// + mdk#3525), minus the mdk#3524 leg that mdk#3531 closed in v0.18.0:
+/// the leave re-drive stages a refused step-down again and the second,
+/// byte-identical step-down is confirmed. v0.17.0 asserted the next pass
+/// took the refused copy's `Sent` row as the branch, invalidated the
+/// confirmed copy, rewound the group and re-issued the step-down, whose
+/// confirm met the first confirm's checkpoint (`AlreadyExists`). With
+/// `Sent` out of `OPENMLS_COMMIT_INPUT_STATES` the pass now ignores the
+/// refused row: nothing is re-issued, the confirmed copy stays `Processed`
+/// and the group stays at the post-step-down epoch — so the checkpoint
+/// collision is no longer reachable through this route.
 #[tokio::test(flavor = "current_thread")]
-async fn refused_step_down_staged_again_collides_after_the_next_pass() {
+async fn refused_step_down_staged_again_stays_confirmed_through_the_next_pass() {
     let dir = temp_dir("refused-step-down");
     let (_a, mut b, group_id) = Box::pin(two_admins(&dir)).await;
     let epoch = record_epoch(&b, &group_id);
@@ -686,32 +698,23 @@ async fn refused_step_down_staged_again_collides_after_the_next_pass() {
 
     let (reissued, _) = wake(&mut b, &group_id).await;
 
-    assert_eq!(row_state(&b, &refused.msg.id), MessageState::Processed);
-    assert_eq!(
-        row_state(&b, &accepted.msg.id),
-        MessageState::EpochInvalidated
-    );
-    assert_eq!(record_epoch(&b, &group_id), epoch);
-    assert_eq!(reissued.len(), 1, "the step-down is re-issued");
-    let error = b
-        .engine
-        .confirm_published(reissued[0])
-        .await
-        .expect_err("the re-issued step-down collides");
-    assert!(
-        matches!(error, EngineError::Storage(StorageError::AlreadyExists)),
-        "expected AlreadyExists, got {error:?}"
-    );
+    assert!(reissued.is_empty(), "the step-down is not re-issued");
+    assert_eq!(row_state(&b, &refused.msg.id), MessageState::Sent);
+    assert_eq!(row_state(&b, &accepted.msg.id), MessageState::Processed);
+    assert_eq!(record_epoch(&b, &group_id), epoch + 1);
+    assert!(!is_admin(&b, &group_id), "the confirmed step-down applied");
 }
 
 /// The crash-matrix path (`tests/crash.rs` `restart_boundary_leaving`, cut
 /// "durable 16"): the step-down's staging is durable, its fanout is not. At
-/// reopen the pending commit is cleared and its `Sent` row kept. When the
-/// leave re-drive runs before any convergence cutoff is armed, it stages and
-/// confirms the byte-identical step-down; the next pass then collides exactly
-/// like the refused case.
+/// reopen the pending commit is cleared and its `Sent` row kept. The leave
+/// re-drive still re-stages and confirms the byte-identical step-down, but
+/// since mdk#3531 (v0.18.0) the next pass ignores the stranded `Sent` row:
+/// v0.17.0 asserted the pass invalidated the confirmed copy, rewound the
+/// group and re-issued a step-down that collided (`AlreadyExists`); now
+/// nothing is re-issued and the confirmed step-down stands.
 #[tokio::test(flavor = "current_thread")]
-async fn crashed_step_down_redriven_before_the_pass_collides() {
+async fn crashed_step_down_redriven_before_the_pass_stays_confirmed() {
     let dir = temp_dir("crashed-redriven");
     let (_a, mut b, group_id) = Box::pin(two_admins(&dir)).await;
     let epoch = record_epoch(&b, &group_id);
@@ -734,31 +737,22 @@ async fn crashed_step_down_redriven_before_the_pass_collides() {
 
     let (reissued, _) = wake(&mut b, &group_id).await;
 
-    assert_eq!(row_state(&b, &stranded.msg.id), MessageState::Processed);
-    assert_eq!(
-        row_state(&b, &redriven.msg.id),
-        MessageState::EpochInvalidated
-    );
-    assert_eq!(record_epoch(&b, &group_id), epoch);
-    assert_eq!(reissued.len(), 1, "the step-down is re-issued");
-    let error = b
-        .engine
-        .confirm_published(reissued[0])
-        .await
-        .expect_err("the re-issued step-down collides");
-    assert!(
-        matches!(error, EngineError::Storage(StorageError::AlreadyExists)),
-        "expected AlreadyExists, got {error:?}"
-    );
+    assert!(reissued.is_empty(), "the step-down is not re-issued");
+    assert_eq!(row_state(&b, &stranded.msg.id), MessageState::Sent);
+    assert_eq!(row_state(&b, &redriven.msg.id), MessageState::Processed);
+    assert_eq!(record_epoch(&b, &group_id), epoch + 1);
+    assert!(!is_admin(&b, &group_id), "the confirmed step-down applied");
 }
 
 /// The other order after the same crash: a convergence cutoff armed before
-/// the first advance opens a pass over the stranded `Sent` row, which holds
-/// the re-drive back; when the pass fires it applies the never-published
-/// step-down with no confirm, and the leave goes on to its `SelfRemove`.
-/// No collision, but the member is past a commit no relay holds.
+/// the first advance opens a pass before the leave re-drive re-stages.
+/// v0.17.0 asserted the pass took the stranded `Sent` row as its branch and
+/// applied the never-published step-down with no confirm; since mdk#3531
+/// (v0.18.0) the stranded row is not a commit input, so the pass re-stages
+/// the step-down as a publish obligation instead, and the leave proceeds
+/// only once that publish is confirmed.
 #[tokio::test(flavor = "current_thread")]
-async fn crashed_step_down_applied_when_the_pass_runs_first() {
+async fn crashed_step_down_staged_again_when_the_pass_runs_first() {
     let dir = temp_dir("crashed-pass-first");
     let (_a, mut b, group_id) = Box::pin(two_admins(&dir)).await;
     let epoch = record_epoch(&b, &group_id);
@@ -769,136 +763,112 @@ async fn crashed_step_down_applied_when_the_pass_runs_first() {
     let mut b = open_hydrated(&dir.join("b.db"), "two-admins-b");
     let (staged, proposals) = wake(&mut b, &group_id).await;
 
-    assert!(staged.is_empty(), "nothing was re-staged or confirmed");
-    assert_eq!(row_state(&b, &stranded.msg.id), MessageState::Processed);
+    assert_eq!(staged.len(), 1, "the pass re-stages the step-down");
+    assert_eq!(row_state(&b, &stranded.msg.id), MessageState::Sent);
+    assert_eq!(record_epoch(&b, &group_id), epoch);
+    assert_eq!(proposals, 0, "nothing applied, so no SelfRemove yet");
+    b.engine
+        .confirm_published(staged[0])
+        .await
+        .expect("confirm the re-staged step-down");
     assert_eq!(record_epoch(&b, &group_id), epoch + 1);
-    assert!(
-        !is_admin(&b, &group_id),
-        "the unpublished step-down applied"
-    );
-    assert_eq!(proposals, 1, "the SelfRemove follows");
+    assert!(!is_admin(&b, &group_id), "the step-down applies on confirm");
 }
 
-/// The collision's blob difference, measured rather than read from code: on
-/// the refused-step-down path, the first confirm's checkpoint and the one the
-/// re-issued confirm captures (written after releasing the first) differ in
-/// exactly one `OpenMLS` row, `MessageSecrets`, and only inside its
-/// `added_at` timestamp (`OpenMLS` `past_secrets.rs` stamps `SystemTime::now()`
-/// at merge). Every other row, the group record and the validated-tree
-/// marker are byte-identical. On mk-core's own provider, whose checkpoint
-/// rows the test can read.
+/// The collision's blob difference, measured rather than read from code:
+/// the first confirm's checkpoint and the one a re-confirm of the same
+/// byte-identical commit captures (written after releasing the first)
+/// differ in exactly one `OpenMLS` row, `MessageSecrets`, and only inside
+/// its `added_at` timestamp (`OpenMLS` `past_secrets.rs` stamps
+/// `SystemTime::now()` at merge). Every other row, the group record and
+/// the validated-tree marker are byte-identical. On mk-core's own
+/// provider, whose checkpoint rows the test can read.
+///
+/// mdk#3525 stays open at v0.18.0. The v0.17.0 route here — a refused
+/// step-down re-issued by the next convergence pass — is gone: mdk#3531
+/// removed `Sent` from `OPENMLS_COMMIT_INPUT_STATES`, so the pass never
+/// re-issues the stranded commit. This test reaches the same re-confirm
+/// through the manual rewind of
+/// `reconfirm_of_same_own_commit_after_rewind_errors_already_exists`:
+/// snapshot anchor, confirm once, roll back to the anchor, rebuild the
+/// engine on the same host rows, re-send the byte-identical commit.
 #[tokio::test(flavor = "current_thread")]
 async fn colliding_checkpoints_differ_only_in_added_at() {
-    let mut a = harness::Member::fresh("a", "blob-diff-a");
-    let mut b = harness::Member::fresh("b", "blob-diff-b");
-    let mut b_key_package = b.engine.fresh_key_package().await.expect("b key package");
-    b_key_package.source = Some(KeyPackageSource {
-        event_id: MessageId::new(vec![0x55; 32]),
-    });
+    let mut member = harness::Member::fresh("m", "blob-diff-m");
     let req = CreateGroupRequest {
         name: "blob-diff".into(),
         description: String::new(),
-        members: vec![b_key_package],
+        members: Vec::new(),
         required_features: Vec::new(),
         app_components: vec![routing_component(
-            &a.engine.self_id(),
+            &member.engine.self_id(),
             &[RELAY_URL.to_string()],
         )],
-        initial_admins: vec![b.engine.self_id()],
+        initial_admins: Vec::new(),
     };
-    let (group_id, created) = a.engine.create_group(req).await.expect("create_group");
+    let (group_id, created) = member.engine.create_group(req).await.expect("create_group");
     let SendResult::FoundingGroupCreated { welcomes } = created else {
         panic!("expected FoundingGroupCreated, got {created:?}");
     };
-    let welcome = welcomes.into_iter().next().expect("one welcome for B");
-    b.engine.join_welcome(welcome).await.expect("b joins");
-    for _ in 0..4 {
-        b.clock.advance_ms(60_000);
-        let _ = b
-            .engine
-            .prepare_convergence_cutoff_delay_ms(&group_id)
-            .expect("arm convergence pass");
-        b.engine
-            .advance_convergence_inputs_until_settled(&group_id, 0)
-            .await
-            .expect("settle inputs");
-        for result in b
-            .engine
-            .advance_convergence(&group_id)
-            .await
-            .expect("advance")
-        {
-            if let SendResult::GroupEvolution { pending, .. } = result {
-                b.engine.confirm_published(pending).await.expect("confirm");
-            }
-        }
-    }
+    assert!(
+        welcomes.is_empty(),
+        "a single-member create stages no welcomes"
+    );
 
-    let requested = b
+    // Hydration is the only writer of the `validated_tree_marker` row
+    // (engine.rs `hydrate_group` — a validation-skip cache over the stored
+    // tree). Reopen once so the marker exists in the anchored state and
+    // shows up identically in both checkpoint images below.
+    let mut member = harness::Member::open("m", member.signer.clone(), member.host.clone());
+    member
+        .provider
+        .create_group_snapshot(&group_id, "blob-diff-anchor")
+        .expect("anchor snapshot");
+    let first_pending = send_deterministic_commit(&mut member.engine, &group_id).await;
+    member
         .engine
-        .send(SendIntent::StepDownAndLeave {
-            group_id: group_id.clone(),
-        })
+        .confirm_published(first_pending)
         .await
-        .expect("leave");
-    assert!(matches!(requested, SendResult::LeaveRequested { .. }));
-    b.engine
-        .advance_convergence(&group_id)
-        .await
-        .expect("advance");
-    let refused = b.engine.drain_auto_publish().remove(0);
-    b.engine
-        .publish_failed(refused.pending)
-        .await
-        .expect("publish_failed");
-    b.engine
-        .advance_convergence(&group_id)
-        .await
-        .expect("advance");
-    let accepted = b.engine.drain_auto_publish().remove(0);
-    b.engine
-        .confirm_published(accepted.pending)
-        .await
-        .expect("confirm");
-    let first = checkpoint_image(&b.host);
+        .expect("first confirm writes the checkpoint");
+    let first = checkpoint_image(&member.host);
 
-    let _ = b
+    // Rewind canonical state to the anchor and rebuild the engine on the
+    // same host rows; the first confirm's checkpoint row survives the
+    // restore.
+    member
+        .provider
+        .rollback_group_state_to_snapshot(&group_id, "blob-diff-anchor")
+        .expect("anchor rollback");
+    let mut member = harness::Member::open("m", member.signer.clone(), member.host.clone());
+    let checkpoints = member
+        .provider
+        .list_group_state_checkpoints(&group_id)
+        .expect("list checkpoints");
+    assert_eq!(checkpoints.len(), 1);
+
+    // The re-staged commit is byte-identical to the first (same anchor
+    // parent), so the second confirm resolves to the same checkpoint id
+    // and collides with the retained row.
+    let reissued = send_deterministic_commit(&mut member.engine, &group_id).await;
+    let error = member
         .engine
-        .prepare_convergence_cutoff_delay_ms(&group_id)
-        .expect("arm convergence pass");
-    b.clock.advance_ms(60_000);
-    b.engine
-        .advance_convergence_inputs_until_settled(&group_id, 0)
-        .await
-        .expect("settle inputs");
-    let _ = b
-        .engine
-        .advance_convergence(&group_id)
-        .await
-        .expect("advance");
-    let reissued = b.engine.drain_auto_publish().remove(0);
-    let error = b
-        .engine
-        .confirm_published(reissued.pending)
+        .confirm_published(reissued)
         .await
         .expect_err("collides");
     assert!(matches!(
         error,
         EngineError::Storage(StorageError::AlreadyExists)
     ));
-    let checkpoints = b
+    member
         .provider
-        .list_group_state_checkpoints(&group_id)
-        .expect("list checkpoints");
-    assert_eq!(checkpoints.len(), 1);
-    b.provider
         .release_group_state_checkpoint(&group_id, &checkpoints[0].id)
         .expect("release checkpoint");
-    b.engine
-        .confirm_published(reissued.pending)
+    member
+        .engine
+        .confirm_published(reissued)
         .await
         .expect("confirm once the first checkpoint is gone");
-    let second = checkpoint_image(&b.host);
+    let second = checkpoint_image(&member.host);
 
     assert_ne!(first, second);
     assert_eq!(first["group"], second["group"], "group record");

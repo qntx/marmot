@@ -522,14 +522,14 @@ pub enum SessionError {
     /// of the byte-identical commit left behind: the checkpoint id derives
     /// from the commit digest and the epoch matches, but the captured blob
     /// embeds `OpenMLS` `added_at` (stamped at merge time), so a re-confirm
-    /// after convergence replayed the commit is neither an exact retry nor
-    /// a new checkpoint and upstream storage answers `AlreadyExists`.
+    /// of the same commit over the retained checkpoint is neither an exact
+    /// retry nor a new checkpoint and upstream storage answers
+    /// `AlreadyExists` (mdk#3525, open at v0.18.0; the convergence
+    /// re-issue route that used to reach it was closed by mdk#3531).
     ///
     /// The artifact was relay-accepted, so the session never rolls the
     /// commit back locally: it keeps the fanout obligation outstanding and
-    /// reports this error instead. Retrying the same report repeats the
-    /// collision until convergence resolves the pending through another
-    /// branch (upstream defect; `tests/upstream.rs`).
+    /// reports this error instead (upstream defect; `tests/upstream.rs`).
     #[error("own-commit confirm conflicted with a retained checkpoint")]
     ConfirmConflict,
     /// An [`OutboundId`] no live obligation matches.
@@ -596,6 +596,7 @@ fn session_engine_error(error: EngineError) -> SessionError {
         | EngineError::WelcomeAlreadyProcessed => SessionError::InvalidInput("record"),
         EngineError::QueuedOutboundAtCapacity { .. }
         | EngineError::LinkDeviceUnsettled { .. }
+        | EngineError::SiblingAddUnsettled { .. }
         | EngineError::DeviceEntryChanged { .. }
         | EngineError::AccountEntryChanged { .. }
         | EngineError::AccountEntryUnsettled { .. }
@@ -1449,8 +1450,12 @@ impl Session {
             && !fanout.possible_exposure()
             && let Some(pending) = fanout.pending_ref()
         {
+            // `RollbackPass::Later`: the session call that staged the commit
+            // has always returned before the host reports verdicts, so the
+            // rollback is never inside the staging call. Our fanouts name no
+            // host change, so this path writes no ChangeNotDelivered record.
             self.engine
-                .publish_failed_fanout(pending, &mut fanout)
+                .publish_failed_fanout(pending, &mut fanout, cgka_engine::RollbackPass::Later)
                 .await
                 .map_err(session_engine_error)?;
             resolution = PublishResolution::RolledBack;
@@ -3575,7 +3580,7 @@ const fn retryable_status(status: RelayStatus) -> bool {
 mod proof_tests {
     //! Account-identity-proof flow tests. The deferred-build discriminator
     //! test is the one sanctioned pin seam: it asserts the exact
-    //! `EngineError` variant MDK v0.17.0 returns when the proof signer
+    //! `EngineError` variant MDK v0.18.0 returns when the proof signer
     //! defers, because our open path classifies `NeedsAccountProof` on the
     //! captured request alone (no string matching).
 
@@ -3598,7 +3603,7 @@ mod proof_tests {
         }
     }
 
-    /// MDK v0.17.0 maps a deferring `AccountIdentityProofSigner` error
+    /// MDK v0.18.0 maps a deferring `AccountIdentityProofSigner` error
     /// through `EngineError::Other` at engine.rs `Identity::load_or_generate`.
     /// This test is the canary: if a pin bump ever changes that variant, the
     /// capture-based classification stays correct but this test must be

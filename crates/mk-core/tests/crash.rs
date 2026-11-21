@@ -65,22 +65,19 @@
 //!   the removed member realizes its local-leaf removal. Disband is not
 //!   in the session API (M5) — there is nothing to interrupt.
 //!
-//! Upstream-blocked case: at the leaving-flow cuts where the step-down's
-//! staging is durable but its fanout is not, the reopened leaver keeps the
-//! never-published step-down's `Sent` row (hydration clears only its
-//! pending commit), re-drives and confirms a byte-identical step-down, and
-//! the next convergence pass selects the stale row, invalidates the
-//! confirmed copy, rewinds the group and re-issues the step-down. That
-//! confirm meets the first confirm's checkpoint and MDK's
-//! `create_group_state_checkpoint` answers `AlreadyExists` (same id and
-//! epoch, blobs differing only in `OpenMLS` `added_at`). Each step is
-//! reproduced on `Engine<SqliteAccountStorage>` in `tests/upstream.rs`, so
-//! it is not a KV provider divergence. The session reports
-//! `ConfirmConflict`, never rolls the accepted commit back, and keeps the
-//! fanout obligation outstanding; a pending that can never resolve can then
-//! wedge that member's group evolution, so `matrix` relaxes
-//! `obligations_clear` on flagged runs and accepts a divergent terminal
-//! state as the documented upstream failure mode.
+//! mdk#3524 (fixed by mdk#3531, v0.18.0): at the leaving-flow cuts where
+//! the step-down's staging is durable but its fanout is not, the reopened
+//! leaver still keeps the never-published step-down's `Sent` row and
+//! re-drives and confirms a byte-identical step-down — but `Sent` is no
+//! longer a convergence commit input (`OPENMLS_COMMIT_INPUT_STATES`
+//! excludes it), so the next pass no longer takes the stale row as a
+//! branch, never invalidates the confirmed copy, and never re-issues a
+//! step-down whose confirm would collide on the first confirm's
+//! checkpoint (`AlreadyExists`, blobs differing only in `OpenMLS`
+//! `added_at`). `tests/upstream.rs` pins the fixed behaviour on
+//! `Engine<SqliteAccountStorage>`; a `ConfirmConflict` from
+//! `report_publish` is a test failure again, obligations must clear, and
+//! no divergent terminal state is excused.
 
 #![allow(
     clippy::missing_docs_in_private_items,
@@ -134,7 +131,7 @@ mod crash {
 
     use mk_core::{
         AppMessage, CreateGroup, EventId, GroupId, GroupSnapshot, GroupState, Invitee, Opened,
-        RelayResult, RelayStatus, Session, SessionError, SessionEvent,
+        RelayResult, RelayStatus, Session, SessionEvent,
     };
 
     use super::support::*;
@@ -286,10 +283,6 @@ mod crash {
         /// Outbound obligations the restarted session surfaced from
         /// durable rows before the flow resumed.
         restart_obligations: usize,
-        /// A `ConfirmConflict` surfaced on at least one report — the
-        /// upstream checkpoint-collision defect (see `tests/upstream.rs`).
-        /// The fanout stays outstanding; obligations may never clear.
-        upstream_blocked: bool,
         /// `(publisher, purpose, recipient-index)` tuples this run never
         /// publishes — models staged artifacts whose rows never became
         /// durable.
@@ -331,25 +324,21 @@ mod crash {
                 .map(|_| gid)
         }
 
-        /// Report one publish verdict set. `ConfirmConflict` is the known
-        /// upstream defect (`tests/upstream.rs`): the accepted commit is
-        /// never rolled back, the fanout obligation stays outstanding, and
-        /// a retry collides again — record it and let the run continue.
+        /// Report one publish verdict set. Any error is a test failure —
+        /// `ConfirmConflict` remains mapped for the retained-checkpoint
+        /// reconfirm collision (mdk#3525) but no longer has a reachable
+        /// route in this matrix since mdk#3531.
         async fn report(
             &mut self,
             member: usize,
             id: &mk_core::OutboundId,
             results: &[RelayResult],
         ) {
-            match self.world.members[member]
+            self.world.members[member]
                 .session
                 .report_publish(id, results)
                 .await
-            {
-                Ok(_) => {}
-                Err(SessionError::ConfirmConflict) => self.upstream_blocked = true,
-                Err(error) => panic!("report_publish: {error}"),
-            }
+                .unwrap_or_else(|error| panic!("report_publish: {error}"));
         }
 
         /// Drain session events into the effect ledgers.
@@ -863,8 +852,7 @@ mod crash {
     /// `measure`'s flow batch `k` (a `Cut` is always on `measure`).
     /// Returns the observer projection, the number of flow batches the
     /// measured member emitted, the interrupted step index if cut, the
-    /// restart obligation count, and whether the upstream
-    /// checkpoint-collision defect fired on a report.
+    /// restart obligation count.
     async fn run(
         flow: &[Step],
         member_count: usize,
@@ -872,7 +860,7 @@ mod crash {
         cut: Option<Cut>,
         suppress: &BTreeSet<(usize, &'static str, usize)>,
         withhold_step: Option<usize>,
-    ) -> (Observed, usize, Option<usize>, usize, bool) {
+    ) -> (Observed, usize, Option<usize>, usize) {
         let relay = FakeRelay::new();
         let mut members = Vec::new();
         for _ in 0..member_count {
@@ -905,7 +893,6 @@ mod crash {
             halted: false,
             halt_step: None,
             restart_obligations: 0,
-            upstream_blocked: false,
             suppress: suppress.clone(),
             withhold_step,
         };
@@ -957,7 +944,6 @@ mod crash {
             flow_batches,
             runner.halt_step,
             runner.restart_obligations,
-            runner.upstream_blocked,
         )
     }
 
@@ -995,7 +981,7 @@ mod crash {
                 if std::env::var_os("CRASH_DUMP").is_some() {
                     eprintln!("=== {ctx}");
                 }
-                let (observed, _, halt_step, restart_obligations, upstream_blocked) = run(
+                let (observed, _, halt_step, restart_obligations) = run(
                     flow,
                     members,
                     cut_member,
@@ -1008,26 +994,13 @@ mod crash {
                     None,
                 )
                 .await;
-                if upstream_blocked {
-                    eprintln!("{ctx}: upstream-blocked (own-commit checkpoint collision)");
-                }
                 for (m, member) in observed.members.iter().enumerate() {
                     assert!(
-                        member.obligations_clear || upstream_blocked,
+                        member.obligations_clear,
                         "{ctx}: member {m} still has outstanding obligations"
                     );
                 }
                 if equivalent(&reference, &observed) {
-                    continue;
-                }
-                if upstream_blocked {
-                    // The collided re-confirm wedges the cut member's
-                    // group evolution behind a pending that can never
-                    // resolve (each retry collides again), so a divergent
-                    // terminal state is the documented upstream failure
-                    // mode for this cut — the run still proved the safe
-                    // behaviour: typed `ConfirmConflict`, no local
-                    // rollback of an accepted commit.
                     continue;
                 }
                 let step = halt_step.map(|index| &flow[index]);

@@ -13,7 +13,7 @@
 //!   hands out exactly what to publish and absorbs the per-relay verdicts.
 //! * [`KvStorageProvider`] is the `cgka_traits::storage::StorageProvider`
 //!   under it: a semantic mirror of MDK's `storage-sqlite` backend
-//!   (v0.17.0) over a minimal transactional batch interface a host can
+//!   (v0.18.0) over a minimal transactional batch interface a host can
 //!   implement on `IndexedDB`, MMKV, or an existing embedded database.
 //!
 //! Module layering: [`kv`] is the host boundary (atomic batches, one commit

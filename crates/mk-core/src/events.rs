@@ -1056,7 +1056,9 @@ fn session_event_rest(event: GroupEvent) -> Option<SessionEvent> {
         // folded into the GroupStateChanged stream; `CommitRolledBack`
         // surfaces through publish resolution;
         // `TransportObjectResourceRefused` is a retained-object signal, not
-        // application state. The first-half variants all exit through
+        // application state; `GroupChangeNotDelivered` announces a host's
+        // direct change our session never names, so the engine never emits
+        // it for us. The first-half variants all exit through
         // `session_event` before this point.
         _ => None,
     }

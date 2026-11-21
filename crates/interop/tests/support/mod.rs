@@ -74,7 +74,7 @@ pub fn wnd_bin() -> PathBuf {
     PathBuf::from(std::env::var("WND_BIN").expect("WND_BIN must point at the wnd binary"))
 }
 
-/// The White Noise tag pinned in `upstream.json` (`wn.tag`, e.g. `v0.17.0`).
+/// The White Noise tag pinned in `upstream.json` (`wn.tag`, e.g. `v0.18.0`).
 pub fn pinned_wn_tag() -> String {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../upstream.json")

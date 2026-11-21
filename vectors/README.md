@@ -2,7 +2,7 @@
 
 `spec/` holds byte-for-byte copies of Marmot spec documents the
 implementation is tested against — frozen at the spec rev pinned in
-`upstream.json` (`spec.rev`, currently `f825024`). Do not edit them; they
+`upstream.json` (`spec.rev`, currently `04fbdf8`). Do not edit them; they
 move only when the pin moves. `bun run check:pins` verifies them against a
 local `3rdparty/marmot` checkout when present.
 
@@ -25,7 +25,7 @@ here alongside `parity.json` in later milestones.
 
 - `mdk/` — byte-for-byte copies of the MDK cgka-conformance-simulator vector
   fixtures (top-level `*.v1.json`, `incidents/*.json`, `manifest.v1.json`),
-  frozen at the MDK pin in `upstream.json` (`mdk.rev`, tag `v0.17.0`).
+  frozen at the MDK pin in `upstream.json` (`mdk.rev`, tag `v0.18.0`).
   Provenance (repository, tag, rev, source path, SHA-256 per file) lives in
   `mdk/PROVENANCE.md`; `bun run check:pins` verifies the copies against a
   local `3rdparty/mdk` checkout when present. `crates/conformance` replays

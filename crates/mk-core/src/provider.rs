@@ -1,6 +1,6 @@
 //! `KvStorageProvider`: the Marmot storage traits over the KV store.
 //!
-//! Every method mirrors `storage-sqlite` v0.17.0 semantics: insertion-order
+//! Every method mirrors `storage-sqlite` v0.18.0 semantics: insertion-order
 //! listings, upsert-keeps-position, `INSERT OR IGNORE`/`ON CONFLICT DO UPDATE`
 //! idempotency, `SnapshotMissing`/`NotFound`/`AlreadyExists` error classes,
 //! the 4,096 ingress-dedup FIFO bound, the outbound-fanout successor guard,
@@ -68,7 +68,7 @@ const OPENMLS_CONTENT_UNCLASSIFIED: u8 = 4;
 /// [`StorageProvider`] plus the `OpenMLS` storage trait (via
 /// [`Self::mls_storage`]).
 ///
-/// `backend()` reports [`Backend::Sqlite`] because MDK v0.17.0's `Backend`
+/// `backend()` reports [`Backend::Sqlite`] because MDK v0.18.0's `Backend`
 /// enum has no generic KV variant — an upstream gap, recorded here rather
 /// than papered over with a wrong answer.
 ///
@@ -177,7 +177,7 @@ const INTERN_CAP: usize = 128;
 const INTERN_LEN_CAP: usize = 1024;
 
 /// Descriptions this crate registers through `register_feature`:
-/// `cgka-engine` v0.17.0's own `FeatureRegistry::new()` is empty — every
+/// `cgka-engine` v0.18.0's own `FeatureRegistry::new()` is empty — every
 /// registration arrives from the app layer — and this crate registers
 /// `SelfRemove` only. Resolution is by content equality; the static is
 /// returned so a known string costs no allocation. Unknown strings intern
@@ -1245,6 +1245,13 @@ impl KvStorageProvider {
                 self.store.delete(&row_key)?;
             }
         }
+        for (row_key, value) in self.scan_rows(Table::ChangeNotDelivered, &[])? {
+            let (_, record): (_, cgka_traits::storage::ChangeNotDelivered) =
+                Self::read_ordered(&value)?;
+            if record.group_id.as_slice() == gid {
+                self.store.delete(&row_key)?;
+            }
+        }
         for (row_key, value) in self.scan_rows(Table::OutboundFanout, &[])? {
             let (_, record): (_, OutboundFanout) = Self::read_ordered(&value)?;
             if record.group_id().map(GroupId::as_slice) == Some(gid) {
@@ -1854,6 +1861,64 @@ impl OutboundIntentStorage for KvStorageProvider {
 
     fn delete_own_commit_intent(&self, commit_id: &MessageId) -> StorageResult<()> {
         self.del_row(Table::OwnCommitIntent, &[mid_seg(commit_id)])
+    }
+
+    /// `INSERT ... ON CONFLICT(commit_id) DO NOTHING` (`outbound.rs`): the
+    /// commit id is unique account-wide, an existing record is kept as it
+    /// is, and the skipped insert never reaches the `FOREIGN KEY(group_id)`
+    /// check, so a kept record also excuses a missing group.
+    fn put_change_not_delivered(
+        &self,
+        record: &cgka_traits::storage::ChangeNotDelivered,
+    ) -> StorageResult<()> {
+        self.store.ensure_writable()?;
+        if self
+            .row(Table::ChangeNotDelivered, &[mid_seg(&record.commit_id)])?
+            .is_some()
+        {
+            return Ok(());
+        }
+        self.require_group(&record.group_id)?;
+        self.put_ordered(
+            Table::ChangeNotDelivered,
+            &[mid_seg(&record.commit_id)],
+            record,
+        )
+    }
+
+    /// `WHERE group_id ORDER BY rowid` — the group's rows in insertion
+    /// order.
+    fn changes_not_delivered(
+        &self,
+        group_id: &GroupId,
+    ) -> StorageResult<Vec<cgka_traits::storage::ChangeNotDelivered>> {
+        let all: Vec<cgka_traits::storage::ChangeNotDelivered> =
+            self.list_ordered(Table::ChangeNotDelivered, &[])?;
+        Ok(all
+            .into_iter()
+            .filter(|record| &record.group_id == group_id)
+            .collect())
+    }
+
+    /// `DELETE WHERE group_id AND commit_id`, `deleted > 0` (`outbound.rs`):
+    /// a record stored under another group is not the group's record, so it
+    /// answers `false` and stays.
+    fn delete_change_not_delivered(
+        &self,
+        group_id: &GroupId,
+        commit_id: &MessageId,
+    ) -> StorageResult<bool> {
+        self.store.ensure_writable()?;
+        let Some(value) = self.row(Table::ChangeNotDelivered, &[mid_seg(commit_id)])? else {
+            return Ok(false);
+        };
+        let (_, record): (_, cgka_traits::storage::ChangeNotDelivered) =
+            Self::read_ordered(&value)?;
+        if &record.group_id != group_id {
+            return Ok(false);
+        }
+        self.del_row(Table::ChangeNotDelivered, &[mid_seg(commit_id)])?;
+        Ok(true)
     }
 }
 
@@ -2562,9 +2627,9 @@ impl StorageProvider for KvStorageProvider {
     }
 
     /// The `MlsGroup`-reuse generation. What the pinned engine (MDK
-    /// 4df811a) assumes:
+    /// 34646a5) assumes:
     ///
-    /// - `traits/storage.rs:1439-1449` — the count must change on every
+    /// - `traits/storage.rs:1510-1518` — the count must change on every
     ///   write to the `OpenMLS` store, including transaction rollbacks and
     ///   snapshot restores that bypass the `OpenMLS` provider; `None`
     ///   disables reuse.
@@ -2576,10 +2641,10 @@ impl StorageProvider for KvStorageProvider {
     ///   `:180`) with `foreign_half` at `:44-46` keeps an object written
     ///   through when the upper 32 bits are unchanged since the take — the
     ///   low half may move.
-    /// - `openmls_projection/resumable.rs:258-278` (`:273`) — replay
+    /// - `openmls_projection/resumable.rs:290-300` (`:297`) — replay
     ///   continuations compare the generation only when no replay
     ///   fingerprint exists; this provider always returns one
-    ///   (`group_replay_state_fingerprint`). `:386`/`:606` — `None` would
+    ///   (`group_replay_state_fingerprint`). `:410`/`:630` — `None` would
     ///   switch to the synchronous evaluator, so this must keep returning
     ///   `Some`.
     /// - Reference: `storage-sqlite` `protocol/provider.rs:28-44` packs
@@ -2675,7 +2740,7 @@ impl StorageProvider for KvStorageProvider {
         snapshot::list_with_prefixes(self, prefixes)
     }
 
-    /// MDK v0.17.0's `Backend` enum has no generic KV variant; `Sqlite` is
+    /// MDK v0.18.0's `Backend` enum has no generic KV variant; `Sqlite` is
     /// the only honest answer the enum admits. Upstream gap.
     fn backend(&self) -> Backend {
         Backend::Sqlite

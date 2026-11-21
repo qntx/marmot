@@ -79,11 +79,11 @@ use cgka_traits::maintenance::{
 };
 use cgka_traits::message::{MessageRecord, MessageState, StoredMessagePayload};
 use cgka_traits::storage::{
-    AccountDeviceHistoryKey, AccountDeviceSignerBinding, CommittedMembers, CommittedRoster,
-    CommittedRosterWrite, DeferredPeelGeneration, DeviceGroupWelcomeExpectation, DisbandCandidate,
-    DisbandRequest, DisbandRequestStatus, GroupStateCheckpointRef, LeaveRequest,
-    OpenMlsContentFilter, OwnCommitBaseline, OwnCommitIntent, QueuedOutboundIntent, RosterRevision,
-    StorageError, StorageProvider,
+    AccountDeviceHistoryKey, AccountDeviceSignerBinding, ChangeNotDelivered, ChangeOrigin,
+    CommittedMembers, CommittedRoster, CommittedRosterWrite, DeferredPeelGeneration,
+    DeviceGroupWelcomeExpectation, DisbandCandidate, DisbandRequest, DisbandRequestStatus,
+    GroupStateCheckpointRef, LeaveRequest, OpenMlsContentFilter, OwnCommitBaseline,
+    OwnCommitIntent, QueuedOutboundIntent, RosterRevision, StorageError, StorageProvider,
 };
 use cgka_traits::transport::{Timestamp, TransportEnvelope, TransportMessage, TransportSource};
 use cgka_traits::transport_adapter::{
@@ -250,6 +250,24 @@ fn own_intent(n: u8, g: u8) -> OwnCommitIntent {
         reinvite: None,
         reissue_attempts: 0,
         created_at_ms: u64::from(n),
+    }
+}
+
+/// `v` varies the payload fields so a duplicate `put` under an existing
+/// commit id distinguishes keeps-first (`ON CONFLICT DO NOTHING`) from an
+/// overwrite in the dumps.
+fn change_not_delivered(c: u8, g: u8, v: u8) -> ChangeNotDelivered {
+    ChangeNotDelivered {
+        group_id: gid(g),
+        commit_id: mid(c),
+        origin: if v % 2 == 0 {
+            ChangeOrigin::Direct
+        } else {
+            ChangeOrigin::QueuedIntent { intent_id: mid(v) }
+        },
+        intent_kind: format!("kind-{v}"),
+        reason: format!("reason-{v}"),
+        at_ms: u64::from(v),
     }
 }
 
@@ -555,6 +573,7 @@ enum Op {
     DeleteMessage(u8),
     GetMessage(u8),
     ReleaseMessage(u8, u8, u8, u64),
+    ReleaseMessageWithoutStallEvidence(u8, u8, u8, u64),
     PutWelcome(u8, u8),
     TakeWelcome(u8),
     PutRoute(u8, u8, u64),
@@ -564,6 +583,9 @@ enum Op {
     DeleteQueuedIntent(u8),
     PutOwnIntent(u8, u8),
     DeleteOwnIntent(u8),
+    PutChangeNotDelivered(u8, u8, u8),
+    ChangesNotDelivered(u8),
+    DeleteChangeNotDelivered(u8, u8),
     PutFanout(u8, u8),
     DeleteFanout(u8),
     PutLeave(u8),
@@ -649,6 +671,9 @@ fn leaf_strategy() -> impl Strategy<Value = Op> {
         1 => (0..MESSAGES, 0..GROUPS, 0..7u8, 0..4u64).prop_map(|(m, g, s, e)| {
             Op::ReleaseMessage(m, g, s, e)
         }),
+        1 => (0..MESSAGES, 0..GROUPS, 0..7u8, 0..4u64).prop_map(|(m, g, s, e)| {
+            Op::ReleaseMessageWithoutStallEvidence(m, g, s, e)
+        }),
         1 => (0..MESSAGES).prop_map(Op::GetMessage),
         2 => (0..MESSAGES, 0..GROUPS).prop_map(|(m, g)| Op::PutWelcome(m, g)),
         1 => (0..MESSAGES).prop_map(Op::TakeWelcome),
@@ -659,6 +684,11 @@ fn leaf_strategy() -> impl Strategy<Value = Op> {
         1 => (0..MESSAGES).prop_map(Op::DeleteQueuedIntent),
         1 => (0..MESSAGES, 0..GROUPS).prop_map(|(m, g)| Op::PutOwnIntent(m, g)),
         1 => (0..MESSAGES).prop_map(Op::DeleteOwnIntent),
+        2 => (0..8u8, 0..GROUPS, 0..4u8)
+            .prop_map(|(c, g, v)| Op::PutChangeNotDelivered(c, g, v)),
+        1 => (0..GROUPS).prop_map(Op::ChangesNotDelivered),
+        1 => (0..GROUPS, 0..8u8)
+            .prop_map(|(g, c)| Op::DeleteChangeNotDelivered(g, c)),
         1 => (0..MESSAGES, 0..GROUPS).prop_map(|(m, g)| Op::PutFanout(m, g)),
         1 => (0..MESSAGES).prop_map(Op::DeleteFanout),
         1 => (0..GROUPS).prop_map(Op::PutLeave),
@@ -794,6 +824,7 @@ enum Outcome {
     Roster(Result<Option<CommittedRoster>, String>),
     RosterRevision(Result<Option<RosterRevision>, String>),
     RosterWrite(Result<CommittedRosterWrite, String>),
+    NotDelivered(Result<Vec<ChangeNotDelivered>, String>),
     Bool(Result<bool, String>),
 }
 
@@ -911,6 +942,15 @@ where
         Op::ReleaseMessage(m, g, s, e) => {
             unit(p.release_message_for_replay(&record(*m, *g, state_of(*s), *e, 0)))
         }
+        Op::ReleaseMessageWithoutStallEvidence(m, g, s, e) => {
+            unit(p.release_message_for_replay_without_stall_evidence(&record(
+                *m,
+                *g,
+                state_of(*s),
+                *e,
+                0,
+            )))
+        }
         Op::PutWelcome(m, g) => unit(p.put_welcome(&welcome(*m, *g))),
         Op::TakeWelcome(m) => Outcome::Welcome(p.take_welcome(&mid(*m)).map_err(|e| kind(&e))),
         Op::PutRoute(t, g, e) => unit(p.put_transport_group_route(&[*t; 8], &gid(*g), EpochId(*e))),
@@ -922,6 +962,16 @@ where
         Op::DeleteQueuedIntent(m) => unit(p.delete_queued_outbound_intent(&mid(*m))),
         Op::PutOwnIntent(m, g) => unit(p.put_own_commit_intent(&own_intent(*m, *g))),
         Op::DeleteOwnIntent(m) => unit(p.delete_own_commit_intent(&mid(*m))),
+        Op::PutChangeNotDelivered(c, g, v) => {
+            unit(p.put_change_not_delivered(&change_not_delivered(*c, *g, *v)))
+        }
+        Op::ChangesNotDelivered(g) => {
+            Outcome::NotDelivered(p.changes_not_delivered(&gid(*g)).map_err(|e| kind(&e)))
+        }
+        Op::DeleteChangeNotDelivered(g, c) => Outcome::Bool(
+            p.delete_change_not_delivered(&gid(*g), &mid(*c))
+                .map_err(|e| kind(&e)),
+        ),
         Op::PutFanout(m, g) => unit(p.put_outbound_fanout(&fanout(*m, *g))),
         Op::DeleteFanout(m) => unit(p.delete_outbound_fanout(&mid(*m))),
         Op::PutLeave(g) => unit(p.put_leave_request(&leave_request(*g))),
@@ -1318,6 +1368,12 @@ where
         put(
             &format!("own-intents-{g}"),
             p.list_own_commit_intents(Some(&id))
+                .map(|v| format!("{v:?}"))
+                .map_err(|e| kind(&e)),
+        );
+        put(
+            &format!("not-delivered-{g}"),
+            p.changes_not_delivered(&id)
                 .map(|v| format!("{v:?}"))
                 .map_err(|e| kind(&e)),
         );
