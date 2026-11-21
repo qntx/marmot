@@ -7,7 +7,7 @@
 //! host persisted (`cut_after`) — the fixtures reopen and migration tests,
 //! the session durability gate, and the interop harness all need.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Mutex;
 
 use cgka_traits::message::MessageRecord;
@@ -16,9 +16,10 @@ use crate::clock::{Clock, Time};
 use crate::keys::{self, Table};
 use crate::kv::{CommitSeq, KvBatch, KvHost, KvOp};
 use crate::provider::KvStorageProvider;
+use crate::semantics::{self, Classified, Modifier, Resolution, Semantics, TargetFacts};
 use crate::ser;
 use crate::signer::{AccountSigner, SignerError, SignerFuture};
-use crate::types::{AccountId, Event, UnsignedEvent};
+use crate::types::{AccountId, Event, EventId, UnsignedEvent};
 
 /// An in-memory recording [`KvHost`].
 ///
@@ -452,4 +453,115 @@ pub fn check_message_index(rows: &[(Vec<u8>, Vec<u8>)]) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+/// Fuzz-facing mirror of the crate-private receive classifier: `mk-fuzz`
+/// drives `semantics::classify`/`resolve` through these opaque shapes.
+#[derive(Debug)]
+pub enum FuzzClassified {
+    /// `Semantics::Reaction`; the emoji survives verbatim for assertions.
+    Reaction {
+        /// The accepted emoji.
+        emoji: String,
+    },
+    /// Any other delivered semantics.
+    Deliver,
+    /// Dropped with a reason (opaque to fuzzing).
+    Drop,
+    /// A held modifier, carried over for [`resolve_modifier`].
+    Modifier(FuzzModifier),
+}
+
+/// A parsed kind-5/1009 modifier, fields flattened to public types.
+#[derive(Clone, Debug)]
+pub enum FuzzModifier {
+    /// Kind 1009: replace `target`'s content.
+    Edit {
+        /// The target's inner event id.
+        target: [u8; 32],
+        /// The replacement body.
+        content: String,
+    },
+    /// Kind 5: void `targets`.
+    Delete {
+        /// The deduplicated target ids, in tag order.
+        targets: Vec<[u8; 32]>,
+    },
+}
+
+/// `semantics::classify` for fuzzers; opaque shapes only.
+#[must_use]
+pub fn classify(
+    kind: u64,
+    tags: &[Vec<String>],
+    content: &str,
+    grant: Option<bool>,
+    expires_at: Option<u64>,
+    now_secs: u64,
+) -> FuzzClassified {
+    match semantics::classify(kind, tags, content, grant, expires_at, now_secs) {
+        Classified::Deliver(Semantics::Reaction { emoji, .. }) => {
+            FuzzClassified::Reaction { emoji }
+        }
+        Classified::Deliver(_) => FuzzClassified::Deliver,
+        Classified::Drop(_) => FuzzClassified::Drop,
+        Classified::Modifier(Modifier::Edit { target, content }) => {
+            FuzzClassified::Modifier(FuzzModifier::Edit {
+                target: target.0,
+                content,
+            })
+        }
+        Classified::Modifier(Modifier::Delete { targets }) => {
+            FuzzClassified::Modifier(FuzzModifier::Delete {
+                targets: targets.iter().map(|target| target.0).collect(),
+            })
+        }
+    }
+}
+
+/// The outcome kind of [`resolve_modifier`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FuzzResolution {
+    /// A target is still unknown; the modifier holds.
+    Hold,
+    /// Authorized; delivers.
+    Deliver,
+    /// Refused; drops.
+    Drop,
+}
+
+/// `semantics::resolve` over a fuzz-provided index: `known` maps target id
+/// to `(author, kind)`; ids absent from the map are unknown targets.
+#[must_use]
+pub fn resolve_modifier<S: std::hash::BuildHasher>(
+    modifier: &FuzzModifier,
+    sender: [u8; 32],
+    known: &HashMap<[u8; 32], ([u8; 32], u64), S>,
+    final_attempt: bool,
+) -> FuzzResolution {
+    let modifier = match modifier {
+        FuzzModifier::Edit { target, content } => Modifier::Edit {
+            target: EventId(*target),
+            content: content.clone(),
+        },
+        FuzzModifier::Delete { targets } => Modifier::Delete {
+            targets: targets.iter().map(|target| EventId(*target)).collect(),
+        },
+    };
+    let outcome = semantics::resolve(
+        &modifier,
+        &AccountId(sender),
+        |id| {
+            known.get(&id.0).map(|(author, kind)| TargetFacts {
+                author: AccountId(*author),
+                kind: *kind,
+            })
+        },
+        final_attempt,
+    );
+    match outcome {
+        Resolution::Hold => FuzzResolution::Hold,
+        Resolution::Deliver(_) => FuzzResolution::Deliver,
+        Resolution::Drop(_) => FuzzResolution::Drop,
+    }
 }

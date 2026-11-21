@@ -24,11 +24,7 @@ use tokio::runtime::Runtime;
 
 /// The host `load` serves one static empty-rows blob; it stays valid
 /// for the whole process, satisfying the vtable's buffer contract.
-unsafe extern "C" fn host_load(
-    _ctx: *mut c_void,
-    ptr: *mut *const u8,
-    len: *mut usize,
-) -> i32 {
+unsafe extern "C" fn host_load(_ctx: *mut c_void, ptr: *mut *const u8, len: *mut usize) -> i32 {
     static ROWS: OnceLock<Vec<u8>> = OnceLock::new();
     let rows = ROWS.get_or_init(|| mk_bridge::encode_rows(&[]));
     // SAFETY: `ptr`/`len` are caller-provided out-pointers per the
