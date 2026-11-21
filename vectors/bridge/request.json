@@ -182,6 +182,31 @@
     "group": "dead",
     "type": "seal_attachment"
   },
+  "select_key_packages": {
+    "account": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "events": [
+      {
+        "content": "a2V5",
+        "created_at": "1700000000",
+        "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "kind": 30443,
+        "pubkey": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "sig": "55555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555",
+        "tags": [
+          [
+            "d",
+            "device-1"
+          ],
+          [
+            "i",
+            "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+          ]
+        ]
+      }
+    ],
+    "group": null,
+    "type": "select_key_packages"
+  },
   "self_update": {
     "group": "dead",
     "type": "self_update"

@@ -20,12 +20,12 @@ use crate::protocol::{
     ConfigProbe, CreateGroupRequest, DisbandRequest, DiscardAttachmentRequest, DrainResponse,
     EnableDisbandingRequest, ForgetGroupRequest, GroupCreatedResult, GroupResult, GroupsResult,
     InboxRelaysResult, IngestRequest, IngestedResult, InviteRequest, KeyPackageResult,
-    LeaveRequest, MAX_REQUEST_BYTES, MediaAttachmentRef, MessageSentResult, OpResult,
-    OpenAttachmentRequest, OpenResponse, OutboundResult, PROTOCOL_VERSION,
+    KeyPackagesResult, LeaveRequest, MAX_REQUEST_BYTES, MediaAttachmentRef, MessageSentResult,
+    OpResult, OpenAttachmentRequest, OpenResponse, OutboundResult, PROTOCOL_VERSION,
     PublishInboxRelaysRequest, PublishKeyPackageRequest, PublishResolutionResult, REQUEST_TYPES,
     ReadyResult, RemoveMembersRequest, ReportPublishRequest, Request, Response,
-    SealAttachmentRequest, SealedAttachmentResult, SelfUpdateRequest, SendIntentRequest,
-    SendMediaRequest, SendMessageRequest, SendOutcomeResult, SetAdminRequest,
+    SealAttachmentRequest, SealedAttachmentResult, SelectKeyPackagesRequest, SelfUpdateRequest,
+    SendIntentRequest, SendMediaRequest, SendMessageRequest, SendOutcomeResult, SetAdminRequest,
     SetGroupAvatarRequest, SetRetentionRequest, SignerReply, SignerRequest, SignerResult,
     TickedResult, UpdateAppComponentsRequest, UpdateGroupProfileRequest, decode, encode, invalid,
     reason_label,
@@ -368,6 +368,7 @@ impl<H: Host> Bridge<H> {
             Request::Disband(args) => self.run(op_disband(args), Vec::new()),
             Request::EnableDisbanding(args) => self.run(op_enable_disbanding(args), Vec::new()),
             Request::ForgetGroup(args) => self.forget_group(args),
+            Request::SelectKeyPackages(args) => self.select_key_packages(args),
             Request::Ingest(args) => self.run(op_ingest(args), Vec::new()),
             Request::Tick(_) => self.run(op_tick(), Vec::new()),
         }
@@ -530,6 +531,23 @@ impl<H: Host> Bridge<H> {
         self.sync_op(|session| {
             session.forget_group(&group)?;
             Ok(OpResult::Done)
+        })
+    }
+
+    /// `select_key_packages`: the session's D1 selection over the host's
+    /// fetched publications and deletions.
+    fn select_key_packages(&mut self, args: SelectKeyPackagesRequest) -> Response {
+        let account = core::AccountId(args.account);
+        let events: Vec<core::Event> = args.events.into_iter().map(Into::into).collect();
+        let group = args.group.map(core::GroupId);
+        self.sync_op(move |session| {
+            Ok(OpResult::KeyPackages(KeyPackagesResult {
+                events: session
+                    .select_key_packages(account, &events, group.as_ref())?
+                    .into_iter()
+                    .map(Into::into)
+                    .collect(),
+            }))
         })
     }
 

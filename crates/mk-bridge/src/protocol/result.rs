@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use super::ser::{hex_bytes, hex_str, opt_u64_str};
 use super::types::{
-    GroupSnapshot, InputReport, Outbound, PublishResolution, SendOutcome, SentEvent,
+    Event, GroupSnapshot, InputReport, Outbound, PublishResolution, SendOutcome, SentEvent,
 };
 
 /// `submit_proof` succeeded; the session is usable.
@@ -151,6 +151,14 @@ pub struct GroupResult {
     pub group: Option<Box<GroupSnapshot>>,
 }
 
+/// `select_key_packages` result.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct KeyPackagesResult {
+    /// The selected kind-30443 publications, best first.
+    pub events: Vec<Event>,
+}
+
 /// The typed result of a successful `call`, internally tagged by `"type"`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -188,4 +196,6 @@ pub enum OpResult {
     Groups(GroupsResult),
     /// `group`.
     Group(GroupResult),
+    /// `select_key_packages`.
+    KeyPackages(KeyPackagesResult),
 }

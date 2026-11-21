@@ -362,6 +362,15 @@ async fn every_request_variant() {
         }))
         .await,
     );
+    mark!(
+        "select_key_packages",
+        &a.call(Request::SelectKeyPackages(SelectKeyPackagesRequest {
+            account: b.signer.account().0,
+            events: vec![key_package_of(&relay, &b.account_hex())],
+            group: Some(group.clone()),
+        }))
+        .await,
+    );
     // Protocol-v4 app surface requests against the live group.
     mark!(
         "send_intent",
@@ -2358,4 +2367,100 @@ async fn bridge_debug_redacts_pending_data() {
     assert!(matches!(sealed, Response::Ok { .. }), "seal: {sealed:?}");
     let debug = format!("{:?}", a.bridge);
     assert!(!debug.contains("debug-leak-probe"), "{debug}");
+}
+
+/// `select_key_packages` end to end: the host fetches the invitee's
+/// kind-30443 publications and kind-5 deletion requests, the session
+/// selects — under creation requirements with `group: null` and under a
+/// real group's invite requirements.
+#[tokio::test]
+async fn select_key_packages_over_the_wire() {
+    let mut relay = FakeRelay::new();
+    let mut a = Member::new();
+    a.open().await;
+    let mut b = Member::new();
+    b.open().await;
+    b.publish_identity(&mut relay).await;
+
+    let account = hex_to_32(&b.account_hex());
+    let fetched = relay.fetch(|event| event.kind == 30_443 && event.pubkey == account);
+    assert_eq!(fetched.len(), 1, "one publication on the relay");
+
+    let response = a
+        .call(Request::SelectKeyPackages(SelectKeyPackagesRequest {
+            account,
+            events: fetched.clone(),
+            group: None,
+        }))
+        .await;
+    let OpResult::KeyPackages(selected) = ok_result(response) else {
+        panic!("key_packages")
+    };
+    assert_eq!(selected.events, fetched);
+
+    // A group's invite requirements accept the same publication.
+    let response = a
+        .call(Request::CreateGroup(CreateGroupRequest {
+            name: "sel".to_owned(),
+            description: String::new(),
+            relays: vec![RELAY.to_owned()],
+            invitees: Vec::new(),
+            admins: Vec::new(),
+            components: Vec::new(),
+        }))
+        .await;
+    let OpResult::GroupCreated(created) = ok_result(response) else {
+        panic!("create_group")
+    };
+    let response = a
+        .call(Request::SelectKeyPackages(SelectKeyPackagesRequest {
+            account,
+            events: fetched.clone(),
+            group: Some(created.group.id.clone()),
+        }))
+        .await;
+    let OpResult::KeyPackages(selected) = ok_result(response) else {
+        panic!("key_packages")
+    };
+    assert_eq!(selected.events, fetched);
+
+    // A kind-5 deletion by B covering the slot empties the selection.
+    let slot = fetched[0]
+        .tags
+        .iter()
+        .find(|tag| tag.first().map(String::as_str) == Some("d"))
+        .and_then(|tag| tag.get(1))
+        .expect("d tag")
+        .clone();
+    let deletion: Event = b
+        .signer
+        .sign_event(
+            UnsignedEvent {
+                pubkey: account,
+                created_at: 1_700_000_000,
+                kind: 5,
+                tags: vec![vec![
+                    "a".to_owned(),
+                    format!("30443:{}:{slot}", b.account_hex()),
+                ]],
+                content: String::new(),
+            }
+            .into(),
+        )
+        .await
+        .expect("sign deletion")
+        .into();
+    let mut events = fetched;
+    events.push(deletion);
+    let response = a
+        .call(Request::SelectKeyPackages(SelectKeyPackagesRequest {
+            account,
+            events,
+            group: None,
+        }))
+        .await;
+    let OpResult::KeyPackages(selected) = ok_result(response) else {
+        panic!("key_packages")
+    };
+    assert!(selected.events.is_empty(), "covered slot selects nothing");
 }

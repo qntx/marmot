@@ -82,6 +82,11 @@ const TABLE: &[(&str, &str, Mapping)] = &[
         "publish_inbox_relays",
         Request("publish_inbox_relays"),
     ),
+    (
+        "Session",
+        "select_key_packages",
+        Request("select_key_packages"),
+    ),
     ("Session", "create_group", Request("create_group")),
     ("Session", "invite", Request("invite")),
     ("Session", "remove_members", Request("remove_members")),

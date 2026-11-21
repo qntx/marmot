@@ -130,6 +130,29 @@
     "key_package_ref": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     "type": "key_package"
   },
+  "key_packages": {
+    "events": [
+      {
+        "content": "a2V5",
+        "created_at": "1700000000",
+        "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "kind": 30443,
+        "pubkey": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "sig": "55555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555",
+        "tags": [
+          [
+            "d",
+            "device-1"
+          ],
+          [
+            "i",
+            "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+          ]
+        ]
+      }
+    ],
+    "type": "key_packages"
+  },
   "message_sent": {
     "message": {
       "content": "hi",

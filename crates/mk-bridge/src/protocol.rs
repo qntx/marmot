@@ -18,15 +18,15 @@ pub use request::{
     DiscardAttachmentRequest, EnableDisbandingRequest, ForgetGroupRequest, GroupRequest,
     IngestRequest, InviteRequest, LeaveRequest, NoArgs, OpenAttachmentRequest,
     PublishInboxRelaysRequest, PublishKeyPackageRequest, RemoveMembersRequest,
-    ReportPublishRequest, Request, SealAttachmentRequest, SelfUpdateRequest, SendIntentRequest,
-    SendMediaRequest, SendMessageRequest, SetAdminRequest, SetGroupAvatarRequest,
-    SetRetentionRequest, SignerReplyRequest, SubmitProofRequest, UpdateAppComponentsRequest,
-    UpdateGroupProfileRequest,
+    ReportPublishRequest, Request, SealAttachmentRequest, SelectKeyPackagesRequest,
+    SelfUpdateRequest, SendIntentRequest, SendMediaRequest, SendMessageRequest, SetAdminRequest,
+    SetGroupAvatarRequest, SetRetentionRequest, SignerReplyRequest, SubmitProofRequest,
+    UpdateAppComponentsRequest, UpdateGroupProfileRequest,
 };
 pub use result::{
     AttachmentData, AwaitingDurabilityResult, GroupCreatedResult, GroupResult, GroupsResult,
-    InboxRelaysResult, IngestedResult, KeyPackageResult, MessageSentResult, OpResult,
-    OutboundResult, PublishResolutionResult, ReadyResult, SealedAttachmentResult,
+    InboxRelaysResult, IngestedResult, KeyPackageResult, KeyPackagesResult, MessageSentResult,
+    OpResult, OutboundResult, PublishResolutionResult, ReadyResult, SealedAttachmentResult,
     SendOutcomeResult, TickedResult,
 };
 pub use types::*;
@@ -36,7 +36,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::{BridgeError, invalid_reason};
 
 /// Wire protocol version. Bumped on any breaking schema change.
-pub const PROTOCOL_VERSION: u32 = 5;
+pub const PROTOCOL_VERSION: u32 = 6;
 
 /// Maximum accepted request/config byte length.
 pub const MAX_REQUEST_BYTES: usize = 64 * 1024 * 1024;
@@ -64,6 +64,7 @@ pub const REQUEST_TYPES: &[&str] = &[
     "remove_members",
     "report_publish",
     "seal_attachment",
+    "select_key_packages",
     "self_update",
     "send_intent",
     "send_media",

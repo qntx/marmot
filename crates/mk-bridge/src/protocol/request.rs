@@ -7,7 +7,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::ser::{hex_bytes, hex_str, hex_str_seq, u64_str};
+use super::ser::{hex_bytes, hex_str, hex_str_seq, opt_hex_bytes, u64_str};
 use super::types::{
     AppMessage, AttachmentInput, ComponentUpdate, Event, GroupAvatar, Invitee, MediaAttachmentRef,
     MediaReference, MessageIntent, RelayResult, SignerReply,
@@ -317,6 +317,21 @@ pub struct ForgetGroupRequest {
     pub group: Vec<u8>,
 }
 
+/// Select one account's `KeyPackage` publications from fetched events.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SelectKeyPackagesRequest {
+    /// The account whose publications to select from, 32-byte hex.
+    #[serde(with = "hex_str")]
+    pub account: [u8; 32],
+    /// The fetched kind-30443 publications and kind-5 deletion requests.
+    pub events: Vec<Event>,
+    /// The group whose invite requirements filter candidates, or `null`
+    /// for creation requirements.
+    #[serde(with = "opt_hex_bytes")]
+    pub group: Option<Vec<u8>>,
+}
+
 /// A `call` request. The `"type"` tag must appear in
 /// [`crate::protocol::REQUEST_TYPES`] before decode; anything else answers
 /// `unsupported`.
@@ -387,4 +402,6 @@ pub enum Request {
     EnableDisbanding(EnableDisbandingRequest),
     /// Forget the group locally.
     ForgetGroup(ForgetGroupRequest),
+    /// Select invitee `KeyPackage` publications.
+    SelectKeyPackages(SelectKeyPackagesRequest),
 }
