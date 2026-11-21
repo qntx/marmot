@@ -27,7 +27,7 @@ export type KvHarness = {
 /** The framework primitives the suite needs. */
 export type TestApi = {
   describe: (name: string, fn: () => void) => void;
-  test: (name: string, fn: () => void | Promise<void>) => void;
+  test: (name: string, fn: () => void | Promise<void>, timeout?: number) => void;
   expect: (value: unknown) => {
     toStrictEqual: (expected: unknown) => void;
     toBe: (expected: unknown) => void;
@@ -185,6 +185,81 @@ function dbName(prefix: string): string {
   counter += 1;
   return `${prefix}-${counter}`;
 }
+
+/** Deterministic Park–Miller so the tamper sweep replays identically on every run. */
+function prng(seed: number): () => number {
+  let state = seed % 2147483647;
+  if (state <= 0) {
+    state += 2147483646;
+  }
+  return () => {
+    state = (state * 16807) % 2147483647;
+    return (state - 1) / 2147483646;
+  };
+}
+
+/** Bytewise comparison — the key order `rawValues` reports in both harnesses. */
+function cmpKeys(a: Uint8Array, b: Uint8Array): number {
+  for (let i = 0; i < Math.min(a.length, b.length); i += 1) {
+    const diff = (a[i] ?? 0) - (b[i] ?? 0);
+    if (diff !== 0) {
+      return diff;
+    }
+  }
+  return a.length - b.length;
+}
+
+function at<T>(list: T[], idx: number): T {
+  const item = list[idx];
+  if (item === undefined) {
+    throw new Error("index out of range");
+  }
+  return item;
+}
+
+/** What one at-rest tamper needs: the sorted keys, their sealed values and the raw write. */
+type TamperCtx = {
+  pick: (n: number) => number;
+  name: string;
+  keys: Uint8Array[];
+  values: unknown[];
+  rawPut: KvHarness["rawPut"];
+  /** Iteration within the tamper kind — cycles deterministic sub-choices. */
+  round: number;
+};
+
+/**
+ * The four at-rest attacks, cycled by the property test: flip a random bit, truncate (0, below the
+ * 12-byte IV, or a random shorter cut — cycled by `round`), swap the sealed values of two distinct
+ * keys, and move one sealed value under a different existing key.
+ */
+const TAMPERS: Array<(ctx: TamperCtx) => Promise<void>> = [
+  async ({ pick, name, keys, values, rawPut }) => {
+    const idx = pick(keys.length);
+    const bytes = [...asBytes(values[idx])];
+    const bit = pick(bytes.length);
+    bytes[bit] = (bytes[bit] ?? 0) + (1 + pick(7));
+    await rawPut(name, at(keys, idx), Uint8Array.from(bytes));
+  },
+  async ({ pick, name, keys, values, rawPut, round }) => {
+    const idx = pick(keys.length);
+    const bytes = asBytes(values[idx]);
+    const mode = round % 3;
+    const len = mode === 0 ? 0 : mode === 1 ? pick(12) : pick(bytes.length);
+    await rawPut(name, at(keys, idx), bytes.subarray(0, len));
+  },
+  async ({ pick, name, keys, values, rawPut }) => {
+    const a = pick(keys.length);
+    const b = (a + 1 + pick(keys.length - 1)) % keys.length;
+    await rawPut(name, at(keys, a), values[b]);
+    await rawPut(name, at(keys, b), values[a]);
+  },
+  async ({ pick, name, keys, values, rawPut }) => {
+    const a = pick(keys.length);
+    const b = (a + 1 + pick(keys.length - 1)) % keys.length;
+    await rawPut(name, at(keys, b), values[a]);
+  },
+];
 
 function asBytes(value: unknown): Uint8Array {
   if (value instanceof Uint8Array) {
@@ -358,6 +433,66 @@ export function kvDriverContract(t: TestApi, label: string, harness: KvHarness):
       expect(sortedHex(await kv.load())).toStrictEqual(["1=1"]);
       await kv.close();
     });
+
+    for (let i = 0; i < 64; i += 1) {
+      test(`at-rest tamper ${i} decodes as undecryptable_row`, async () => {
+        const rand = prng(0x9d4c + i);
+        const pick = (n: number): number => Math.floor(rand() * n);
+        const aead = aesGcmCipher(new Uint8Array(32).fill(7));
+        const name = dbName("tamper");
+        const lock = fakeLock();
+        // 10–30 random rows, keys unique by construction ((i, j) prefixes).
+        const count = 10 + pick(21);
+        const rows: Array<{ key: Uint8Array; value: number[] }> = [];
+        for (let j = 0; j < count; j += 1) {
+          rows.push({
+            key: Uint8Array.of(i, j, pick(256), pick(256)),
+            value: Array.from({ length: pick(48) }, () => pick(256)),
+          });
+        }
+        const kv = await open(name, lock.port, aead);
+        await kv.commit(
+          encodeKvBatch({
+            seq: 1n,
+            ops: rows.map(({ key, value }) => ({
+              type: "put" as const,
+              key,
+              value: Uint8Array.of(...value),
+            })),
+          }),
+        );
+        await kv.close();
+
+        // Untampered, the store round-trips exactly.
+        const clean = await open(name, lock.port, aead);
+        expect(sortedHex(await clean.load())).toStrictEqual(
+          sortedHex(
+            rows.map(({ key, value }): [Uint8Array, Uint8Array] => [key, Uint8Array.of(...value)]),
+          ),
+        );
+        await clean.close();
+
+        const keys = rows.map(({ key }) => key).toSorted(cmpKeys);
+        const values = await harness.rawValues(name);
+        expect(values).toHaveLength(count);
+        await at(
+          TAMPERS,
+          i % TAMPERS.length,
+        )({
+          pick,
+          name,
+          keys,
+          values,
+          rawPut: harness.rawPut,
+          round: Math.floor(i / 4),
+        });
+
+        const again = await open(name, lock.port, aead);
+        const outcome = await capture(again.load());
+        expect(kindOf(outcome)).toBe("undecryptable_row");
+        await again.close();
+      });
+    }
 
     test("close waits for pending commits and releases the lock", async () => {
       const name = dbName("close");
