@@ -191,6 +191,11 @@ export const EVENT_KINDS = {
     name: "Small-state broadcast request",
     layer: "Marmot app payload",
   },
+  postLinkChatInventory: {
+    kind: 477,
+    name: "Post-link chat inventory",
+    layer: "Marmot app payload",
+  },
   messageEdit: { kind: 1009, name: "Message edit", layer: "Marmot app payload" },
   pollResponse: { kind: 1018, name: "Poll response (NIP-88)", layer: "Marmot app payload" },
   poll: { kind: 1068, name: "Poll (NIP-88)", layer: "Marmot app payload" },

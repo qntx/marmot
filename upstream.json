@@ -1,7 +1,7 @@
 {
   "spec": {
     "repository": "https://github.com/marmot-protocol/marmot",
-    "rev": "f825024f7eb92157d12a0b8985bc6c5db5531d6d",
+    "rev": "04fbdf8a0365184fec569ab90549cb8e844aac1c",
     "checkout": "3rdparty/marmot"
   },
   "mdk": {

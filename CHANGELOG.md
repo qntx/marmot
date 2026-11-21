@@ -17,11 +17,11 @@ trusted publishing / OIDC).
   profiles, lint-enforced `packages/marmot` layer graph, lockstep version
   tooling, `qntx/workflows` CI and release workflows.
 - `@qntx/marmot` core registries and result vocabulary mirroring the Marmot
-  spec at `f825024` (app component ids, extension-draft ids, extension types,
+  spec at `04fbdf8` (app component ids, extension-draft ids, extension types,
   event kinds, ALPN identifiers, exporter labels; input categories,
   dispositions, named outcomes), tested against byte-for-byte recorded spec
   copies under `vectors/spec/foundation/`.
-- `upstream.json` pins (`spec` marmot-protocol/marmot `f825024`, `mdk` v0.18.0
+- `upstream.json` pins (`spec` marmot-protocol/marmot `04fbdf8`, `mdk` v0.18.0
   `34646a5`) and `bun run check:pins`, which verifies local `3rdparty/`
   checkouts and the recorded spec copies.
 - `crates/mk-core`: a persistent key-value `cgka_traits::StorageProvider`
@@ -64,6 +64,8 @@ trusted publishing / OIDC).
   `crates/mk-core` store schema version 5 → 6 for the new
   `ChangeNotDelivered` table and upstream's new stored-payload variants
   (old builds must refuse the new database).
+- Spec pin `f825024` → `04fbdf8`, the spec MDK v0.18.0 implements: one new
+  registered event kind (477, post-link chat inventory) in `EVENT_KINDS`.
 - `crates/mk-core` store schema version 2: the `MessageState` index now
   keys `[group, state, epoch, seq, message-id, content-class, epoch]` with
   empty values and `MessageIndex` maps message-id to that key, so every
