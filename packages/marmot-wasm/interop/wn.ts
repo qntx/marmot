@@ -2,7 +2,7 @@
  * Phase D interop — real White Noise `wn`/`wnd` against `MarmotClient` on the release wasm backend
  * over one in-process websocket relay (`serveFakeRelay`). `WN_BIN`/`WND_BIN` name the binaries
  * built from the `wn` pin in `upstream.json`; `wn --version` must report that pin's tag without the
- * leading `v` (currently `wn 0.17.0`). Mirrors `crates/interop/tests/support/mod.rs` (CLI flags,
+ * leading `v` (currently `wn 0.18.0`). Mirrors `crates/interop/tests/support/mod.rs` (CLI flags,
  * daemon env, JSON pointers) and the scenario flow of `crates/interop/tests/wn.rs`. Every step,
  * timing and PASS/FAIL line is appended to `<repo>/target/interop-m3b.log`; the script exits
  * non-zero on any failure.

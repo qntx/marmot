@@ -117,6 +117,11 @@ pub(crate) enum Table {
     /// `created_at` second the allocator issued — a restarted session treats
     /// that second as full rather than risking a duplicate.
     SendPacing = 41,
+    /// `cgka_changes_not_delivered` (mdk#2332): one row per rolled-back
+    /// commit whose caller already held an unresolved result, keyed by
+    /// commit id. Outside every snapshot and checkpoint; rows go with the
+    /// group record.
+    ChangeNotDelivered = 42,
 }
 
 /// Meta row keys inside [`Table::Meta`].
@@ -133,7 +138,11 @@ pub(crate) const META_PENDING_HIGH_WATER: &[u8] = b"pending-ref-high-water";
 /// v5: `Table::DeliveredMessage` (per-message author/kind/transport/expiry
 /// index) and `Table::SendPacing` (per-group last allocated `created_at`
 /// second).
-pub(crate) const SCHEMA_VERSION: u32 = 5;
+/// v6: `Table::ChangeNotDelivered` (mdk#2332 records). The MDK v0.18.0 pin
+/// also adds stored-payload variants 14/15 (Welcomes carrying
+/// `key_package_event_id`) an older build could not decode — another reason
+/// a store it writes must refuse to open.
+pub(crate) const SCHEMA_VERSION: u32 = 6;
 
 /// Whether `key` names a row the `OpenMLS` store owns — the write set the
 /// engine's write generation counts (provider.rs `mls_write_generation`).

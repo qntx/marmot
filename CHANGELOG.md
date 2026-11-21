@@ -21,8 +21,8 @@ trusted publishing / OIDC).
   event kinds, ALPN identifiers, exporter labels; input categories,
   dispositions, named outcomes), tested against byte-for-byte recorded spec
   copies under `vectors/spec/foundation/`.
-- `upstream.json` pins (`spec` marmot-protocol/marmot `f825024`, `mdk` v0.17.0
-  `4df811a`) and `bun run check:pins`, which verifies local `3rdparty/`
+- `upstream.json` pins (`spec` marmot-protocol/marmot `f825024`, `mdk` v0.18.0
+  `34646a5`) and `bun run check:pins`, which verifies local `3rdparty/`
   checkouts and the recorded spec copies.
 - `crates/mk-core`: a persistent key-value `cgka_traits::StorageProvider`
   for the pinned MDK engine (one key encoder, serde_json values,
@@ -60,6 +60,10 @@ trusted publishing / OIDC).
 
 - MDK pin `v0.16.0` (`a2e0558`) → `v0.17.0` (`4df811a`); the spec pin is
   unchanged at `f825024`.
+- MDK pin `v0.17.0` (`4df811a`) → `v0.18.0` (`34646a5`), `wn` pin likewise.
+  `crates/mk-core` store schema version 5 → 6 for the new
+  `ChangeNotDelivered` table and upstream's new stored-payload variants
+  (old builds must refuse the new database).
 - `crates/mk-core` store schema version 2: the `MessageState` index now
   keys `[group, state, epoch, seq, message-id, content-class, epoch]` with
   empty values and `MessageIndex` maps message-id to that key, so every

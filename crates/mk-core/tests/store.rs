@@ -67,8 +67,9 @@ use cgka_traits::capabilities::GroupCapabilities;
 use cgka_traits::group::{Group, ProtocolProfile};
 use cgka_traits::message::{MessageRecord, MessageState};
 use cgka_traits::storage::{
-    CommittedMembers, CommittedRosterStorage, CommittedRosterWrite, GroupStateCheckpointRef,
-    GroupStorage, MessageStorage, RosterRevision, StorageError, StorageProvider,
+    ChangeNotDelivered, ChangeOrigin, CommittedMembers, CommittedRosterStorage,
+    CommittedRosterWrite, GroupStateCheckpointRef, GroupStorage, MessageStorage,
+    OutboundIntentStorage, RosterRevision, StorageError, StorageProvider,
 };
 use cgka_traits::transport::Timestamp;
 use cgka_traits::types::{EpochId, GroupId, MemberId, MessageId};
@@ -404,6 +405,32 @@ fn open_rejects_version_four_rows() {
     assert!(matches!(
         KvStorageProvider::open(rows, host),
         Err(OpenError::UnsupportedSchemaVersion { found: 4 })
+    ));
+}
+
+#[test]
+fn open_rejects_version_five_rows() {
+    // Version 5 predates the changes-not-delivered table; it is refused at
+    // open, never migrated.
+    let (_provider, host) = open_provider();
+    let mut rows = host.durable_rows();
+    let version_key = {
+        let mut k = vec![0u8]; // Table::Meta discriminant
+        k.extend_from_slice(&14u32.to_be_bytes()); // len of "schema-version"
+        k.extend_from_slice(b"schema-version");
+        k
+    };
+    let mut touched = false;
+    for (key, value) in &mut rows {
+        if *key == version_key {
+            *value = 5u32.to_be_bytes().to_vec();
+            touched = true;
+        }
+    }
+    assert!(touched, "schema-version row exists");
+    assert!(matches!(
+        KvStorageProvider::open(rows, host),
+        Err(OpenError::UnsupportedSchemaVersion { found: 5 })
     ));
 }
 
@@ -944,6 +971,240 @@ fn refused_roster_write_inside_committed_transaction_leaves_nothing() {
             .put_committed_roster(&gid(1), &members(&[0]))
             .expect("roster"),
         CommittedRosterWrite::Recorded(RosterRevision(1))
+    );
+}
+
+// --- changes not delivered (mdk#2332) ---
+//
+// The KV mirror of storage-sqlite's `cgka_changes_not_delivered` (migration
+// 0210): one row per rolled-back commit, keyed by commit id account-wide,
+// listed per group in insertion order, kept until acknowledged or the group
+// record goes — and outside every snapshot and checkpoint.
+
+fn change_not_delivered(commit: u8, group: u8) -> ChangeNotDelivered {
+    ChangeNotDelivered {
+        group_id: gid(group),
+        commit_id: mid(commit),
+        origin: ChangeOrigin::Direct,
+        intent_kind: "update_group_data".to_owned(),
+        reason: "not_delivered".to_owned(),
+        at_ms: 1_000,
+    }
+}
+
+/// Inserts list oldest-first; a delete frees the commit id and the reinsert
+/// takes a new position at the tail.
+#[test]
+fn changes_not_delivered_list_in_insertion_order() {
+    let (provider, _host) = open_provider();
+    provider.put_group_keeping_roster(&group(1)).expect("group");
+    provider.put_group_keeping_roster(&group(2)).expect("group");
+    provider
+        .put_change_not_delivered(&change_not_delivered(1, 1))
+        .expect("record 1");
+    provider
+        .put_change_not_delivered(&change_not_delivered(2, 1))
+        .expect("record 2");
+    provider
+        .put_change_not_delivered(&change_not_delivered(3, 2))
+        .expect("record 3");
+    assert_eq!(
+        provider
+            .changes_not_delivered(&gid(1))
+            .expect("list")
+            .iter()
+            .map(|record| record.commit_id.clone())
+            .collect::<Vec<_>>(),
+        vec![mid(1), mid(2)]
+    );
+
+    assert!(
+        provider
+            .delete_change_not_delivered(&gid(1), &mid(1))
+            .expect("delete")
+    );
+    provider
+        .put_change_not_delivered(&change_not_delivered(1, 1))
+        .expect("reinsert");
+    assert_eq!(
+        provider
+            .changes_not_delivered(&gid(1))
+            .expect("list")
+            .iter()
+            .map(|record| record.commit_id.clone())
+            .collect::<Vec<_>>(),
+        vec![mid(2), mid(1)]
+    );
+    assert_eq!(
+        provider
+            .changes_not_delivered(&gid(2))
+            .expect("list")
+            .iter()
+            .map(|record| record.commit_id.clone())
+            .collect::<Vec<_>>(),
+        vec![mid(3)]
+    );
+}
+
+/// `ON CONFLICT(commit_id) DO NOTHING`: a second put under the same commit
+/// id — even for another group — keeps the first record.
+#[test]
+fn duplicate_change_not_delivered_keeps_first() {
+    let (provider, _host) = open_provider();
+    provider.put_group_keeping_roster(&group(1)).expect("group");
+    provider.put_group_keeping_roster(&group(2)).expect("group");
+    provider
+        .put_change_not_delivered(&change_not_delivered(1, 1))
+        .expect("first");
+    let mut second = change_not_delivered(1, 2);
+    second.reason = "refused".to_owned();
+    provider
+        .put_change_not_delivered(&second)
+        .expect("kept as the first");
+    assert_eq!(
+        provider.changes_not_delivered(&gid(1)).expect("list"),
+        vec![change_not_delivered(1, 1)]
+    );
+    assert_eq!(
+        provider.changes_not_delivered(&gid(2)).expect("list"),
+        Vec::<ChangeNotDelivered>::new()
+    );
+}
+
+/// The delete names the group: true once, false for a repeat and for a
+/// commit id stored under another group.
+#[test]
+fn delete_change_not_delivered_scoped_by_group() {
+    let (provider, _host) = open_provider();
+    provider.put_group_keeping_roster(&group(1)).expect("group");
+    provider.put_group_keeping_roster(&group(2)).expect("group");
+    provider
+        .put_change_not_delivered(&change_not_delivered(1, 1))
+        .expect("record");
+    assert!(
+        !provider
+            .delete_change_not_delivered(&gid(2), &mid(1))
+            .expect("wrong group")
+    );
+    assert!(
+        provider
+            .delete_change_not_delivered(&gid(1), &mid(1))
+            .expect("delete")
+    );
+    assert!(
+        !provider
+            .delete_change_not_delivered(&gid(1), &mid(1))
+            .expect("again")
+    );
+    assert!(
+        !provider
+            .delete_change_not_delivered(&gid(1), &mid(9))
+            .expect("absent")
+    );
+}
+
+/// Rewinds neither drop nor restore a record: snapshot rollback, state
+/// rollback and checkpoint restore all leave the table alone.
+#[test]
+fn changes_not_delivered_survive_rewinds() {
+    let (provider, _host) = open_provider();
+    provider.put_group_keeping_roster(&group(1)).expect("group");
+    provider
+        .put_change_not_delivered(&change_not_delivered(1, 1))
+        .expect("earlier record");
+    provider
+        .create_group_snapshot(&gid(1), "snap")
+        .expect("snapshot");
+    provider
+        .create_group_state_checkpoint(
+            &gid(1),
+            &GroupStateCheckpointRef {
+                id: "cp".to_owned(),
+                resulting_epoch: EpochId(7),
+            },
+        )
+        .expect("checkpoint");
+    provider
+        .put_change_not_delivered(&change_not_delivered(2, 1))
+        .expect("later record");
+
+    provider
+        .rollback_group_to_snapshot(&gid(1), "snap")
+        .expect("rollback");
+    assert_eq!(
+        provider
+            .changes_not_delivered(&gid(1))
+            .expect("list")
+            .iter()
+            .map(|record| record.commit_id.clone())
+            .collect::<Vec<_>>(),
+        vec![mid(1), mid(2)]
+    );
+    provider
+        .restore_group_state_checkpoint(&gid(1), "cp")
+        .expect("checkpoint restore");
+    assert_eq!(
+        provider.changes_not_delivered(&gid(1)).expect("list").len(),
+        2
+    );
+}
+
+/// Rows go with the group record: `delete_group` and `forget_group_local`
+/// both cascade them.
+#[test]
+fn changes_not_delivered_go_with_the_group() {
+    let (provider, _host) = open_provider();
+    provider.put_group_keeping_roster(&group(1)).expect("group");
+    provider.put_group_keeping_roster(&group(2)).expect("group");
+    provider
+        .put_change_not_delivered(&change_not_delivered(1, 1))
+        .expect("record 1");
+    provider
+        .put_change_not_delivered(&change_not_delivered(2, 2))
+        .expect("record 2");
+
+    provider.delete_group(&gid(1)).expect("delete");
+    assert_eq!(
+        provider.changes_not_delivered(&gid(1)).expect("list"),
+        Vec::<ChangeNotDelivered>::new()
+    );
+    assert_eq!(
+        provider.changes_not_delivered(&gid(2)).expect("list").len(),
+        1
+    );
+
+    provider
+        .forget_group_local(&gid(2), Timestamp(10))
+        .expect("forget");
+    assert_eq!(
+        provider.changes_not_delivered(&gid(2)).expect("list"),
+        Vec::<ChangeNotDelivered>::new()
+    );
+}
+
+/// A put inside a caller's transaction rolls back with it; sqlite's
+/// `FOREIGN KEY(group_id)` refuses a record for a missing group.
+#[test]
+fn change_not_delivered_write_rolls_back_and_needs_the_group() {
+    let (provider, _host) = open_provider();
+    provider.put_group_keeping_roster(&group(1)).expect("group");
+    let result = provider.with_transaction(|p| -> Result<(), StorageError> {
+        p.put_change_not_delivered(&change_not_delivered(1, 1))?;
+        Err(StorageError::Backend("later step refused".into()))
+    });
+    assert!(
+        matches!(&result, Err(StorageError::Backend(reason)) if reason == "later step refused"),
+        "{result:?}"
+    );
+    assert_eq!(
+        provider.changes_not_delivered(&gid(1)).expect("list"),
+        Vec::<ChangeNotDelivered>::new()
+    );
+
+    let refused = provider.put_change_not_delivered(&change_not_delivered(2, 9));
+    assert!(
+        matches!(&refused, Err(StorageError::Backend(reason)) if reason == "FOREIGN KEY constraint failed"),
+        "{refused:?}"
     );
 }
 

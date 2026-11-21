@@ -132,11 +132,11 @@ Build `wn`/`wnd` from the pinned MDK rev (`upstream.json` → `wn.rev`;
 ```sh
 ODIN=<path-to-odin> cargo install --locked \
   --git https://github.com/marmot-protocol/mdk \
-  --rev 4df811aea99269b437a6023be9446a5141e93cbe \
+  --rev 34646a577807f2b112ee031f3c164ec58aa18b64 \
   --root spike/target/wn wn-cli
 ```
 
-`cargo install` takes ~12 min cold; `wn --version` must report `wn 0.17.0`
+`cargo install` takes ~12 min cold; `wn --version` must report `wn 0.18.0`
 (the test asserts it against `upstream.json` `wn.tag`). In CI the `wn` job
 builds the pair from the pin and `interop-rust`/`interop-wasm` run the
 scenarios on every PR with the binaries cached per pin; the advisory

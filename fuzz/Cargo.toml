@@ -20,7 +20,7 @@ mk-core       = { path = "../crates/mk-core", features = ["testing"] }
 mk-ffi        = { path = "../crates/mk-ffi" }
 # cgka-traits / openmls name the storage traits `kv_rows` exercises; the same
 # pinned revisions as the root workspace.
-cgka-traits    = { git = "https://github.com/marmot-protocol/mdk", rev = "4df811aea99269b437a6023be9446a5141e93cbe", version = "=0.17.0" }
+cgka-traits    = { git = "https://github.com/marmot-protocol/mdk", rev = "34646a577807f2b112ee031f3c164ec58aa18b64", version = "=0.18.0" }
 openmls        = { git = "https://github.com/openmls/openmls.git", rev = "6100df3fb1d8c3eeab53e349fcbd621f98c44fe2", version = "=0.9.0", features = ["extensions-draft"] }
 openmls_traits = { git = "https://github.com/openmls/openmls.git", rev = "6100df3fb1d8c3eeab53e349fcbd621f98c44fe2", version = "=0.6.0", features = ["extensions-draft"] }
 serde_json     = "1"

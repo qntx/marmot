@@ -6,14 +6,14 @@
   },
   "mdk": {
     "repository": "https://github.com/marmot-protocol/mdk",
-    "tag": "v0.17.0",
-    "rev": "4df811aea99269b437a6023be9446a5141e93cbe",
+    "tag": "v0.18.0",
+    "rev": "34646a577807f2b112ee031f3c164ec58aa18b64",
     "checkout": "3rdparty/mdk"
   },
   "wn": {
     "repository": "https://github.com/marmot-protocol/mdk",
-    "tag": "v0.17.0",
-    "rev": "4df811aea99269b437a6023be9446a5141e93cbe",
+    "tag": "v0.18.0",
+    "rev": "34646a577807f2b112ee031f3c164ec58aa18b64",
     "checkout": "3rdparty/mdk"
   }
 }

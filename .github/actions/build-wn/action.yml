@@ -12,7 +12,7 @@ inputs:
     description: Full 40-hex commit to build.
     required: true
   version:
-    description: Expected `wn --version` output, e.g. `wn 0.17.0`. Empty skips the check.
+    description: Expected `wn --version` output, e.g. `wn 0.18.0`. Empty skips the check.
     required: false
     default: ""
   path:
