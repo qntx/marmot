@@ -751,17 +751,36 @@ async fn w5_keypackage_rotation_by_wn() {
     );
     settle().await;
 
-    // Poll `keys maintenance-status` every 10 s for up to 180 s; a consumed
-    // KeyPackage should schedule a replacement. If none appears, run
-    // account/group maintenance once and keep polling.
-    let replacement_seen = |status: &Value| -> bool {
-        serde_json::to_string(status).is_ok_and(|t| {
-            !t.contains("\"pending_replacement\":null") && t.contains("pending_replacement")
-        })
+    // Poll `keys maintenance-status` every 10 s for up to 180 s; wn rotates
+    // the KeyPackage once a Welcome consumes it. Detect rotation by the
+    // current ref / authored event id changing from the pre-accept baseline
+    // (`pending_replacement` stays null once the replacement is published).
+    let kp_ref =
+        |status: &Value| result(status, "/key_package_maintenance/current_key_package_ref").cloned();
+    let kp_event =
+        |status: &Value| result(status, "/key_package_maintenance/authored_event_id").cloned();
+    let retained = |status: &Value| -> Vec<Value> {
+        result(status, "/key_package_maintenance/retained_private_material")
+            .and_then(Value::as_array)
+            .map(|rows| {
+                rows.iter()
+                    .map(|r| {
+                        json!({
+                            "key_package_ref": r.get("key_package_ref"),
+                            "consumed": r.get("consumed"),
+                            "replaced_at": r.get("replaced_at"),
+                            "awaiting_confirmed_replacement": r.get("awaiting_confirmed_replacement"),
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
     };
+    let before_ref = kp_ref(&status_before).expect("current_key_package_ref before accept");
+    let before_event = kp_event(&status_before).expect("authored_event_id before accept");
+
     let mut seen = false;
-    let mut maintenance_ran = false;
-    for tick in 0..30 {
+    for tick in 0..18 {
         let status = wn(
             S,
             &a1.home,
@@ -769,42 +788,31 @@ async fn w5_keypackage_rotation_by_wn() {
             Some(&a_npub),
             &["keys", "maintenance-status"],
         );
-        let keys = wn(S, &a1.home, &a1.socket, Some(&a_npub), &["keys", "list"]);
         println!("    a1 keys maintenance-status (tick {tick}): {status}");
-        if replacement_seen(&status) {
+        let rotated = kp_ref(&status).is_some_and(|r| r != before_ref)
+            || kp_event(&status).is_some_and(|e| e != before_event);
+        if rotated {
             seen = true;
+            let keys = wn(S, &a1.home, &a1.socket, Some(&a_npub), &["keys", "list"]);
             record(
                 S,
-                "replacement-observed",
-                json!({"tick": tick, "status": status, "list": keys}),
+                "rotation-observed",
+                json!({
+                    "tick": tick,
+                    "before_ref": before_ref,
+                    "after_ref": kp_ref(&status),
+                    "before_event": before_event,
+                    "after_event": kp_event(&status),
+                    "authored_event_created_at": result(&status, "/key_package_maintenance/authored_event_created_at"),
+                    "refresh_at": result(&status, "/key_package_maintenance/refresh_at"),
+                    "retained_private_material": retained(&status),
+                    "status": status,
+                    "list": keys,
+                }),
             );
             break;
         }
-        if tick == 17 {
-            record(
-                S,
-                "status-after-180s",
-                json!({"status": status, "list": keys}),
-            );
-            if !maintenance_ran {
-                maintenance_ran = true;
-                let ran = wn_try(
-                    S,
-                    &a1.home,
-                    &a1.socket,
-                    Some(&a_npub),
-                    &["groups", "run-maintenance"],
-                );
-                record(
-                    S,
-                    "groups-run-maintenance",
-                    json!({"ok": ran.0, "out": ran.1}),
-                );
-                settle().await;
-            }
-        } else {
-            tokio::time::sleep(Duration::from_secs(10)).await;
-        }
+        tokio::time::sleep(Duration::from_secs(10)).await;
     }
     let after = wn(S, &a1.home, &a1.socket, Some(&a_npub), &["keys", "list"]);
     let status_after = wn(
@@ -817,9 +825,10 @@ async fn w5_keypackage_rotation_by_wn() {
     record(
         S,
         "keys-after",
-        json!({"list": after, "status": status_after, "replacement_seen": seen, "maintenance_ran": maintenance_ran}),
+        json!({"list": after, "status": status_after, "rotated": seen, "retained_private_material": retained(&status_after)}),
     );
-    println!("W5 replacement_seen={seen} maintenance_ran={maintenance_ran}");
+    println!("W5 rotated={seen}");
+    assert!(seen, "wn did not rotate the consumed KeyPackage within 180 s");
 }
 
 /// W6: how long does wn's post-join self-update take, and through which phases?
