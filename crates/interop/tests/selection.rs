@@ -7,8 +7,10 @@
 //! contract; documented deviations it never produces, each covered by a
 //! `mk-core/tests/selection.rs` case:
 //!
-//! - a `d`/`i` tag repeated or carrying extra elements — MDK reads the
-//!   first value (`tag_value`), mk-core rejects the event outright;
+//! - a `d`/`i` tag repeated, or any single-valued tag (`d`, `i`,
+//!   `mls_protocol_version`, `mls_ciphersuite`) carrying extra elements —
+//!   MDK reads the first value (`tag_value`), mk-core rejects the event
+//!   outright;
 //! - a candidate whose signature does not verify — MDK trusts
 //!   relay-verified records and never checks, mk-core verifies and ignores
 //!   it (deletions are verified by both);
