@@ -737,6 +737,13 @@ export type BridgeRequest =
   | { type: "disband"; group: string }
   | { type: "enable_disbanding"; group: string }
   | { type: "forget_group"; group: string }
+  | {
+      type: "select_key_packages";
+      account: string;
+      events: NostrEvent[];
+      /** The group whose invite requirements filter candidates; `undefined` = creation requirements. */
+      group: string | undefined;
+    }
   | { type: "seal_attachment"; group: string; attachment: AttachmentInput }
   | {
       type: "send_media";
@@ -781,6 +788,7 @@ export const REQUEST_TYPES = [
   "remove_members",
   "report_publish",
   "seal_attachment",
+  "select_key_packages",
   "self_update",
   "send_intent",
   "send_media",
@@ -844,7 +852,8 @@ export type OpResult =
   | { type: "ingested"; reports: InputReport[] }
   | { type: "ticked"; nextWakeMs: bigint | undefined }
   | { type: "groups"; groups: GroupSnapshot[] }
-  | { type: "group"; group: GroupSnapshot | undefined };
+  | { type: "group"; group: GroupSnapshot | undefined }
+  | { type: "key_packages"; events: NostrEvent[] };
 
 export const RESULT_TYPES = [
   "ready",
@@ -863,6 +872,7 @@ export const RESULT_TYPES = [
   "ticked",
   "groups",
   "group",
+  "key_packages",
 ] as const;
 
 export type _OpResultComplete = Complete<Exclude<OpResult["type"], (typeof RESULT_TYPES)[number]>>;

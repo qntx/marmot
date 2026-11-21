@@ -146,6 +146,8 @@ type Script = {
   sent: BridgeResponse;
   /** `send_outcome` answer for membership/lifecycle ops. */
   outcome: BridgeResponse;
+  /** `key_packages` answer: `auto` selects the kind-30443 inputs. */
+  keyPackages: NostrEvent[] | "auto";
   /** Wire errors to answer for the matching request types. */
   errors: Partial<Record<BridgeRequest["type"], WireError["kind"]>>;
   /** Emit `host.commit` (seq ascending) when these request types run. */
@@ -269,6 +271,17 @@ function scriptedBackend(script: Script): {
                     case "disband":
                     case "enable_disbanding":
                       return script.outcome;
+                    case "select_key_packages":
+                      return {
+                        type: "ok",
+                        result: {
+                          type: "key_packages",
+                          events:
+                            script.keyPackages === "auto"
+                              ? request.events.filter((e) => e.kind === 30_443)
+                              : script.keyPackages,
+                        },
+                      };
                     case "send_message":
                     case "create_group":
                       return request.type === "create_group"
@@ -377,6 +390,7 @@ function freshScript(): Script {
     groups: [],
     nextWake: undefined,
     errors: {},
+    keyPackages: "auto",
     outcome: {
       type: "ok",
       result: { type: "send_outcome", outcome: { type: "queued" } },

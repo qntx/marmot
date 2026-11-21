@@ -1641,6 +1641,15 @@ export function decodeRequest(value: unknown, path = "request"): BridgeRequest {
         type,
         events: arr(field(o, "events", path), `${path}.events`, decodeEvent),
       };
+    case "select_key_packages": {
+      const gid = field(o, "group", path);
+      return {
+        type,
+        account: hex32(field(o, "account", path), `${path}.account`),
+        events: arr(field(o, "events", path), `${path}.events`, decodeEvent),
+        group: gid === null ? undefined : hexEncode(hex(gid, `${path}.group`)),
+      };
+    }
     case "acknowledge_messages":
       return {
         type,
@@ -1755,6 +1764,12 @@ export function encodeRequest(request: BridgeRequest): Json {
       ciphertext: hexEncode(request.ciphertext),
     }),
     ingest: (request) => ({ type: "ingest", events: request.events.map(encodeEvent) }),
+    select_key_packages: (request) => ({
+      type: "select_key_packages",
+      account: request.account,
+      events: request.events.map(encodeEvent),
+      group: request.group ?? null,
+    }),
     acknowledge_messages: (request) => ({ type: "acknowledge_messages", ids: request.ids }),
     signer_reply: (request) => ({
       type: "signer_reply",
@@ -1788,6 +1803,7 @@ export function decodeOpResult(value: unknown, path = "result"): OpResult {
     "reports",
     "next_wake_ms",
     "message",
+    "events",
   ]);
   const type = tag(o, path);
   switch (type) {
@@ -1870,6 +1886,11 @@ export function decodeOpResult(value: unknown, path = "result"): OpResult {
             : decodeGroupSnapshot(snapshot, `${path}.group`),
       };
     }
+    case "key_packages":
+      return {
+        type,
+        events: arr(field(o, "events", path), `${path}.events`, decodeEvent),
+      };
     default:
       return fail(`${path}.type`, "value");
   }
@@ -1922,6 +1943,10 @@ export function encodeOpResult(result: OpResult): Json {
     group: (result) => ({
       type: "group",
       group: result.group === undefined ? null : encodeGroupSnapshot(result.group),
+    }),
+    key_packages: (result) => ({
+      type: "key_packages",
+      events: result.events.map(encodeEvent),
     }),
   });
 }

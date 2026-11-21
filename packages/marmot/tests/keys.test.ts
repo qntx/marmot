@@ -43,9 +43,6 @@ function found(lookup: InviteeLookup): Extract<InviteeLookup, { type: "found" }>
   return lookup;
 }
 
-const slotOf = (invitee: { keyPackage: NostrEvent }): string =>
-  invitee.keyPackage.tags.find((tag) => tag[0] === "d")?.[1] ?? "";
-
 describe("writeRelaysOf", () => {
   test("no relay list → undefined", async () => {
     const port = await serve(LOOKUP, []);
@@ -125,21 +122,35 @@ describe("lookupInvitees", () => {
       createdAt,
       tags: slot === undefined ? [] : [["d", slot]],
     });
+  const deletion = (id: string, k?: string): NostrEvent =>
+    event({
+      id,
+      kind: 5,
+      createdAt: 2000n,
+      tags: k === undefined ? [] : [["k", k]],
+    });
   const relayList = (relays: string[]): NostrEvent =>
     event({ id: "f0".repeat(32), tags: relays.map((relay) => ["r", relay]) });
   const dmList = (relays: string[]): NostrEvent =>
     event({ id: "f1".repeat(32), kind: 10050, tags: relays.map((relay) => ["relay", relay]) });
+  /** The engine's stand-in: keeps every fetched publication. */
+  const keepKeyPackages = async (events: NostrEvent[]): Promise<NostrEvent[]> =>
+    Promise.resolve(events.filter((entry) => entry.kind === 30_443));
 
   test("no kind-10002 → no_relay_list", async () => {
     const port = await serve(LOOKUP, []);
-    await expect(lookupInvitees(port, timer, PUB, [LOOKUP], false)).resolves.toStrictEqual({
+    await expect(
+      lookupInvitees(port, timer, PUB, [LOOKUP], false, keepKeyPackages),
+    ).resolves.toStrictEqual({
       type: "no_relay_list",
     });
   });
 
-  test("a relay list but no KeyPackage → no_key_package", async () => {
+  test("an empty selection → no_key_package", async () => {
     const port = await serve(LOOKUP, [relayList([LOOKUP])]);
-    await expect(lookupInvitees(port, timer, PUB, [LOOKUP], false)).resolves.toStrictEqual({
+    await expect(
+      lookupInvitees(port, timer, PUB, [LOOKUP], false, async () => Promise.resolve([])),
+    ).resolves.toStrictEqual({
       type: "no_key_package",
     });
   });
@@ -150,34 +161,42 @@ describe("lookupInvitees", () => {
     await writer.publish(LOOKUP, relayList([LOOKUP]));
     await writer.publish(`${LOOKUP}/`, kp("02".repeat(32), 1000n));
     const port = network.port("r");
-    await expect(lookupInvitees(port, timer, PUB, [LOOKUP], false)).resolves.toStrictEqual({
+    await expect(
+      lookupInvitees(port, timer, PUB, [LOOKUP], false, keepKeyPackages),
+    ).resolves.toStrictEqual({
       type: "no_inbox_relays",
     });
   });
 
-  test("the newest KeyPackage per d slot, each with the inbox relays", async () => {
+  test("selection sees publications and k-tagged deletions, picks the invitees", async () => {
     const network = fakeRelay();
     const writer = network.port("a");
     await writer.publish(LOOKUP, relayList([LOOKUP]));
     await writer.publish(LOOKUP, dmList([R1, R2]));
-    for (const kpEvent of [
-      kp("03".repeat(32), 1000n, "a"),
-      kp("04".repeat(32), 2000n, "a"), // newer in slot a
-      kp("05".repeat(32), 1500n, "b"),
-    ]) {
+    const picked = kp("04".repeat(32), 2000n, "a");
+    const packages = [kp("03".repeat(32), 1000n, "a"), picked, kp("05".repeat(32), 1500n, "b")];
+    for (const kpEvent of packages) {
       // The KeyPackage fetch happens on the normalized write relay.
       // oxlint-disable-next-line no-await-in-loop -- publishes serialize like the real port
       await writer.publish(`${LOOKUP}/`, kpEvent);
     }
+    // A 30443-scoped deletion is fetched too; an untagged one is not.
+    await writer.publish(`${LOOKUP}/`, deletion("06".repeat(32), "30443"));
+    await writer.publish(`${LOOKUP}/`, deletion("07".repeat(32)));
+
+    let received: NostrEvent[] = [];
     const port = network.port("r");
-    const lookup = found(await lookupInvitees(port, timer, PUB, [LOOKUP], false));
-    expect(lookup.invitees).toHaveLength(2);
-    const slots = lookup.invitees.map(slotOf).toSorted();
-    expect(slots).toStrictEqual(["a", "b"]);
-    const slotA = lookup.invitees.find(
-      (invitee) => invitee.keyPackage.tags.find((tag) => tag[0] === "d")?.[1] === "a",
+    const lookup = found(
+      await lookupInvitees(port, timer, PUB, [LOOKUP], false, async (events) => {
+        received = events;
+        return Promise.resolve([picked]);
+      }),
     );
-    expect(slotA?.keyPackage.id).toBe("04".repeat(32));
-    expect(slotA?.inboxRelays).toStrictEqual([`${R1}/`, `${R2}/`]);
+    expect(received.map((entry) => entry.id).toSorted()).toStrictEqual(
+      [...packages.map((entry) => entry.id), "06".repeat(32)].toSorted(),
+    );
+    expect(lookup.invitees).toHaveLength(1);
+    expect(lookup.invitees[0]?.keyPackage.id).toBe("04".repeat(32));
+    expect(lookup.invitees[0]?.inboxRelays).toStrictEqual([`${R1}/`, `${R2}/`]);
   });
 });

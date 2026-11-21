@@ -633,6 +633,21 @@ export class Engine {
     return this.op({ type: "group", group: id }, (r) => (r.type === "group" ? r.group : MISS));
   }
 
+  /**
+   * Select `account`'s key packages from its fetched kind-30443 publications and kind-5 deletion
+   * requests, ranked best first. `group` filters by that group's invite requirements; without one,
+   * creation requirements apply.
+   */
+  async selectKeyPackages(
+    account: string,
+    events: NostrEvent[],
+    group?: string,
+  ): Promise<NostrEvent[]> {
+    return this.op({ type: "select_key_packages", account, events, group }, (r) =>
+      r.type === "key_packages" ? r.events : MISS,
+    );
+  }
+
   /** The durability gate's outstanding watermark, or null when idle. */
   async awaitingDurability(): Promise<bigint | undefined> {
     return this.op({ type: "awaiting_durability" }, (r) =>

@@ -232,8 +232,12 @@ export class MarmotClient {
     this.pump.setInbox(relays);
   }
 
-  /** Resolve an account's published KeyPackages for inviting; non-found maps to a typed error. */
-  async lookupInvitees(pubkey: string, lookupRelays: string[]): Promise<Invitee[]> {
+  /**
+   * Resolve an account's published KeyPackages for inviting; non-found maps to a typed error.
+   * Selection runs against `group`'s invite requirements when given, creation requirements
+   * otherwise — relay I/O stays outside the pump while `select_key_packages` runs inside it.
+   */
+  async lookupInvitees(pubkey: string, lookupRelays: string[], group?: string): Promise<Invitee[]> {
     this.guard();
     const safe = lookupRelays.filter((relay) => safeRelayUrl(relay, this.allowLoopback));
     let lookup;
@@ -244,6 +248,8 @@ export class MarmotClient {
         pubkey,
         safe,
         this.allowLoopback,
+        async (events) =>
+          this.op(async (engine) => engine.selectKeyPackages(pubkey, events, group)),
       );
     } catch (error) {
       throw toMarmotError(error);

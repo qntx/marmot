@@ -19,6 +19,7 @@ export type RelayFilter = {
   authors?: string[];
   "#p"?: string[];
   "#h"?: string[];
+  "#k"?: string[];
   since?: number;
   limit?: number;
 };

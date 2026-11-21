@@ -30,6 +30,7 @@ function toFilter(filter: RelayFilter): Filter {
     ...(filter.authors === undefined ? {} : { authors: filter.authors }),
     ...(filter["#p"] === undefined ? {} : { "#p": filter["#p"] }),
     ...(filter["#h"] === undefined ? {} : { "#h": filter["#h"] }),
+    ...(filter["#k"] === undefined ? {} : { "#k": filter["#k"] }),
     ...(filter.since === undefined ? {} : { since: filter.since }),
     ...(filter.limit === undefined ? {} : { limit: filter.limit }),
   };
