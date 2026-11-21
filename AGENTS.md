@@ -27,7 +27,7 @@
 - `src/core` registries and the error vocabulary mirror the pinned spec (`upstream.json` → `spec.rev`). The spec text they encode is recorded byte-for-byte under `vectors/spec/`; package tests parse the recorded copies and assert set-equality with the constants, so constants only drift when the pin moves.
 - npm packages and crates are versioned lockstep: `[workspace.package].version` equals every package.json version, members inherit `version.workspace = true`, internal path deps pin `=<version>`, and `scripts/check-version.ts` + `scripts/sync-versions.ts` keep Cargo.toml/Cargo.lock/bun.lock in sync on bump.
 - `docs/` is local-only and never pushed: the whole directory is gitignored except `docs/index.mdx` and `docs/meta.json`; never commit any other file under `docs/`. `3rdparty/` holds local upstream checkouts and is never committed.
-- Security: no secret leaves the engine backend except as a write to the injected, host-encrypted KV; logs and diagnostics carry no account ids, group ids, message ids, relay URLs, pubkeys, payloads, or key material; every URL taken from group state passes destination-safety (SSRF) checks; `cargo deny` gates every crate and the ten fuzz targets in `fuzz/` gate every decoder we own; no `unwrap`/`expect`/panics outside tests; storage errors never embed serde/codec messages (they can echo payload fragments).
+- Security: no secret leaves the engine backend except as a write to the injected, host-encrypted KV; logs and diagnostics carry no account ids, group ids, message ids, relay URLs, pubkeys, payloads, or key material; every URL taken from group state passes destination-safety (SSRF) checks; `cargo deny` gates every crate and the thirteen fuzz targets in `fuzz/` gate every decoder we own; no `unwrap`/`expect`/panics outside tests; storage errors never embed serde/codec messages (they can echo payload fragments).
 
 ## Dependency policy
 
@@ -44,8 +44,9 @@ bun run check:pins   # verifies local 3rdparty checkouts against
 cargo metadata --no-deps --format-version 1 >/dev/null
 ```
 
-`lint` covers `vp check` (oxlint + oxfmt), `taplo fmt --check` and the version
-lockstep check.
+`lint` covers `vp check` (oxlint + oxfmt), `taplo fmt --check`, the version
+lockstep check and `scripts/check-source-rules.ts` (unsafe confined to
+`mk-ffi/src/abi.rs` with `// SAFETY:`, no logging in library sources).
 
 Rust gate (what CI runs — see `CONTRIBUTING.md` for prerequisites):
 

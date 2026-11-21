@@ -100,7 +100,7 @@ CC_aarch64_linux_android=<ndk-clang> cargo check -p mk-core --target aarch64-lin
 ```
 
 `lint` = `vp check` (oxlint + oxfmt) + `taplo fmt --check` +
-`scripts/check-version.ts`. `check:pins` verifies that local `3rdparty/`
+`scripts/check-version.ts` + `scripts/check-source-rules.ts`. `check:pins` verifies that local `3rdparty/`
 checkouts sit at the revs recorded in `upstream.json` and that the recorded
 copies under `vectors/` are byte-identical to the pinned sources; absent
 checkouts are skipped (CI has no 3rdparty).
