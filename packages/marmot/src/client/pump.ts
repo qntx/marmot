@@ -57,6 +57,14 @@ export type DeliveryEvent = { outbound: string; resolution: PublishResolution };
 
 /** Flush the inbound buffer inline once this many events are buffered. */
 export const INGEST_BATCH_MAX = 256;
+/**
+ * The most distinct inbound events held at once — buffered plus already flushed to the engine but
+ * not yet settled. Past it the delivering subscription is closed and reopened from the durable
+ * cursor after `RESUBSCRIBE_DELAY_MS`.
+ */
+export const MAX_PENDING_INBOUND = 4 * INGEST_BATCH_MAX;
+/** Inbound events whose wire encoding exceeds this are dropped before buffering. */
+export const MAX_INBOUND_EVENT_BYTES = 1024 * 1024;
 /** Delay after the first buffered inbound event before a flush runs. */
 export const INGEST_DELAY_MS = 25;
 /** Delay before reconciling after a relay-initiated subscription close. */
@@ -113,6 +121,8 @@ export class Pump {
   private readonly inflight = new Set<Promise<void>>();
   private readonly buffer = new Map<string, Buffered>();
   private readonly active = new Map<string, ActiveSub>();
+  /** Distinct events buffered or inside an unsettled ingest batch. */
+  private pendingInbound = 0;
   private wake: (() => void) | undefined;
   /**
    * Confirmed-commit refusal tracking (mdk#2333): `confirmed` holds outbound ids whose report
@@ -507,6 +517,12 @@ export class Pump {
     if (this.closed) {
       return;
     }
+    if (
+      event.content.length > MAX_INBOUND_EVENT_BYTES ||
+      wireEventBytes(event) > MAX_INBOUND_EVENT_BYTES
+    ) {
+      return;
+    }
     let key: string;
     if (sub.kind === GIFT_WRAP_KIND) {
       if (event.kind !== GIFT_WRAP_KIND) {
@@ -525,6 +541,17 @@ export class Pump {
     }
     const existing = this.buffer.get(event.id);
     if (existing === undefined) {
+      if (this.pendingInbound >= MAX_PENDING_INBOUND) {
+        // The relay outruns the engine: drop the event, close its subscription and let the
+        // reconcile reopen it from the durable cursor after RESUBSCRIBE_DELAY_MS.
+        sub.close();
+        if (this.active.get(sub.key) === sub) {
+          this.active.delete(sub.key);
+        }
+        this.scheduleReconcile();
+        return;
+      }
+      this.pendingInbound += 1;
       this.buffer.set(event.id, { event, keys: new Set([key]) });
     } else {
       existing.keys.add(key);
@@ -562,6 +589,8 @@ export class Pump {
       } catch (error) {
         this.emitError(toMarmotError(error));
         return;
+      } finally {
+        this.pendingInbound -= batch.length;
       }
       // Deferred peels are bounded by real time — keep ticking until the engine is quiet, and
       // re-flush immediately whatever arrived while this batch was ingesting.
