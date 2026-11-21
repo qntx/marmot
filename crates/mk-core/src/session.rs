@@ -1656,6 +1656,50 @@ impl Session {
         Ok(OutboundId(signed.id.0))
     }
 
+    /// D1 selection over one account's fetched kind-30443 `KeyPackage`
+    /// events and kind-5 deletion requests (`foundation/key-packages.md`,
+    /// "Selection and lifecycle"), ranked best-first. With `group`,
+    /// candidates are filtered against that group's invite requirements;
+    /// without one, against what `create_group` with no extra components
+    /// requires of an invitee — the Nostr routing component, whose data is
+    /// not decoded for requirements.
+    ///
+    /// # Errors
+    /// [`SessionError`] when the group's requirements cannot be read.
+    pub fn select_key_packages(
+        &self,
+        account: AccountId,
+        events: &[Event],
+        group: Option<&GroupId>,
+    ) -> Result<Vec<Event>, SessionError> {
+        let requirements = match group {
+            Some(group) => self
+                .engine
+                .invite_key_package_requirements(&engine_gid(group))
+                .map_err(session_engine_error)?,
+            None => self
+                .engine
+                .create_key_package_requirements(&CreateGroupRequest {
+                    name: String::new(),
+                    description: String::new(),
+                    members: Vec::new(),
+                    required_features: Vec::new(),
+                    app_components: vec![AppComponentData {
+                        component_id: NOSTR_ROUTING_COMPONENT_ID,
+                        data: Vec::new(),
+                    }],
+                    initial_admins: Vec::new(),
+                })
+                .map_err(session_engine_error)?,
+        };
+        Ok(key_package::select_key_packages_with(
+            account,
+            events,
+            self.now().unix_ms / 1_000,
+            Some(&requirements),
+        ))
+    }
+
     /// Sign `unsigned` through the account signer. Reply validation — right
     /// account, untouched commitment fields, committed id, verifying
     /// signature — lives in [`CheckedSigner`], installed once at

@@ -55,5 +55,9 @@ getrandom = { workspace = true, features = ["wasm_js"] }
 name              = "model"
 required-features = ["testing"]
 
+[[test]]
+name              = "selection"
+required-features = ["testing"]
+
 [lints]
 workspace = true
