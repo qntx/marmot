@@ -3,7 +3,9 @@
  * drains and dispatches session events, reconciles subscriptions when flagged, and publishes
  * whatever `takeOutbound` released after `whenDurable`. Inbound events are buffered per event id
  * with the cursor keys that delivered them, ingested in bounded batches, and cursors advance only
- * after `whenDurable`.
+ * after `whenDurable`: an event delivered after its subscription's EOSE counts immediately; an
+ * event from the stored-event backlog folds in only when that EOSE arrives, so a subscription lost
+ * mid-replay cannot persist a cursor past events never received.
  */
 
 import type { Clock, Engine } from "../backend/engine.ts";
@@ -62,9 +64,9 @@ export const INGEST_BATCH_MAX = 256;
  * not yet settled. Past it the delivering subscription is closed and reopened from the durable
  * cursor after `RESUBSCRIBE_DELAY_MS`.
  */
-export const MAX_PENDING_INBOUND = 4 * INGEST_BATCH_MAX;
+export const MAX_PENDING_INBOUND: number = 4 * INGEST_BATCH_MAX;
 /** Inbound events whose wire encoding exceeds this are dropped before buffering. */
-export const MAX_INBOUND_EVENT_BYTES = 1024 * 1024;
+export const MAX_INBOUND_EVENT_BYTES: number = 1024 * 1024;
 /** Delay after the first buffered inbound event before a flush runs. */
 export const INGEST_DELAY_MS = 25;
 /** Delay before reconciling after a relay-initiated subscription close. */
@@ -91,10 +93,17 @@ type ActiveSub = {
   relay: string;
   kind: 445 | 1059;
   routes: string[];
+  /** The relay signalled end of stored events; later deliveries count live. */
+  eose: boolean;
+  /** Per cursor key the pre-EOSE aggregate, folded into `state.cursors` at EOSE. */
+  backlog: Map<string, { max?: number; cap?: number }>;
+  /** An ingest covering this sub's backlog failed — its EOSE job applies nothing. */
+  tainted: boolean;
   close: () => void;
 };
 
-type Buffered = { event: NostrEvent; keys: Set<string> };
+/** An event plus, per cursor key, the sub that delivered it pre-EOSE (`undefined` when live). */
+type Buffered = { event: NostrEvent; keys: Map<string, ActiveSub | undefined> };
 
 export class Pump {
   private readonly engine: Engine;
@@ -552,9 +561,12 @@ export class Pump {
         return;
       }
       this.pendingInbound += 1;
-      this.buffer.set(event.id, { event, keys: new Set([key]) });
+      this.buffer.set(event.id, {
+        event,
+        keys: new Map([[key, sub.eose ? undefined : sub]]),
+      });
     } else {
-      existing.keys.add(key);
+      existing.keys.set(key, sub.eose ? undefined : sub);
     }
     if (this.buffer.size >= INGEST_BATCH_MAX) {
       this.flushNow();
@@ -575,7 +587,23 @@ export class Pump {
     this.buffer.clear();
     const work = this.run(async () => {
       const events = batch.map((entry) => entry.event);
-      const reports = await this.engine.ingest(events);
+      let reports: InputReport[];
+      try {
+        reports = await this.engine.ingest(events);
+      } catch (error) {
+        // The ingest never landed: every sub this batch carried backlog for is tainted — its
+        // EOSE job applies nothing and the next reopen refetches the range. Marked inside the
+        // job so it is visible to the fold link queued behind this run; a detached `work`
+        // catch would race it.
+        for (const entry of batch) {
+          for (const sub of entry.keys.values()) {
+            if (sub !== undefined) {
+              sub.tainted = true;
+            }
+          }
+        }
+        throw error;
+      }
       for (const invite of pendingInvites(reports)) {
         this.emitInvite(invite);
       }
@@ -604,7 +632,11 @@ export class Pump {
   /**
    * Cursor advance, per key: `max(old, min(createdAt, nowSecs))` over events whose outcome is not
    * `unavailable`; any `unavailable` event caps the key at its earliest `createdAt` − 1 — the range
-   * is not synchronized, so the cursor may move back.
+   * is not synchronized, so the cursor may move back. Keys an event reached after its
+   * subscription's EOSE apply to `state.cursors` here; keys it reached from the stored-event
+   * backlog fold into the delivering sub's `backlog` instead and land only when that sub's EOSE job
+   * runs — a sub closed or tainted before then drops its aggregate and the next `since` refetches
+   * the range.
    */
   private advanceCursors(batch: Buffered[], reports: InputReport[]): void {
     const outcomes = new Map(reports.map((report) => [report.event, report.outcome] as const));
@@ -615,7 +647,22 @@ export class Pump {
       if (outcome === undefined) {
         continue;
       }
-      for (const key of entry.keys) {
+      for (const [key, sub] of entry.keys) {
+        if (sub !== undefined) {
+          let aggregate = sub.backlog.get(key);
+          if (aggregate === undefined) {
+            aggregate = {};
+            sub.backlog.set(key, aggregate);
+          }
+          if (outcome.type === "unavailable") {
+            const at = Number(entry.event.createdAt) - 1;
+            aggregate.cap = aggregate.cap === undefined ? at : Math.min(aggregate.cap, at);
+          } else {
+            const secs = Math.min(Number(entry.event.createdAt), nowSecs);
+            aggregate.max = aggregate.max === undefined ? secs : Math.max(aggregate.max, secs);
+          }
+          continue;
+        }
         let list = perKey.get(key);
         if (list === undefined) {
           list = [];
@@ -650,6 +697,25 @@ export class Pump {
       }
       this.state.cursors[key] = value;
     }
+  }
+
+  /** Apply a settled backlog aggregate (`sub.backlog` entries) at EOSE; used only by the EOSE job. */
+  private applyBacklog(sub: ActiveSub): void {
+    if (this.active.get(sub.key) !== sub || sub.tainted || sub.backlog.size === 0) {
+      return;
+    }
+    for (const [key, aggregate] of sub.backlog) {
+      let value = this.state.cursors[key] ?? 0;
+      if (aggregate.max !== undefined && aggregate.max > value) {
+        value = aggregate.max;
+      }
+      if (aggregate.cap !== undefined) {
+        value = Math.max(0, Math.min(value, aggregate.cap));
+      }
+      this.state.cursors[key] = value;
+    }
+    sub.backlog.clear();
+    this.scheduleSave();
   }
 
   private scheduleSave(): void {
@@ -775,13 +841,35 @@ export class Pump {
       relay: planned.relay,
       kind: planned.kind,
       routes: planned.routes,
+      eose: false,
+      backlog: new Map(),
+      tainted: false,
       close: () => undefined,
     };
     sub.close = this.relays.subscribe(planned.relay, planned.filters, {
       event: (event) => {
         this.onInbound(sub, event);
       },
-      eose: () => undefined,
+      eose: () => {
+        if (sub.eose) {
+          return;
+        }
+        sub.eose = true;
+        // Flush so every pre-EOSE event's ingest is queued ahead of the fold; the link runs
+        // after every still-parked pre-EOSE batch settled, so the aggregate is complete — and
+        // tainted — by the time it lands. A bare queue link: the fold needs serialization,
+        // not another drain/dispatch cycle.
+        this.flushNow();
+        const prior = this.queue;
+        this.queue = (async () => {
+          try {
+            await prior;
+            this.applyBacklog(sub);
+          } catch (error) {
+            this.emitError(toMarmotError(error));
+          }
+        })();
+      },
       closed: () => {
         this.active.delete(sub.key);
         this.scheduleReconcile();

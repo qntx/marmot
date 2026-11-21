@@ -30,13 +30,18 @@ import type {
 import { utf8Decode, utf8Encode } from "../src/backend/utf8.ts";
 import { MarmotClient } from "../src/client/client.ts";
 import { INGEST_BATCH_MAX, RESUBSCRIBE_DELAY_MS } from "../src/client/pump.ts";
-import { encodeClientState } from "../src/client/state.ts";
+import { decodeClientState, encodeClientState } from "../src/client/state.ts";
 import { manualClock } from "../src/testing/clock.ts";
 import { memoryCursorStore } from "../src/testing/cursors.ts";
 import { memoryKv } from "../src/testing/memory.ts";
 import { manualTimer } from "../src/testing/timer.ts";
 import type { ManualTimer } from "../src/testing/timer.ts";
-import { GROUP_OVERLAP_SECS, groupCursorKey } from "../src/transport/plan.ts";
+import {
+  GIFT_WRAP_OVERLAP_SECS,
+  GROUP_OVERLAP_SECS,
+  groupCursorKey,
+  inboxCursorKey,
+} from "../src/transport/plan.ts";
 import type { RelayFilter, RelayPort, SubscriptionHandlers } from "../src/transport/port.ts";
 
 const ACCOUNT = "a".repeat(64);
@@ -59,6 +64,9 @@ function event(partial: Partial<NostrEvent> & { id: string }): NostrEvent {
 
 const groupEvent = (id: string, createdAt = 1000n): NostrEvent =>
   event({ id, kind: 445, createdAt, tags: [["h", ROUTE]] });
+
+const wrapEvent = (id: string, createdAt = 1000n): NostrEvent =>
+  event({ id, kind: 1059, createdAt, tags: [["p", ACCOUNT]] });
 
 function snapshot(relays: string[] = [RELAY]): GroupSnapshot {
   return {
@@ -131,6 +139,20 @@ function scriptedRelays(): {
 const push = (sub: ScriptedSub, event: NostrEvent): void => {
   if (sub.open) {
     sub.handlers.event(event);
+  }
+};
+
+const pushEose = (sub: ScriptedSub): void => {
+  if (sub.open) {
+    sub.handlers.eose();
+  }
+};
+
+/** A relay-initiated close: `closed` fires and the sub is dead from then on. */
+const terminate = (sub: ScriptedSub, reason = "done"): void => {
+  if (sub.open) {
+    sub.open = false;
+    sub.handlers.closed(reason);
   }
 };
 
@@ -335,6 +357,21 @@ const mustSub = (subs: ScriptedSub[]): ScriptedSub => {
   return sub;
 };
 
+const inboxSubs = (network: ReturnType<typeof scriptedRelays>): ScriptedSub[] =>
+  network.subs.filter((sub) => sub.filters.some((filter) => filter.kinds?.includes(1059) === true));
+
+/** One parked ingest: `ok` lets it answer, `fail` makes the call reject. */
+type IngestGate = { ok: () => void; fail: () => void };
+
+const popGate = (gates: IngestGate[]): IngestGate => {
+  const gate = gates.shift();
+  if (gate === undefined) {
+    throw new Error("expected a parked ingest");
+  }
+  return gate;
+};
+
+
 describe("malicious relay", () => {
   test("an event flood while ingest is held is dropped past the pending cap", async () => {
     const script = freshScript();
@@ -397,4 +434,162 @@ describe("malicious relay", () => {
     expect(sub.open).toBe(true);
     await fixture.client.close();
   });
+
+  test("a newest-first backlog closed before EOSE never moves the cursor", async () => {
+    const script = freshScript();
+    script.groups = [snapshot()];
+    const key = groupCursorKey(ROUTE, RELAY);
+    const fixture = await open(script, encodeClientState({ cursors: { [key]: 500 }, inbox: [] }));
+    await settle(fixture.timer, 5000);
+    const sub = mustSub(groupSubs(fixture.network));
+    expect(sub.filters[0]?.since).toBe(Math.max(0, 500 - GROUP_OVERLAP_SECS));
+
+    // Stored events replay newest-first; the relay dies before EOSE.
+    for (const [i, at] of [2000n, 1999n, 1998n, 1997n].entries()) {
+      push(sub, groupEvent((i + 1).toString(16).padStart(64, "0"), at));
+    }
+    await settle(fixture.timer, 25);
+    expect(ingested(script)).toHaveLength(4);
+    terminate(sub);
+    await settle(fixture.timer, RESUBSCRIBE_DELAY_MS);
+
+    // The persisted cursor is untouched — nothing past it was ever confirmed.
+    expect(decodeClientState(fixture.cursors.bytes()).cursors[key]).toBe(500);
+    const reopened = groupSubs(fixture.network).at(-1);
+    expect(reopened).not.toBe(sub);
+    expect(reopened?.filters[0]?.since).toBe(Math.max(0, 500 - GROUP_OVERLAP_SECS));
+    await fixture.client.close();
+  });
+
+  test("a newest-first inbox backlog closed before EOSE never moves the cursor", async () => {
+    const script = freshScript();
+    const key = inboxCursorKey(RELAY);
+    const fixture = await open(
+      script,
+      encodeClientState({ cursors: { [key]: 200_000 }, inbox: [RELAY] }),
+    );
+    await settle(fixture.timer, 5000);
+    const sub = mustSub(inboxSubs(fixture.network));
+    expect(sub.filters[0]?.since).toBe(200_000 - GIFT_WRAP_OVERLAP_SECS);
+
+    for (const [i, at] of [300_000n, 290_000n, 280_000n].entries()) {
+      push(sub, wrapEvent((i + 1).toString(16).padStart(64, "0"), at));
+    }
+    await settle(fixture.timer, 25);
+    expect(ingested(script)).toHaveLength(3);
+    terminate(sub);
+    await settle(fixture.timer, RESUBSCRIBE_DELAY_MS);
+
+    expect(decodeClientState(fixture.cursors.bytes()).cursors[key]).toBe(200_000);
+    const reopened = inboxSubs(fixture.network).at(-1);
+    expect(reopened).not.toBe(sub);
+    expect(reopened?.filters[0]?.since).toBe(200_000 - GIFT_WRAP_OVERLAP_SECS);
+    await fixture.client.close();
+  });
+
+  test("a backlog folds into the cursor at EOSE only after the ingest is durable", async () => {
+    const script = freshScript();
+    script.groups = [snapshot()];
+    script.commitOn = ["ingest"];
+    const key = groupCursorKey(ROUTE, RELAY);
+    const fixture = await open(script, encodeClientState({ cursors: { [key]: 500 }, inbox: [] }));
+    await settle(fixture.timer, 5000);
+    const sub = mustSub(groupSubs(fixture.network));
+
+    // Backlog events ingest but the durable ack is held: no cursor move yet.
+    fixture.kv.hold();
+    for (const [i, at] of [2000n, 1999n, 1998n].entries()) {
+      push(sub, groupEvent((i + 1).toString(16).padStart(64, "0"), at));
+    }
+    await settle(fixture.timer, 25);
+    expect(ingested(script)).toHaveLength(3);
+    pushEose(sub);
+    await settle(fixture.timer, 0);
+    expect(decodeClientState(fixture.cursors.bytes()).cursors[key]).toBe(500);
+
+    // Once durable, the EOSE job folds the backlog max in.
+    fixture.kv.release();
+    await settle(fixture.timer, 0);
+    expect(decodeClientState(fixture.cursors.bytes()).cursors[key]).toBe(2000);
+    await fixture.client.close();
+  });
+
+  test("a mid-flight backlog folds only after the last pre-EOSE batch is durable", async () => {
+    const script = freshScript();
+    script.groups = [snapshot()];
+    const key = groupCursorKey(ROUTE, RELAY);
+    const fixture = await open(script, encodeClientState({ cursors: { [key]: 500 }, inbox: [] }));
+    await settle(fixture.timer, 5000);
+    const sub = mustSub(groupSubs(fixture.network));
+
+    // Three full batches of newest-first backlog; every ingest parks on its own gate.
+    const gates: IngestGate[] = [];
+    script.ingestGate = async () => {
+      await new Promise<void>((resolve, reject) => {
+        gates.push({
+          ok: resolve,
+          fail: () => {
+            reject(new Error("ingest down"));
+          },
+        });
+      });
+    };
+    const total = 3 * INGEST_BATCH_MAX;
+    for (let i = 0; i < total; i += 1) {
+      push(sub, groupEvent(i.toString(16).padStart(64, "0"), BigInt(total - i)));
+    }
+    await settle(fixture.timer, 0);
+    // EOSE lands while every pre-EOSE batch is still parked in the queue.
+    pushEose(sub);
+    await settle(fixture.timer, 0);
+
+    const cursor = (): number | undefined =>
+      decodeClientState(fixture.cursors.bytes()).cursors[key];
+    // Release batches one at a time: nothing persists until the last one is durable.
+    popGate(gates).ok();
+    await settle(fixture.timer, 0);
+    expect(cursor()).toBe(500);
+    popGate(gates).ok();
+    await settle(fixture.timer, 0);
+    expect(cursor()).toBe(500);
+    popGate(gates).ok();
+    await settle(fixture.timer, 0);
+    expect(cursor()).toBe(total);
+    await fixture.client.close();
+  });
+
+  test("a failed pre-EOSE batch leaves the backlog unapplied at EOSE", async () => {
+    const script = freshScript();
+    script.groups = [snapshot()];
+    const key = groupCursorKey(ROUTE, RELAY);
+    const fixture = await open(script, encodeClientState({ cursors: { [key]: 500 }, inbox: [] }));
+    await settle(fixture.timer, 5000);
+    const sub = mustSub(groupSubs(fixture.network));
+
+    const gates: IngestGate[] = [];
+    script.ingestGate = async () => {
+      await new Promise<void>((resolve, reject) => {
+        gates.push({
+          ok: resolve,
+          fail: () => {
+            reject(new Error("ingest down"));
+          },
+        });
+      });
+    };
+    for (let i = 0; i < 2 * INGEST_BATCH_MAX; i += 1) {
+      push(sub, groupEvent(i.toString(16).padStart(64, "0"), BigInt(1000 + i)));
+    }
+    await settle(fixture.timer, 0);
+    pushEose(sub);
+
+    // Batch 1 lands, batch 2's ingest fails — the whole backlog is suspect: nothing applies.
+    popGate(gates).ok();
+    await settle(fixture.timer, 0);
+    popGate(gates).fail();
+    await settle(fixture.timer, 0);
+    expect(decodeClientState(fixture.cursors.bytes()).cursors[key]).toBe(500);
+    await fixture.client.close();
+  });
+
 });
