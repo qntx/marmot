@@ -2230,3 +2230,39 @@ async fn send_pacing_rate_exceeded() {
     };
     assert!(items.is_empty(), "refused send staged nothing: {items:?}");
 }
+
+/// `Debug` on a live bridge surfaces the lifecycle label and counters only —
+/// never attachment metadata parked in the pending table.
+#[tokio::test(flavor = "current_thread")]
+async fn bridge_debug_redacts_pending_data() {
+    let mut a = Member::new();
+    a.open().await;
+    let response = a
+        .call(Request::CreateGroup(CreateGroupRequest {
+            name: "g".to_owned(),
+            description: "d".to_owned(),
+            relays: vec![RELAY.to_owned()],
+            invitees: Vec::new(),
+            admins: Vec::new(),
+            components: vec![media_component()],
+        }))
+        .await;
+    let OpResult::GroupCreated(created) = ok_result(response) else {
+        panic!("create_group");
+    };
+    let sealed = a
+        .call(Request::SealAttachment(SealAttachmentRequest {
+            group: created.group.id,
+            attachment: AttachmentInput {
+                plaintext: vec![0x70, 0x69, 0x63],
+                media_type: "image/png".to_owned(),
+                filename: "debug-leak-probe.png".to_owned(),
+                dim: None,
+                thumbhash: None,
+            },
+        }))
+        .await;
+    assert!(matches!(sealed, Response::Ok { .. }), "seal: {sealed:?}");
+    let debug = format!("{:?}", a.bridge);
+    assert!(!debug.contains("debug-leak-probe"), "{debug}");
+}

@@ -67,7 +67,7 @@ impl fmt::Debug for CommitSeq {
 }
 
 /// One row mutation inside a [`KvBatch`].
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum KvOp {
     /// Insert or replace `key` with `value`.
     Put {
@@ -81,6 +81,23 @@ pub enum KvOp {
         /// Row key produced by the store's key schema.
         key: Vec<u8>,
     },
+}
+
+/// Keys and values are payload bytes: `Debug` reports lengths only.
+impl fmt::Debug for KvOp {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Put { key, value } => f
+                .debug_struct("Put")
+                .field("key_len", &key.len())
+                .field("value_len", &value.len())
+                .finish(),
+            Self::Delete { key } => f
+                .debug_struct("Delete")
+                .field("key_len", &key.len())
+                .finish(),
+        }
+    }
 }
 
 /// The atomic unit of durable state: one committed unit's mutations plus its
@@ -265,5 +282,30 @@ impl<'a> Cursor<'a> {
             .try_into()
             .map_err(|_| BatchCodecError::Truncated)?;
         Ok(u64::from_be_bytes(bytes))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn debug_redacts_row_data() {
+        let batch = KvBatch {
+            seq: CommitSeq::from_raw(7),
+            ops: vec![
+                KvOp::Put {
+                    key: b"group-route".to_vec(),
+                    value: b"top-secret".to_vec(),
+                },
+                KvOp::Delete {
+                    key: b"group-route".to_vec(),
+                },
+            ],
+        };
+        let debug = format!("{batch:?}");
+        assert!(!debug.contains("top-secret"), "{debug}");
+        assert!(!debug.contains("group-route"), "{debug}");
+        assert!(!debug.contains("116, 111, 112"), "{debug}");
     }
 }

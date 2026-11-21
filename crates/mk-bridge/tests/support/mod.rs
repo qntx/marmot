@@ -139,6 +139,12 @@ pub struct MemHost {
     pub state: Arc<Mutex<HostState>>,
 }
 
+impl std::fmt::Debug for MemHost {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MemHost").finish_non_exhaustive()
+    }
+}
+
 impl MemHost {
     pub fn new() -> Self {
         Self::default()
