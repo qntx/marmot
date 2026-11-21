@@ -166,31 +166,44 @@ Observed (this build of wn/wnd v0.18.0):
   device) → `linked`; ~9 s later B sees A's `device_count` go 1→2 (A1
   commits the same-account Add), and the sibling Welcome reaches A2 a few
   seconds after that (`groups list` non-empty, send works).
-- **W3** — observed divergence: `wn logout` is refused through the wnd
-  socket (`daemon_forbidden` — must run directly without `--socket`);
-  direct logout returns `logged_out: true`, but the signed-out device's
-  leaf is **not** removed from the shared chat within 180 s
-  (`groups members` stayed `[1,2]` over all 18 polls).
-- **W4** — PASS with caveat: an engine device built exactly like mk-core
+- **W3** — the CLI exposes no spec sign-out: `wn logout` is documented
+  as destructive local-account removal, not the shared-runtime sibling
+  sign-out/wipe protocol. The wnd socket refuses it with
+  `daemon_forbidden` (must run directly without `--socket`); direct
+  logout returns `logged_out: true`. The device's leaf stays in the
+  shared chat for all 180 s of observation (`groups members` stayed
+  `[1,2]`) — expected here: the two devices were never linked (no
+  device group), so only the device's own SelfRemove could remove its
+  leaf, and logout does not send one.
+- **W4** — PASS: an engine device built exactly like mk-core
   (proposals `{0x0008,0x000a}`, extensions `{0x0006,0xf2d1}`, private-use
   components `{0x8001,0x8003,0x8004,0x8006,0x8009,0x800b,0x800c,0x800d}`,
   `d` = 64 lowercase hex of 32 random bytes) publishes kind-30443 in its
   own slot → B's invite selects it
   (`member_outcomes[].selected_device_count = 2`), A3 unwraps the gift
   wrap (`Processed` → `GroupJoined`) and its kind-445 app message reaches
-  `wn` B. Caveat: the slot never appears as a sign-in — A1's
-  `devices link status` shows empty `prompts` across 180 s plus one wnd
-  restart plus 60 s more.
-- **W5** — observed divergence: Welcome consumption is recorded
-  (`last_consumed_at`, `last_consumed_key_package_ref`) but no
-  replacement is scheduled within 180 s, and one explicit
-  `wn groups run-maintenance` (published=0) does not trigger one either
-  — `pending_replacement` stays null; `refresh_at` is on the periodic
-  schedule (~6 days).
+  `wn` B. Note: whether A1 notices the foreign slot is **not observable
+  via the CLI** — no `wn` command lists sign-ins
+  (`devices link status.prompts` are pairing prompts; marmot-app's
+  `unrecognized_sign_ins` has no CLI exposure), so empty prompts across
+  180 s plus one wnd restart prove nothing either way.
+- **W5** — PASS: wn rotates the KeyPackage once a Welcome consumes it.
+  Pre-accept `current_key_package_ref` was consumed; at the first poll
+  (~15 s after `groups accept`) `authored_event_id`/`created_at` had
+  advanced to a new kind-30443 event and `current_key_package_ref` to a
+  new ref, the consumed ref moved into `retained_private_material`
+  (`consumed: true`, `replaced_at` set, `awaiting_confirmed_replacement:
+  false`), and `refresh_at` resampled (~6 days). `pending_replacement`
+  is null because staging, publication and promotion all complete
+  between polls — rotation is detected by comparing
+  `current_key_package_ref`/`authored_event_id` to the pre-accept
+  baseline, not by `pending_replacement`.
 - **W6** — observed: `groups maintenance-status` shows the `post_join`
-  obligation (`phase` → `complete` ~15 s after creation) and a
-  `self_update` evolution `confirmed` at `source_epoch 1 → target_epoch 2`;
-  `last_own_leaf_rotation_at` ~93 s after enrollment.
+  obligation in `grace` until ~11 s after accept, then `quiet` for ~60 s
+  (`quiet_since` ≈ accept+11 s), then `not_before` (jitter) at ~88 s; the
+  `self_update` evolution publishes `confirmed` at `source_epoch 1 →
+  target_epoch 2` ~89 s after accept, and `last_own_leaf_rotation_at` is
+  ~93 s after enrollment.
 
 ## Run
 
