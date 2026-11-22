@@ -119,6 +119,10 @@ struct SubjectClient {
     host: Arc<RecordingHost>,
     session: Session,
     key_package: Option<Event>,
+    /// KeyPackage lifecycle outbound seen by `sync_outbound` but not yet
+    /// reported to the session — reporting is async, so the items wait for
+    /// the next async sync to acknowledge every relay at once.
+    unreported_key_packages: Vec<(mk_core::OutboundId, Vec<String>)>,
     mailbox: Vec<Event>,
     /// Session events already drained (e.g. to collect ack ids in `tick`)
     /// but still owed to `observe`.
@@ -243,6 +247,10 @@ impl SessionSubject {
     /// `KeyPackage` + inbox-relay list so group/invite actions can address
     /// them, exactly as a host directory would.
     #[cfg(test)]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the fixture opens and seeds every client in one narrative block"
+    )]
     async fn new(labels: &[String]) -> Result<Self, SubjectError> {
         let mut subject = Self {
             descriptor: SubjectDescriptor {
@@ -313,6 +321,7 @@ impl SessionSubject {
                     host,
                     session,
                     key_package: None,
+                    unreported_key_packages: Vec::new(),
                     mailbox: Vec::new(),
                     pending_events: Vec::new(),
                 },
@@ -323,7 +332,7 @@ impl SessionSubject {
                 let client = subject.client_mut(label)?;
                 client
                     .session
-                    .publish_key_package(&[RELAY.to_owned()])
+                    .ensure_key_package(&[RELAY.to_owned()])
                     .await
                     .map_err(session_error)?;
                 client
@@ -381,6 +390,34 @@ impl SessionSubject {
             if self.records.contains_key(&outbound_id) {
                 continue;
             }
+            if matches!(
+                item.purpose,
+                OutboundPurpose::KeyPackage
+                    | OutboundPurpose::KeyPackageRepublish
+                    | OutboundPurpose::KeyPackageDeletion
+            ) {
+                // KeyPackage lifecycle traffic publishes to the account's
+                // write relays, not into mailboxes — mirror the setup path:
+                // refresh the directory copy, park the relays for the next
+                // async sync to report and keep the flight out of the queue
+                // so scenario ordering steps never observe it.
+                let client = self.client_mut(label)?;
+                if item.purpose == OutboundPurpose::KeyPackageDeletion {
+                    client.key_package = None;
+                } else {
+                    client.key_package = Some(item.event.clone());
+                }
+                if !client
+                    .unreported_key_packages
+                    .iter()
+                    .any(|(id, _)| *id == item.id)
+                {
+                    client
+                        .unreported_key_packages
+                        .push((item.id, item.relays.clone()));
+                }
+                continue;
+            }
             let kind = if item.purpose == OutboundPurpose::Welcome {
                 SubjectOutboundKind::Welcome
             } else {
@@ -418,6 +455,34 @@ impl SessionSubject {
             });
         }
         ack_gate(self.client_mut(label)?);
+        Ok(())
+    }
+
+    /// `sync_outbound` plus the asynchronous half of KeyPackage lifecycle
+    /// publishing: every relay acknowledges the staged items at once, the
+    /// same instant-directory semantics as `ensure_key_package` at setup.
+    async fn sync_outbound_reported(
+        &mut self,
+        label: &str,
+        publication: Option<&str>,
+    ) -> Result<(), SubjectError> {
+        self.sync_outbound(label, publication)?;
+        let client = self.client_mut(label)?;
+        let pending = std::mem::take(&mut client.unreported_key_packages);
+        for (id, relays) in pending {
+            let results: Vec<RelayResult> = relays
+                .iter()
+                .map(|relay| RelayResult {
+                    relay: relay.clone(),
+                    status: RelayStatus::Accepted,
+                })
+                .collect();
+            client
+                .session
+                .report_publish(&id, &results)
+                .await
+                .map_err(session_error)?;
+        }
         Ok(())
     }
 
@@ -603,7 +668,8 @@ impl ConvergenceSubject for SessionSubject {
             self.scenario_groups.insert("default".into(), gid);
             self.active_group = Some("default".into());
         }
-        self.sync_outbound(action.creator, Some(action.pending))
+        self.sync_outbound_reported(action.creator, Some(action.pending))
+            .await
     }
 
     async fn invite_members(
@@ -617,7 +683,8 @@ impl ConvergenceSubject for SessionSubject {
             .invite(&gid, invitees)
             .await
             .map_err(session_error)?;
-        self.sync_outbound(action.inviter, Some(action.pending))
+        self.sync_outbound_reported(action.inviter, Some(action.pending))
+            .await
     }
 
     async fn update_group_data(
@@ -634,7 +701,8 @@ impl ConvergenceSubject for SessionSubject {
             )
             .await
             .map_err(session_error)?;
-        self.sync_outbound(action.client, Some(action.pending))
+        self.sync_outbound_reported(action.client, Some(action.pending))
+            .await
     }
 
     async fn remove_members(
@@ -652,7 +720,8 @@ impl ConvergenceSubject for SessionSubject {
             .remove_members(&gid, &members)
             .await
             .map_err(session_error)?;
-        self.sync_outbound(action.remover, Some(action.pending))
+        self.sync_outbound_reported(action.remover, Some(action.pending))
+            .await
     }
 
     async fn self_update(&mut self, action: SubjectSelfUpdate<'_>) -> Result<(), SubjectError> {
@@ -662,7 +731,8 @@ impl ConvergenceSubject for SessionSubject {
             .self_update(&gid)
             .await
             .map_err(session_error)?;
-        self.sync_outbound(action.client, Some(action.pending))
+        self.sync_outbound_reported(action.client, Some(action.pending))
+            .await
     }
 
     async fn update_admin_policy(
@@ -694,7 +764,8 @@ impl ConvergenceSubject for SessionSubject {
             )
             .await
             .map_err(session_error)?;
-        self.sync_outbound(action.client, action.pending)
+        self.sync_outbound_reported(action.client, action.pending)
+            .await
     }
 
     async fn send_application(
@@ -714,7 +785,7 @@ impl ConvergenceSubject for SessionSubject {
             )
             .await
             .map_err(session_error)?;
-        self.sync_outbound(action.sender, None)
+        self.sync_outbound_reported(action.sender, None).await
     }
 
     async fn leave(&mut self, _action_id: &str, client: &str) -> Result<(), SubjectError> {
@@ -724,7 +795,7 @@ impl ConvergenceSubject for SessionSubject {
             .leave(&gid)
             .await
             .map_err(session_error)?;
-        self.sync_outbound(client, None)
+        self.sync_outbound_reported(client, None).await
     }
 
     fn deliver_all(&mut self) -> Result<(), SubjectError> {
@@ -775,7 +846,7 @@ impl ConvergenceSubject for SessionSubject {
                         .map_err(session_error)?;
                 }
             }
-            self.sync_outbound(label, None)?;
+            self.sync_outbound_reported(label, None).await?;
         }
         Ok(())
     }
@@ -799,7 +870,7 @@ impl ConvergenceSubject for SessionSubject {
         outbound_id: &str,
         outcome: SubjectOutboundOutcome,
     ) -> Result<(), SubjectError> {
-        self.sync_outbound(client, None)?;
+        self.sync_outbound_reported(client, None).await?;
         let record = self.records.get(outbound_id).ok_or_else(|| {
             subject_error(
                 "unknown_outbound",
@@ -896,7 +967,8 @@ impl ConvergenceSubject for SessionSubject {
         // (marmot-session `publish_one_with_post_confirmation_welcomes`);
         // they join the queue tagged with the pending's publication label,
         // like the engine subject's `try_confirm` `deferred_welcomes` send.
-        self.sync_outbound(client, publication.as_deref())?;
+        self.sync_outbound_reported(client, publication.as_deref())
+            .await?;
         Ok(())
     }
 

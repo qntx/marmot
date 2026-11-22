@@ -34,6 +34,7 @@ export type MarmotErrorKind =
   | "commit_too_large"
   | "commit_refused"
   | "send_rate_exceeded"
+  | "signed_out"
   | "engine";
 
 export class MarmotError extends Error {
@@ -66,6 +67,7 @@ const BRIDGE_KIND_MAP: Partial<Record<WireError["kind"], MarmotErrorKind>> = {
   host_failed: "storage",
   storage: "storage",
   send_rate_exceeded: "send_rate_exceeded",
+  signed_out: "signed_out",
 };
 
 /**

@@ -1094,3 +1094,247 @@ async fn scenario6_stream_anchors() {
     rig.relay.shutdown();
     eprintln!("SCENARIO-6 PASS {:.1}s", start.elapsed().as_secs_f64());
 }
+
+// ---- scenario 19: consumed KeyPackage rotates ------------------------------
+
+/// First value of `event`'s `name` tag.
+fn tag_value<'a>(event: &'a mk_core::Event, name: &str) -> Option<&'a str> {
+    event
+        .tags
+        .iter()
+        .find(|tag| tag.first().map(String::as_str) == Some(name))
+        .and_then(|tag| tag.get(1))
+        .map(String::as_str)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs wn/wnd built from the upstream.json wn pin; see CONTRIBUTING"]
+async fn scenario19_consumed_key_package_rotates() {
+    let start = Instant::now();
+    let rig = Arc::new(rig("s19").await);
+    let mut a = open_member().await;
+    publish_identity(&mut a, &rig).await;
+    let a_hex = a.account_hex();
+    let a_npub = a.npub();
+
+    let first = fetch_key_package(&rig, &a_hex)
+        .await
+        .expect("first key package");
+    let first_d = tag_value(&first, "d").expect("d tag").to_owned();
+    let first_i = tag_value(&first, "i").map(str::to_owned);
+
+    // wn invites us; the join consumes our promoted KeyPackage.
+    let created = wn(
+        &rig.home,
+        &rig.socket,
+        Some(&rig.wn_npub),
+        &["groups", "create", "interop-19a", &a_npub],
+    );
+    let wn_gid = wn_group_id(&created);
+    let gid = hex_group(&wn_gid);
+    join_wn_group(&rig, &mut a, &gid).await;
+
+    // Within one tick the lifecycle publishes a replacement to the same
+    // slot: same `d`, newer `created_at`, different `i`.
+    let first_created = first.created_at;
+    let replacement = until_member(
+        &mut a,
+        |a| {
+            let rig = Arc::clone(&rig);
+            let gid = gid.clone();
+            let a_hex = a_hex.clone();
+            let first_d = first_d.clone();
+            let first_i = first_i.clone();
+            Box::pin(async move {
+                let _ = sync(&mut *a, &rig, &gid).await;
+                fetch(&rig, key_package_filter(&a_hex))
+                    .await
+                    .into_iter()
+                    .find(|event| {
+                        tag_value(event, "d") == Some(first_d.as_str())
+                            && event.created_at > first_created
+                            && tag_value(event, "i").map(str::to_owned) != first_i
+                    })
+            })
+        },
+        "same-slot KeyPackage replacement on the relay",
+        90_000,
+    )
+    .await;
+
+    // The replacement heads the slot, so wn's second invite selects it.
+    let newest = fetch_key_package(&rig, &a_hex)
+        .await
+        .expect("relay key package");
+    assert_eq!(newest.id, replacement.id, "the replacement heads the slot");
+    let created = wn(
+        &rig.home,
+        &rig.socket,
+        Some(&rig.wn_npub),
+        &["groups", "create", "interop-19b", &a_npub],
+    );
+    let wn_gid2 = wn_group_id(&created);
+    let gid2 = hex_group(&wn_gid2);
+    join_wn_group(&rig, &mut a, &gid2).await;
+
+    member_says(&rig, &mut a, &gid2, &wn_gid2, "s19-hello-from-mk-core").await;
+    wn_says(&rig, &mut a, &gid2, &wn_gid2, "s19-hello-from-wn").await;
+
+    rig.relay.shutdown();
+    eprintln!("SCENARIO-19 PASS {:.1}s", start.elapsed().as_secs_f64());
+}
+
+// ---- scenario 17: second device signs out ----------------------------
+
+/// S17: two devices of one account in one wn group; the second device
+/// signs out — its `SelfRemove` commits, wn shows one leaf left for the
+/// account, the signed-out device ends `Removed`, and the remaining
+/// device's roster is unchanged.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs wn/wnd built from the upstream.json wn pin; see CONTRIBUTING"]
+async fn scenario17_second_device_signs_out() {
+    let start = Instant::now();
+    let rig = Arc::new(rig("s17").await);
+
+    // Two devices of one account: the same secret over separate stores,
+    // each with its own KeyPackage slot.
+    let signer = Arc::new(mk_core::testing::LocalSigner::from_secret([0x5d; 32]).expect("secret"));
+    let mut a1 = open_member_with(Arc::clone(&signer)).await;
+    let mut a2 = open_member_with(signer).await;
+    publish_identity(&mut a1, &rig).await;
+    publish_identity(&mut a2, &rig).await;
+    let a_npub = a1.npub();
+    let a_hex = a1.account_hex();
+    assert_eq!(a2.account_hex(), a_hex, "one account, two devices");
+
+    let created = wn(
+        &rig.home,
+        &rig.socket,
+        Some(&rig.wn_npub),
+        &["groups", "create", "interop-17", &a_npub],
+    );
+    let wn_gid = wn_group_id(&created);
+    let gid = hex_group(&wn_gid);
+    join_wn_group(&rig, &mut a1, &gid).await;
+    join_wn_group(&rig, &mut a2, &gid).await;
+
+    // The second device signs out: its leaf's SelfRemove is staged and
+    // published; wn commits it, leaving one leaf for the account.
+    let report = a2
+        .session
+        .sign_out(std::slice::from_ref(&rig.url))
+        .await
+        .expect("sign_out");
+    assert_eq!(report.left, vec![gid.clone()], "the member group is left");
+    assert_eq!(report.kept_admin_leaves, Vec::<GroupId>::new());
+    flush(&mut a2, &rig).await;
+
+    let wn_gid_ref = &wn_gid;
+    let npub_ref = &a_npub;
+    until(
+        || {
+            let rig = Arc::clone(&rig);
+            async move {
+                (wn_members(&rig, wn_gid_ref)
+                    .iter()
+                    .filter(|member| member.to_string().contains(npub_ref))
+                    .count()
+                    == 1)
+                    .then_some(())
+            }
+        },
+        "wn roster shows one leaf for our account",
+        90_000,
+        800,
+    )
+    .await;
+
+    // The signed-out device follows the commit to `Removed`.
+    let gid2 = gid.clone();
+    until_member(
+        &mut a2,
+        |a| {
+            let gid2 = gid2.clone();
+            let rig = Arc::clone(&rig);
+            Box::pin(async move {
+                let _ = sync(&mut *a, &rig, &gid2).await;
+                let removed = a
+                    .session
+                    .group(&gid2)
+                    .expect("group")
+                    .is_some_and(|s| s.state == GroupState::Removed);
+                removed.then_some(())
+            })
+        },
+        "a2 is removed",
+        120_000,
+    )
+    .await;
+
+    // The remaining device keeps the group: roster {wn, our leaf}.
+    let events = sync(&mut a1, &rig, &gid).await;
+    let _ = events;
+    let roster = a1.roster(&gid);
+    assert!(
+        roster.contains(&rig.wn_pub) && roster.contains(&a_hex),
+        "a1 roster {{wn, A}}: {roster:?}"
+    );
+
+    rig.relay.shutdown();
+    eprintln!("SCENARIO-17 PASS {:.1}s", start.elapsed().as_secs_f64());
+}
+
+/// S21 (D4): after the host reports the post-join fetch done, the session
+/// runs its quiet window and sampled jitter, then authors exactly one
+/// self-update commit wn accepts — messaging survives in both directions.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[ignore = "needs WN_BIN and WND_BIN; CI runs it"]
+async fn scenario21_post_join_self_update() {
+    let start = Instant::now();
+    let rig = Arc::new(rig("s21").await);
+    let mut a = open_member().await;
+    publish_identity(&mut a, &rig).await;
+    let a_npub = a.npub();
+
+    let created = wn(
+        &rig.home,
+        &rig.socket,
+        Some(&rig.wn_npub),
+        &["groups", "create", "interop-21", &a_npub],
+    );
+    let wn_gid = wn_group_id(&created);
+    let gid = hex_group(&wn_gid);
+    join_wn_group(&rig, &mut a, &gid).await;
+
+    // The host's post-join history fetch is done (EOSE on every relay):
+    // quiet (60 s) plus the sampled jitter gate one self-update commit.
+    a.session.history_fetched(&gid).expect("history_fetched");
+    let gid_ref = gid.clone();
+    until_member(
+        &mut a,
+        |a| {
+            let rig = Arc::clone(&rig);
+            let gid = gid_ref.clone();
+            Box::pin(async move {
+                let mut events = sync(&mut *a, &rig, &gid).await;
+                events.append(&mut a.session.drain_events().expect("drain"));
+                events
+                    .iter()
+                    .any(|event| {
+                        matches!(event, SessionEvent::SelfUpdated { group } if *group == gid)
+                    })
+                    .then_some(())
+            })
+        },
+        "self-update commit after quiet + jitter",
+        240_000,
+    )
+    .await;
+
+    // Both directions keep working after the rotation.
+    member_says(&rig, &mut a, &gid, &wn_gid, "s21-after-self-update").await;
+    wn_says(&rig, &mut a, &gid, &wn_gid, "s21-wn-replies").await;
+
+    rig.relay.shutdown();
+    eprintln!("SCENARIO-21 PASS {:.1}s", start.elapsed().as_secs_f64());
+}

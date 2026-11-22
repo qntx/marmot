@@ -109,6 +109,12 @@ test = false
 doc  = false
 
 [[bin]]
+name = "key_package_selection"
+path = "fuzz_targets/key_package_selection.rs"
+test = false
+doc  = false
+
+[[bin]]
 name              = "gen_corpus"
 path              = "src/bin/gen_corpus.rs"
 test              = false

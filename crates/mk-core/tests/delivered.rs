@@ -189,7 +189,15 @@ mod delivered_tests {
         member.session.drain_events().unwrap()
     }
 
-    async fn send_one(member: &mut Member, relay: &FakeRelay, gid: &GroupId, i: usize) -> EventId {
+    /// Returns the inner id when the send was staged and indexed — a
+    /// `Queued` send (behind an in-flight self-update commit, D4) writes
+    /// no own-send row yet, so the model tracks it only when it lands.
+    async fn send_one(
+        member: &mut Member,
+        relay: &FakeRelay,
+        gid: &GroupId,
+        i: usize,
+    ) -> Option<EventId> {
         member.clock.advance(1_000);
         let sent = member
             .session
@@ -204,7 +212,10 @@ mod delivered_tests {
             .await
             .expect("send_message");
         flush(member, relay).await;
-        sent.message.id()
+        if matches!(sent.outcome, SendOutcome::Queued) {
+            return None;
+        }
+        Some(sent.message.id())
     }
 
     async fn run_case(ops: Vec<Op>) -> Result<(), TestCaseError> {
@@ -231,8 +242,9 @@ mod delivered_tests {
                 Op::Send(by_a) => {
                     if *by_a {
                         send_one(&mut a, &relay, &gid, counter).await;
-                    } else if !forgotten {
-                        let inner = send_one(&mut b, &relay, &gid, counter).await;
+                    } else if !forgotten
+                        && let Some(inner) = send_one(&mut b, &relay, &gid, counter).await
+                    {
                         expected.insert(inner.0);
                     }
                     counter += 1;

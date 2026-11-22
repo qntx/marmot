@@ -69,6 +69,9 @@
     "group": "dead",
     "type": "hydration_recovered"
   },
+  "key_package_rotated": {
+    "type": "key_package_rotated"
+  },
   "local_copy_restored": {
     "group": "dead",
     "type": "local_copy_restored"
@@ -137,6 +140,10 @@
     "intent_kind": "send_message",
     "reason": "unknown_group",
     "type": "queued_intent_refused"
+  },
+  "self_updated": {
+    "group": "dead",
+    "type": "self_updated"
   },
   "unmapped": {
     "type": "unmapped"

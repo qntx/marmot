@@ -3,6 +3,8 @@
   "commit": "commit",
   "inbox_relays": "inbox_relays",
   "key_package": "key_package",
+  "key_package_deletion": "key_package_deletion",
+  "key_package_republish": "key_package_republish",
   "proposal": "proposal",
   "unmapped": "unmapped",
   "welcome": "welcome"

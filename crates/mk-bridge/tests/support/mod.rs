@@ -786,8 +786,8 @@ where
     /// Publish the account's `KeyPackage` and inbox relay list.
     pub async fn publish_identity(&mut self, relay: &mut FakeRelay) {
         let response = self
-            .call(Request::PublishKeyPackage(PublishKeyPackageRequest {
-                relays: vec![RELAY.to_owned()],
+            .call(Request::EnsureKeyPackage(EnsureKeyPackageRequest {
+                write_relays: vec![RELAY.to_owned()],
             }))
             .await;
         assert!(matches!(response, Response::Ok { .. }), "key_package");

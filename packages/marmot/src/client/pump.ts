@@ -50,6 +50,7 @@ export type GroupEvent = Exclude<
   | { type: "message_received" }
   | { type: "publish_resolved" }
   | { type: "app_event_dropped" }
+  | { type: "key_package_rotated" }
   | { type: "unmapped" }
 >;
 
@@ -151,6 +152,14 @@ export class Pump {
   private deliveryChain: Promise<void> = Promise.resolve();
   private saveChain: Promise<void> = Promise.resolve();
   private readonly inflight = new Set<Promise<void>>();
+  /** Nostr route (`nostrGroupId`) → MLS group id, refreshed by `reconcile`. */
+  private readonly routeGroup = new Map<string, string>();
+  /** Route → the relays the current plan subscribes it on, refreshed by `reconcile`. */
+  private readonly routeRelays = new Map<string, Set<string>>();
+  /** Route → relays whose first EOSE this Pump lifetime has seen. */
+  private readonly eoseSeen = new Map<string, Set<string>>();
+  /** Groups already reported via `historyFetched` — once per Pump lifetime. */
+  private readonly historyReported = new Set<string>();
   private readonly buffer = new Map<string, Buffered>();
   private readonly active = new Map<string, ActiveSub>();
   /** Distinct events buffered or inside an unsettled ingest batch. */
@@ -443,12 +452,24 @@ export class Pump {
     if (floorRefused) {
       this.emitError(new MarmotError("commit_too_large"));
     }
-    const resolution = await this.run(async () =>
-      this.engine.reportPublish(
-        item.id,
-        verdicts.map((verdict) => verdict.result),
-      ),
-    );
+    let resolution: PublishResolution;
+    try {
+      resolution = await this.run(async () =>
+        this.engine.reportPublish(
+          item.id,
+          verdicts.map((verdict) => verdict.result),
+        ),
+      );
+    } catch (error) {
+      // A row deleted mid-publish — sign-out retires every live KeyPackage
+      // row in one transaction — answers `unknown_outbound`: nothing is left
+      // to resolve, the queue is unwedged and no verdict is reportable.
+      const mapped = toMarmotError(error);
+      if (mapped.kind === "engine" && mapped.code === "unknown_outbound") {
+        return;
+      }
+      throw mapped;
+    }
     this.trackCommitRefusal(item, verdicts, resolution);
     // `pending` re-offers immediately; a `confirmed` commit merge can arm a new
     // convergence/lifecycle deadline that only a tick can observe — without the
@@ -866,6 +887,7 @@ export class Pump {
         case "app_event_dropped":
           this.emitDropped({ group: event.group, reason: event.reason });
           break;
+        case "key_package_rotated":
         case "unmapped":
           break;
         case "group_created":
@@ -932,6 +954,21 @@ export class Pump {
       })),
       cursor: (key) => this.state.cursors[key],
     });
+    this.routeGroup.clear();
+    for (const snapshot of live) {
+      this.routeGroup.set(snapshot.nostrGroupId, snapshot.id);
+    }
+    this.routeRelays.clear();
+    for (const sub of plan.subscriptions) {
+      for (const route of sub.routes) {
+        let relays = this.routeRelays.get(route);
+        if (relays === undefined) {
+          relays = new Set();
+          this.routeRelays.set(route, relays);
+        }
+        relays.add(sub.relay);
+      }
+    }
     const planned = new Map(plan.subscriptions.map((sub) => [sub.key, sub] as const));
     for (const [key, sub] of this.active) {
       if (!planned.has(key)) {
@@ -983,6 +1020,7 @@ export class Pump {
             this.emitError(toMarmotError(error));
           }
         })();
+        this.onEose(sub);
       },
       closed: () => {
         this.active.delete(sub.key);
@@ -990,6 +1028,44 @@ export class Pump {
       },
     });
     return sub;
+  }
+
+  /**
+   * First EOSE per group subscription per relay: once every relay the plan subscribes a route on
+   * has delivered, flush the ingest buffer and report `historyFetched` through the serialized op
+   * queue — once per group per Pump lifetime. A subscription lost before its EOSE (relay close,
+   * inbound cap) leaves its relay unseen until the reopened one delivers. Never-ending EOSE needs
+   * no timer: the session's own deadline covers it.
+   */
+  private onEose(sub: ActiveSub): void {
+    if (this.closed || sub.kind === GIFT_WRAP_KIND) {
+      return;
+    }
+    for (const route of sub.routes) {
+      let seen = this.eoseSeen.get(route);
+      if (seen === undefined) {
+        seen = new Set();
+        this.eoseSeen.set(route, seen);
+      }
+      seen.add(sub.relay);
+      const group = this.routeGroup.get(route);
+      if (group === undefined || this.historyReported.has(group)) {
+        continue;
+      }
+      const relays = this.routeRelays.get(route);
+      if (relays === undefined || ![...relays].every((relay) => seen.has(relay))) {
+        continue;
+      }
+      this.historyReported.add(group);
+      this.flushNow();
+      void (async () => {
+        try {
+          await this.run(async () => this.engine.historyFetched(group), false);
+        } catch (error) {
+          this.emitError(toMarmotError(error));
+        }
+      })();
+    }
   }
 
   private scheduleReconcile(): void {
@@ -1075,7 +1151,7 @@ export class Pump {
     }
   }
 
-  private emitError(error: MarmotError): void {
+  emitError(error: MarmotError): void {
     for (const listener of this.listeners.error) {
       try {
         listener(error);

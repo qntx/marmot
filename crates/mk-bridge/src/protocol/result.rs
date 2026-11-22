@@ -1,10 +1,12 @@
 //! The `ok` result vocabulary: one variant per request outcome.
 
+use mk_core as core;
 use serde::{Deserialize, Serialize};
 
-use super::ser::{hex_bytes, hex_str, opt_u64_str};
+use super::ser::{hex_bytes, hex_bytes_seq, hex_str, opt_u64_str};
 use super::types::{
-    GroupSnapshot, InputReport, Outbound, PublishResolution, SendOutcome, SentEvent,
+    Event, GroupSnapshot, InputReport, KeyPackageInfo, Outbound, PublishResolution, SendOutcome,
+    SentEvent,
 };
 
 /// `submit_proof` succeeded; the session is usable.
@@ -41,21 +43,39 @@ pub struct PublishResolutionResult {
     pub resolution: PublishResolution,
 }
 
-/// `publish_key_package` result.
+/// `sign_out` result: which groups the device left and which admin
+/// groups it stays in (the account's only admin leaf cannot `SelfRemove`
+/// without orphaning the group — the host is told to decide).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct KeyPackageResult {
-    /// Raw `KeyPackage` bytes, hex.
-    #[serde(with = "hex_bytes")]
-    pub key_package: Vec<u8>,
-    /// `KeyPackageRef` (hex) as asserted by the `i` tag.
-    pub key_package_ref: String,
-    /// The published event's id, hex.
+pub struct SignOutResult {
+    /// Groups the device left (`SelfRemove` committed or durable),
+    /// hex each.
+    #[serde(with = "hex_bytes_seq")]
+    pub left: Vec<Vec<u8>>,
+    /// Groups whose admin leaf stays, hex each.
+    #[serde(with = "hex_bytes_seq")]
+    pub kept_admin_leaves: Vec<Vec<u8>>,
+}
+
+/// `ensure_key_package`/`key_package_status` result: the account
+/// `KeyPackage` slot's lifecycle standing.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct KeyPackageStatusResult {
+    /// The stable replaceable-event slot (`d` tag), hex.
     #[serde(with = "hex_str")]
-    pub event_id: [u8; 32],
-    /// The publisher's account, hex.
-    #[serde(with = "hex_str")]
-    pub account: [u8; 32],
+    pub slot: [u8; 32],
+    /// The promoted, acknowledged publication, or `null`.
+    pub current: Option<KeyPackageInfo>,
+    /// Whether a replacement is staged or in flight.
+    pub pending: bool,
+    /// Retired private material still inside its grace period.
+    pub retained: u32,
+    /// Absolute Unix milliseconds of the earliest lifecycle deadline, or
+    /// `null` when nothing is scheduled (decimal string).
+    #[serde(with = "opt_u64_str")]
+    pub next_due_ms: Option<u64>,
 }
 
 /// `publish_inbox_relays` result.
@@ -151,6 +171,14 @@ pub struct GroupResult {
     pub group: Option<Box<GroupSnapshot>>,
 }
 
+/// `select_key_packages` result.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct KeyPackagesResult {
+    /// The selected kind-30443 publications, best first.
+    pub events: Vec<Event>,
+}
+
 /// The typed result of a successful `call`, internally tagged by `"type"`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -166,8 +194,10 @@ pub enum OpResult {
     Outbound(OutboundResult),
     /// `report_publish`.
     PublishResolution(PublishResolutionResult),
-    /// `publish_key_package`.
-    KeyPackage(KeyPackageResult),
+    /// `ensure_key_package`/`key_package_status`.
+    KeyPackageStatus(KeyPackageStatusResult),
+    /// `sign_out`.
+    SignOut(SignOutResult),
     /// `publish_inbox_relays`.
     InboxRelays(InboxRelaysResult),
     /// `create_group`.
@@ -188,4 +218,31 @@ pub enum OpResult {
     Groups(GroupsResult),
     /// `group`.
     Group(GroupResult),
+    /// `select_key_packages`.
+    KeyPackages(KeyPackagesResult),
+}
+
+impl From<core::SignOutReport> for SignOutResult {
+    fn from(report: core::SignOutReport) -> Self {
+        Self {
+            left: report.left.into_iter().map(|id| id.0).collect(),
+            kept_admin_leaves: report
+                .kept_admin_leaves
+                .into_iter()
+                .map(|id| id.0)
+                .collect(),
+        }
+    }
+}
+
+impl From<core::KeyPackageStatus> for KeyPackageStatusResult {
+    fn from(status: core::KeyPackageStatus) -> Self {
+        Self {
+            slot: status.slot,
+            current: status.current.map(KeyPackageInfo::from),
+            pending: status.pending,
+            retained: status.retained,
+            next_due_ms: status.next_due_ms,
+        }
+    }
 }

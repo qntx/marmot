@@ -736,6 +736,36 @@ describe("malicious relay", () => {
     await fixture.client.close();
   });
 
+  test("a group subscription lost before EOSE holds history_fetched until its reopen delivers", async () => {
+    const script = freshScript();
+    script.groups = [snapshot([RELAY, RELAY2])];
+    const fixture = await open(
+      script,
+      encodeClientState({ nip44Extended: true, cursors: {}, inbox: [] }),
+    );
+    await settle(fixture.timer, 5000);
+    const history = (): BridgeRequest[] =>
+      script.calls.filter((call) => call.type === "history_fetched");
+    const first = mustSubOn(groupSubs(fixture.network), RELAY);
+
+    // One relay dies mid-replay; the other's EOSE alone does not cover the group.
+    push(first, groupEvent(2000n));
+    terminate(first);
+    pushEose(mustSubOn(groupSubs(fixture.network), RELAY2));
+    await settle(fixture.timer, 25);
+    expect(history()).toHaveLength(0);
+
+    await settle(fixture.timer, RESUBSCRIBE_DELAY_MS);
+    const reopened = mustSubOn(
+      fixture.network.openSubs().filter((sub) => sub !== first),
+      RELAY,
+    );
+    pushEose(reopened);
+    await settle(fixture.timer, 25);
+    expect(history()).toStrictEqual([{ type: "history_fetched", group: GROUP }]);
+    await fixture.client.close();
+  });
+
   test("live events after an early EOSE advance the cursor normally", async () => {
     const script = freshScript();
     script.groups = [snapshot()];

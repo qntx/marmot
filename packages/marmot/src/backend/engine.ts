@@ -26,7 +26,7 @@ import type {
   GroupSnapshot,
   InputReport,
   Invitee,
-  KeyPackageResult,
+  KeyPackageStatusResult,
   MediaAttachmentRef,
   MediaReference,
   MessageIntent,
@@ -38,6 +38,7 @@ import type {
   SealedAttachmentResult,
   SendOutcome,
   SentMessage,
+  SignOutResult,
   SessionEvent,
   SignerOp,
   SignerReply,
@@ -402,15 +403,47 @@ export class Engine {
     );
   }
 
-  /** Build, sign and stage the account's kind-30443 `KeyPackage`. */
-  async publishKeyPackage(relays: string[]): Promise<KeyPackageResult> {
-    return this.op({ type: "publish_key_package", relays }, (r) =>
-      r.type === "key_package"
+  /**
+   * Drive the account `KeyPackage` slot's lifecycle against the NIP-65 write set: stage/sign/queue
+   * a replacement when due, republish to gained relays, promote an acknowledged pending. Answers
+   * the slot's standing.
+   */
+  async ensureKeyPackage(writeRelays: string[]): Promise<KeyPackageStatusResult> {
+    return this.op({ type: "ensure_key_package", writeRelays }, (r) =>
+      r.type === "key_package_status"
         ? {
-            keyPackage: r.keyPackage,
-            keyPackageRef: r.keyPackageRef,
-            eventId: r.eventId,
-            account: r.account,
+            slot: r.slot,
+            current: r.current,
+            pending: r.pending,
+            retained: r.retained,
+            nextDueMs: r.nextDueMs,
+          }
+        : MISS,
+    );
+  }
+
+  /**
+   * Withdraw the account `KeyPackage` slot (kind-5 to the write set), leave every group this device
+   * is a non-admin member of and delete every `KeyPackage` bundle — device sign-out. The
+   * withdrawal, the bundle deletion and the dropped `KeyPackage` outbox rows land in one store
+   * transaction; a repeat call never stages a second kind-5.
+   */
+  async signOut(writeRelays: string[]): Promise<SignOutResult> {
+    return this.op({ type: "sign_out", writeRelays }, (r) =>
+      r.type === "sign_out" ? { left: r.left, keptAdminLeaves: r.keptAdminLeaves } : MISS,
+    );
+  }
+
+  /** The account `KeyPackage` slot's lifecycle standing. */
+  async keyPackageStatus(): Promise<KeyPackageStatusResult> {
+    return this.op({ type: "key_package_status" }, (r) =>
+      r.type === "key_package_status"
+        ? {
+            slot: r.slot,
+            current: r.current,
+            pending: r.pending,
+            retained: r.retained,
+            nextDueMs: r.nextDueMs,
           }
         : MISS,
     );
@@ -469,6 +502,13 @@ export class Engine {
   async selfUpdate(group: string): Promise<SendOutcome> {
     return this.op({ type: "self_update", group }, (r) =>
       r.type === "send_outcome" ? r.outcome : MISS,
+    );
+  }
+
+  /** Report the group's post-join history fetch completed (EOSE on every subscribed relay). */
+  async historyFetched(group: string): Promise<void> {
+    return this.op({ type: "history_fetched", group }, (r) =>
+      r.type === "done" ? undefined : MISS,
     );
   }
 
@@ -631,6 +671,21 @@ export class Engine {
   /** Snapshot one group, or `null` when not live. */
   async group(id: string): Promise<GroupSnapshot | undefined> {
     return this.op({ type: "group", group: id }, (r) => (r.type === "group" ? r.group : MISS));
+  }
+
+  /**
+   * Select `account`'s key packages from its fetched kind-30443 publications and kind-5 deletion
+   * requests, ranked best first. `group` filters by that group's invite requirements; without one,
+   * creation requirements apply.
+   */
+  async selectKeyPackages(
+    account: string,
+    events: NostrEvent[],
+    group?: string,
+  ): Promise<NostrEvent[]> {
+    return this.op({ type: "select_key_packages", account, events, group }, (r) =>
+      r.type === "key_packages" ? r.events : MISS,
+    );
   }
 
   /** The durability gate's outstanding watermark, or null when idle. */

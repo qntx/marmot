@@ -64,6 +64,41 @@
 //!   `Leaving` (admin step-down-and-leave) and the remove flow cuts while
 //!   the removed member realizes its local-leaf removal. Disband is not
 //!   in the session API (M5) — there is nothing to interrupt.
+//! - 10 KeyPackage staging: cuts inside `ensure_key_package`'s
+//!   `stage_key_package_replacement` transaction — either the whole
+//!   pending row (new bundle + lifecycle record) is durable or none of
+//!   it is; a reopen never observes a half-staged replacement. Covered
+//!   by both cut variants at every `KeyPackage` step batch.
+//! - 11 signed-not-published: cuts after the signed KeyPackage outbound
+//!   batch — the durable rows re-release the identical signed event, so
+//!   the authored-event multiset stays byte-identical.
+//! - 12 acknowledgement-uncertain promotion: cuts at the
+//!   `report_publish` batch that atomically promotes the pending
+//!   KeyPackage — a reopen re-derives the promotable state from the
+//!   durable row and the resumed report promotes exactly once.
+//! - 13 promotion atomicity: the report row update and
+//!   `promote_key_package_lifecycle` commit in one `transact`, so no cut
+//!   exposes a mixed old/new `current` — pinned by the `key_package`
+//!   observer projection at every boundary.
+//! - 14 consumed-not-replaced: cuts after a Welcome join commit is
+//!   durable but before the next `Tick` staged the replacement — the
+//!   reopened session re-reads the `last_consumed_key_package_ref`
+//!   marker and the resumed `Tick` stages the same-slot replacement.
+//! - 18 sign-out withdrawal: cuts inside the `sign_out` batch — the
+//!   kind-5 staging, the deletion of every `KeyPackage` bundle and the
+//!   `slot_withdrawn_at` write commit in one `transact`, so a reopen
+//!   either keeps the whole live slot or the fully withdrawn one; a cut
+//!   after the batch still owes the same signed kind-5 from the durable
+//!   outbound row.
+//! - 15 self-update jitter: the `Tick` entering `Jitter` persists
+//!   `not_before` — a cut either side of that batch reopens to the same
+//!   deadline; the sampled jitter is never resampled.
+//! - 16 self-update published-not-confirmed: cuts after the self-update
+//!   fanout's publish batches but before the confirm is observed reopen
+//!   to the open `PendingPublication` obligation; the identical durable
+//!   commit confirms and the obligation completes exactly once —
+//!   authored-event equality pins that no second self-update Commit was
+//!   authored.
 //!
 //! mdk#3524 (fixed by mdk#3531, v0.18.0): at the leaving-flow cuts where
 //! the step-down's staging is durable but its fanout is not, the reopened
@@ -141,7 +176,7 @@ mod crash {
     /// One driver action. Member indices are stable labels.
     #[derive(Clone, Debug)]
     enum Step {
-        /// `publish_key_package` — one staging call; `Flush` publishes.
+        /// `ensure_key_package` — one staging call; `Flush` publishes.
         KeyPackage(usize),
         /// `publish_inbox_relays` — one staging call; `Flush` publishes.
         InboxRelays(usize),
@@ -153,6 +188,14 @@ mod crash {
         Remove(usize, usize),
         /// `leave()`.
         Leave(usize),
+        /// `sign_out(write_relays)` — one atomic withdrawal; `Flush`
+        /// publishes the kind-5.
+        SignOut(usize),
+        /// `history_fetched(group)` — records the post-join fetch's EOSE.
+        HistoryFetched(usize),
+        /// Advance the injected clock by `ms` — no session call, so it
+        /// emits no cuttable batch.
+        Advance(usize, u64),
         /// `self_update()`.
         SelfUpdate(usize),
         /// `update_group_profile(name, description)`.
@@ -228,6 +271,11 @@ mod crash {
         /// No outstanding obligations (`awaiting_durability` and
         /// `take_outbound` both empty).
         obligations_clear: bool,
+        /// `key_package_status` projection — `(current.is_some(),
+        /// pending, retained)`; `None` when the lifecycle row is
+        /// unreadable. Event ids are not comparable across runs, only
+        /// the lifecycle shape is.
+        key_package: Option<(bool, bool, u32)>,
     }
 
     #[derive(PartialEq, Debug)]
@@ -265,6 +313,7 @@ mod crash {
             mk_core::OutboundPurpose::Commit => "commit",
             mk_core::OutboundPurpose::Welcome => "welcome",
             mk_core::OutboundPurpose::KeyPackage => "key-package",
+            mk_core::OutboundPurpose::KeyPackageRepublish => "key-package-republish",
             mk_core::OutboundPurpose::InboxRelays => "inbox-relays",
             _ => "other",
         }
@@ -549,6 +598,9 @@ mod crash {
                 | Step::Invite(m, ..)
                 | Step::Remove(m, ..)
                 | Step::Leave(m)
+                | Step::SignOut(m)
+                | Step::HistoryFetched(m)
+                | Step::Advance(m, _)
                 | Step::SelfUpdate(m)
                 | Step::UpdateProfile(m, ..)
                 | Step::Send(m, ..)
@@ -562,7 +614,7 @@ mod crash {
                 Step::KeyPackage(m) => {
                     self.world.members[m]
                         .session
-                        .publish_key_package(&[RELAY.to_owned()])
+                        .ensure_key_package(&[RELAY.to_owned()])
                         .await
                         .expect("key package");
                     self.drain(m);
@@ -673,6 +725,29 @@ mod crash {
                         .expect("leave");
                     self.drain(m);
                     self.probe(m);
+                }
+                Step::SignOut(m) => {
+                    self.world.members[m]
+                        .session
+                        .sign_out(&[RELAY.to_owned()])
+                        .await
+                        .expect("sign_out");
+                    self.drain(m);
+                    self.probe(m);
+                }
+                Step::HistoryFetched(m) => {
+                    let Some(gid) = self.gid_for(m) else {
+                        return;
+                    };
+                    self.world.members[m]
+                        .session
+                        .history_fetched(&gid)
+                        .expect("history_fetched");
+                    self.drain(m);
+                    self.probe(m);
+                }
+                Step::Advance(m, ms) => {
+                    self.world.members[m].clock.advance(ms);
                 }
                 Step::SelfUpdate(m) => {
                     let Some(gid) = self.gid_for(m) else {
@@ -831,6 +906,11 @@ mod crash {
                         .take_outbound()
                         .expect("take_outbound")
                         .is_empty();
+                let key_package = member
+                    .session
+                    .key_package_status()
+                    .ok()
+                    .map(|status| (status.current.is_some(), status.pending, status.retained));
                 members.push(MemberObs {
                     groups,
                     net_payloads,
@@ -839,6 +919,7 @@ mod crash {
                         .map(|(kind, name, recipient)| (*kind, *name, account_index(recipient)))
                         .collect(),
                     obligations_clear,
+                    key_package,
                 });
             }
             Observed {
@@ -924,6 +1005,19 @@ mod crash {
         for member in &runner.world.members {
             mk_core::testing::check_message_index(&member.host.durable_rows())
                 .expect("message index consistent at run end");
+            // C10's proof: an orphan bundle staged by a cut would go
+            // unseen — every reopen+settle must hold exactly
+            // `current + pending + retained` bundles.
+            if let Ok(status) = member.session.key_package_status() {
+                let expected = usize::from(status.current.is_some())
+                    + usize::from(status.pending)
+                    + status.retained as usize;
+                assert_eq!(
+                    mk_core::testing::key_package_bundle_count(&member.host.durable_rows()),
+                    expected,
+                    "bundles == current + pending + retained"
+                );
+            }
         }
         observed.batches = runner.world.members[measure]
             .host
@@ -956,10 +1050,11 @@ mod crash {
     /// state, not bytes").
     fn equivalent(a: &Observed, b: &Observed) -> bool {
         a.members.len() == b.members.len()
-            && a.members
-                .iter()
-                .zip(b.members.iter())
-                .all(|(a, b)| a.groups == b.groups && a.net_payloads == b.net_payloads)
+            && a.members.iter().zip(b.members.iter()).all(|(a, b)| {
+                a.groups == b.groups
+                    && a.net_payloads == b.net_payloads
+                    && a.key_package == b.key_package
+            })
     }
 
     /// Reference run once, then every `(k, variant)` cut of `cut_member`.
@@ -1148,6 +1243,90 @@ mod crash {
         matrix(FLOW, 2, 0, "publish-lifecycle").await;
     }
 
+    /// KeyPackage lifecycle cuts: both variants at every batch of the
+    /// invitee's `ensure` staging (C10), signed-outbound release (C11),
+    /// report/promotion transaction (C12, C13) and the post-consumption
+    /// `Tick` that stages the same-slot replacement (C14). The
+    /// `key_package` observer projection pins `current`/`pending`/
+    /// `retained` equality; authored-event equality pins C11's
+    /// byte-identical re-release.
+    #[tokio::test(flavor = "current_thread")]
+    async fn restart_boundaries_key_package_lifecycle() {
+        const FLOW: &[Step] = &[
+            Step::KeyPackage(0),
+            Step::Flush(0),
+            Step::InboxRelays(0),
+            Step::Flush(0),
+            Step::KeyPackage(1),
+            Step::InboxRelays(1),
+            Step::Flush(1),
+            Step::Create(1, "crash-key-package", &[0], &[]),
+            Step::Flush(1),
+            Step::Deliver(0),
+            Step::Tick(0),
+            Step::Flush(0),
+            Step::Deliver(1),
+            Step::Tick(1),
+        ];
+        matrix(FLOW, 2, 0, "key-package-lifecycle").await;
+    }
+
+    /// Sign-out withdrawal: cuts inside the atomic `sign_out` batch
+    /// (C18) — a reopen either keeps the whole live slot or the fully
+    /// withdrawn one, and a cut after the batch still owes the same
+    /// signed kind-5. The `key_package` projection `(current, pending,
+    /// retained)` and the bundle count pin both sides.
+    /// Self-update obligation cuts (C15/C16): the `Tick` entering `Jitter`
+    /// persists `not_before` — a cut either side of that batch reopens to
+    /// the same deadline (never resampled). Cuts after the self-update's
+    /// fanout publish but before its confirm reopen to the open
+    /// `PendingPublication` obligation; the identical durable commit
+    /// confirms and the obligation completes exactly once — authored-event
+    /// equality pins that no second self-update Commit was authored.
+    #[tokio::test(flavor = "current_thread")]
+    async fn restart_boundaries_sign_out() {
+        const FLOW: &[Step] = &[
+            Step::KeyPackage(0),
+            Step::Flush(0),
+            Step::SignOut(0),
+            Step::Flush(0),
+        ];
+        matrix(FLOW, 1, 0, "sign-out").await;
+    }
+
+    /// Post-join self-update cuts (C15/C16): the joiner's obligation
+    /// walks `CatchUp` → `Quiet` → `Jitter` (`Advance` past the quiet
+    /// window; the post-join sampled jitter is bounded by 30 s, so
+    /// `Advance(31_000)` always reaches `not_before`) → gate →
+    /// `PendingPublication` → publish → confirm → `Complete`. Both cut
+    /// variants at every batch.
+    #[tokio::test(flavor = "current_thread")]
+    async fn restart_boundaries_self_update() {
+        const FLOW: &[Step] = &[
+            Step::KeyPackage(0),
+            Step::Flush(0),
+            Step::InboxRelays(0),
+            Step::Flush(0),
+            Step::KeyPackage(1),
+            Step::Flush(1),
+            Step::InboxRelays(1),
+            Step::Flush(1),
+            Step::Create(0, "crash-self-update", &[1], &[]),
+            Step::Flush(0),
+            Step::Deliver(1),
+            Step::HistoryFetched(1),
+            Step::Advance(1, 61_000),
+            Step::Tick(1),
+            Step::Advance(1, 31_000),
+            Step::Tick(1),
+            Step::Flush(1),
+            Step::Deliver(1),
+            Step::Tick(1),
+            Step::Flush(1),
+        ];
+        matrix(FLOW, 2, 0, "self-update").await;
+    }
+
     /// Joiner-side cuts over the same flow — the multi-part apply of an
     /// incoming commit/welcome is observer-atomic from a durable prefix.
     /// Boundaries 3, 4, 7.
@@ -1332,7 +1511,7 @@ mod crash {
     async fn debug_batch_tables() {
         let mut a = open_member().await;
         a.session
-            .publish_key_package(&[RELAY.to_owned()])
+            .ensure_key_package(&[RELAY.to_owned()])
             .await
             .expect("key package");
         let mut reopened = reopen_member(&a).await;

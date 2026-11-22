@@ -422,6 +422,7 @@ async function run(): Promise<void> {
   const failures: string[] = [];
   let poolRef: Pool | undefined;
   let clientRef: MarmotClient | undefined;
+  let client2Ref: MarmotClient | undefined;
   try {
     const rigBase = { home, socket };
     await waitFor(
@@ -487,6 +488,7 @@ async function run(): Promise<void> {
       },
       timer,
       relays: nostrRelayPort(pool),
+      lookupRelays: [url],
       allowLoopback: true,
     });
     clientRef = client;
@@ -524,7 +526,7 @@ async function run(): Promise<void> {
       secret,
     );
     await pool.publish([url], relayList);
-    await client.publishKeyPackage([url]);
+    await client.ensureKeyPackage();
     await client.publishInboxRelays([url]);
     await waitFor(
       () =>
@@ -544,6 +546,10 @@ async function run(): Promise<void> {
     const s1 = { wnGid: "", ourGid: "" };
 
     async function scenario(name: string, runScenario: () => Promise<void>): Promise<void> {
+      const only = process.env["WN_ONLY"];
+      if (only !== undefined && !name.includes(only)) {
+        return;
+      }
       const start = Date.now();
       try {
         await runScenario();
@@ -1365,6 +1371,236 @@ async function run(): Promise<void> {
       }, "our snapshot disbanded");
     });
 
+    // S17 — a second device of our account signs out: its SelfRemove
+    // commits, wn shows one leaf left, the signed-out device ends removed.
+    await scenario("S17 second device signs out", async () => {
+      const backend2: Backend = await releaseBackend();
+      const client2 = await MarmotClient.open({
+        backend: backend2,
+        kv: memoryKv(),
+        cursors: memoryCursorStore(),
+        signer,
+        clock: {
+          now: () => ({
+            unixMs: BigInt(Date.now()),
+            monotonicMs: BigInt(Math.max(0, Date.now() - startMonotonic)),
+          }),
+        },
+        timer,
+        relays: nostrRelayPort(pool),
+        lookupRelays: [url],
+        allowLoopback: true,
+      });
+      client2Ref = client2;
+      const invites2: InviteEvent[] = [];
+      const changes2: GroupEvent[] = [];
+      client2.onInvite((event) => {
+        invites2.push(event);
+      });
+      client2.onGroupChange((event) => {
+        changes2.push(event);
+      });
+      await client2.ensureKeyPackage();
+      await client2.publishInboxRelays([url]);
+      await waitFor(
+        () =>
+          served.relay
+            .events()
+            .filter((stored) => stored.kind === KEY_PACKAGE_KIND && stored.pubkey === signer.pubkey)
+            .length >= 2 || undefined,
+        "second device's KeyPackage on the relay",
+      );
+
+      let at = Date.now();
+      const created = await wn(rig, ["groups", "create", "m3b-17", ourNpub], rig.wnNpub);
+      const wnGid = wnGroupId(created);
+      const [gid1, gid2] = await Promise.all([
+        waitFor(
+          () =>
+            invites.flatMap((event) =>
+              event.type === "joined" && event.group === wnGid ? [event.group] : [],
+            )[0],
+          "device 1 onInvite joined",
+        ),
+        waitFor(
+          () =>
+            invites2.flatMap((event) =>
+              event.type === "joined" && event.group === wnGid ? [event.group] : [],
+            )[0],
+          "device 2 onInvite joined",
+        ),
+      ]);
+      if (gid1 !== wnGid || gid2 !== wnGid) {
+        throw new Error(`group id mismatch: device1 ${gid1} device2 ${gid2} wn ${wnGid}`);
+      }
+      log(`both devices joined ${wnGid} (${secs(at)})`);
+
+      at = Date.now();
+      // Removing device 2's leaf keeps the account a member through
+      // device 1's leaf: the commit surfaces as `epoch_changed`, not a
+      // member_left/member_removed account change.
+      const epochChangesBefore = groupChanges.filter(
+        (event) => event.group === wnGid && event.type === "epoch_changed",
+      ).length;
+      const report = await client2.signOut();
+      if (!report.left.includes(gid2)) {
+        throw new Error(`signOut left ${JSON.stringify(report.left)}, expected ${gid2}`);
+      }
+      await waitFor(async () => {
+        const reply = await wn(rig, ["groups", "members", wnGid], rig.wnNpub);
+        const leaves = ptrArr(reply, "/result/members").filter((item) => {
+          const text = JSON.stringify(item);
+          return text.includes(ourNpub) || text.includes(signer.pubkey);
+        });
+        return leaves.length === 1 || undefined;
+      }, "wn members shows one leaf for our account");
+      await waitFor(
+        () =>
+          changes2.some(
+            (event) =>
+              event.group === gid2 && event.type === "local_copy_terminated" && event.voluntary,
+          ) || undefined,
+        "device 2 observes its own removal",
+      );
+      log(`device 2 signed out; wn keeps one leaf (${secs(at)})`);
+
+      // Device 1 applies wn's removal commit too: the shared leaf update
+      // surfaces as `epoch_changed`, not a member change for the account.
+      await waitFor(
+        () =>
+          groupChanges.filter((event) => event.group === gid1 && event.type === "epoch_changed")
+            .length > epochChangesBefore || undefined,
+        "device 1 applies the removal commit",
+      );
+    });
+
+    // S19 — our device consumed KeyPackage → rotation; wn re-invites.
+    await scenario("S19 consumed KeyPackage rotates; wn re-invites", async () => {
+      const [before] = served.relay
+        .events()
+        .filter((stored) => stored.kind === KEY_PACKAGE_KIND && stored.pubkey === signer.pubkey)
+        .toSorted((a, b) => b.created_at - a.created_at);
+      if (before === undefined) {
+        throw new Error("no KeyPackage on the relay");
+      }
+      const dTag = before.tags.find((tag) => tag[0] === "d")?.[1] ?? "";
+      const iTag = before.tags.find((tag) => tag[0] === "i")?.[1];
+
+      // Consume the publication heading the slot: wn invites us into a
+      // fresh group, which marks the current bundle consumed.
+      let at = Date.now();
+      const createdA = await wn(rig, ["groups", "create", "m3b-19a", ourNpub], rig.wnNpub);
+      const wnGidA = wnGroupId(createdA);
+      const gidA = await waitFor(
+        () =>
+          invites.flatMap((event) =>
+            event.type === "joined" && event.group === wnGidA ? [event.group] : [],
+          )[0],
+        "our onInvite joined (s19 consumer group)",
+      );
+      if (gidA !== wnGidA) {
+        throw new Error(`group id mismatch: ours ${gidA} wn ${wnGidA}`);
+      }
+      log(`joined ${gidA} — current KeyPackage consumed (${secs(at)})`);
+
+      // Within one driven pass the lifecycle stages and publishes a
+      // replacement to the same slot: same `d`, newer `created_at`,
+      // different `i`.
+      const rotated = await waitFor(async () => {
+        await client.ensureKeyPackage();
+        return (
+          served.relay
+            .events()
+            .filter(
+              (stored) =>
+                stored.kind === KEY_PACKAGE_KIND &&
+                stored.pubkey === signer.pubkey &&
+                (stored.tags.find((tag) => tag[0] === "d")?.[1] ?? "") === dTag &&
+                stored.created_at > before.created_at &&
+                (stored.tags.find((tag) => tag[0] === "i")?.[1] ?? undefined) !== iTag,
+            )
+            .toSorted((a, b) => b.created_at - a.created_at)[0] ?? undefined
+        );
+      }, "same-slot KeyPackage replacement on the relay");
+      log(`rotation: kind-30443 ${rotated.id} in slot ${dTag} (${secs(at)})`);
+
+      // wn's invite must select the replacement heading the slot.
+      at = Date.now();
+      const created = await wn(rig, ["groups", "create", "m3b-19", ourNpub], rig.wnNpub);
+      const wnGid = wnGroupId(created);
+      const ourGid = await waitFor(
+        () =>
+          invites.flatMap((event) =>
+            event.type === "joined" && event.group === wnGid ? [event.group] : [],
+          )[0],
+        "our onInvite joined (second group)",
+      );
+      if (ourGid !== wnGid) {
+        throw new Error(`group id mismatch: ours ${ourGid} wn ${wnGid}`);
+      }
+      log(`joined ${ourGid} on the rotated KeyPackage (${secs(at)})`);
+
+      const wnText = `s19-wn-${Math.floor(Date.now() / 1000)}`;
+      await wn(rig, ["messages", "send", wnGid, wnText], rig.wnNpub);
+      await waitFor(
+        () =>
+          received.some((entry) => entry.group === ourGid && entry.message.content === wnText) ||
+          undefined,
+        `we receive wn message ${wnText}`,
+      );
+      const ourText = `s19-us-${Math.floor(Date.now() / 1000)}`;
+      await client.sendMessage(ourGid, { kind: CHAT_KIND, tags: [], content: ourText });
+      await waitFor(async () => {
+        const entries = await wnMessages(rig, wnGid);
+        return entries.some((entry) => entry.includes(ourText)) || undefined;
+      }, `wn messages list shows ${ourText}`);
+    });
+
+    // S21 — post-join self-update: the Pump reports history_fetched at
+    // EOSE; quiet + jitter gate one commit wn accepts both ways.
+    await scenario("S21 post-join self-update", async () => {
+      let at = Date.now();
+      const created = await wn(rig, ["groups", "create", "m3b-21", ourNpub], rig.wnNpub);
+      const wnGid = wnGroupId(created);
+      const ourGid = await waitFor(
+        () =>
+          invites.flatMap((event) =>
+            event.type === "joined" && event.group === wnGid ? [event.group] : [],
+          )[0],
+        "our onInvite joined (s21 group)",
+      );
+      if (ourGid !== wnGid) {
+        throw new Error(`group id mismatch: ours ${ourGid} wn ${wnGid}`);
+      }
+      log(`joined ${ourGid}; waiting for the maintenance self-update (${secs(at)})`);
+
+      at = Date.now();
+      await waitFor(
+        () =>
+          groupChanges.flatMap((event) =>
+            event.type === "self_updated" && event.group === ourGid ? [event] : [],
+          )[0] ?? undefined,
+        "self_updated group-change event",
+        240_000,
+      );
+      log(`self_updated for ${ourGid} (${secs(at)})`);
+
+      const wnText = `s21-wn-${Math.floor(Date.now() / 1000)}`;
+      await wn(rig, ["messages", "send", wnGid, wnText], rig.wnNpub);
+      await waitFor(
+        () =>
+          received.some((entry) => entry.group === ourGid && entry.message.content === wnText) ||
+          undefined,
+        `we receive wn message ${wnText}`,
+      );
+      const ourText = `s21-us-${Math.floor(Date.now() / 1000)}`;
+      await client.sendMessage(ourGid, { kind: CHAT_KIND, tags: [], content: ourText });
+      await waitFor(async () => {
+        const entries = await wnMessages(rig, wnGid);
+        return entries.some((entry) => entry.includes(ourText)) || undefined;
+      }, `wn messages list shows ${ourText}`);
+    });
+
     log(`NIP-11 documents served: ${served.documentsServed()}`);
     if (RELAY_SHAPE === "nip11" && served.documentsServed() === 0) {
       failures.push("relay shape: wnd never asked for the NIP-11 document");
@@ -1380,6 +1616,11 @@ async function run(): Promise<void> {
       throw new Error(`${failures.length} scenario(s) failed`);
     }
   } finally {
+    try {
+      await client2Ref?.close();
+    } catch (error) {
+      log(`client2 close error: ${error instanceof Error ? error.message : String(error)}`);
+    }
     try {
       await clientRef?.close();
     } catch (error) {

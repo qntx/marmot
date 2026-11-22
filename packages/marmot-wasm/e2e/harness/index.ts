@@ -443,7 +443,7 @@ const api: Harness = {
         allowLoopback: true,
       });
       // oxlint-disable-next-line no-await-in-loop
-      await receiver.publishKeyPackage([RELAY]);
+      await receiver.ensureKeyPackage([RELAY]);
       // oxlint-disable-next-line no-await-in-loop
       await publishAll(receiver, receiverPort);
       // oxlint-disable-next-line no-await-in-loop

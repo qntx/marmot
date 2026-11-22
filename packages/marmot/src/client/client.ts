@@ -23,6 +23,8 @@ import type {
   GroupAvatar,
   GroupSnapshot,
   Invitee,
+  KeyPackageStatusResult,
+  SignOutResult,
   MediaReference,
   SendOutcome,
   SentMessage,
@@ -50,6 +52,11 @@ export type MarmotClientOptions = {
   clock: Clock;
   timer: Timer;
   relays: RelayPort;
+  /**
+   * Read relays used to fetch this account's NIP-65 list for `ensureKeyPackage`. When non-empty,
+   * `open` runs `ensureKeyPackage` once in the background (errors surface via `onError`).
+   */
+  lookupRelays?: string[];
   allowLoopback?: boolean;
 };
 
@@ -132,6 +139,20 @@ export class MarmotClient {
     }
     const client = new MarmotClient(options, engine, observed, state);
     client.pump.start();
+    if ((options.lookupRelays?.length ?? 0) > 0) {
+      void (async () => {
+        try {
+          await client.ensureKeyPackage();
+        } catch (error) {
+          // `no_relay_list` is expected before the account's kind-10002
+          // exists anywhere: the slot simply stays unstaged until a later
+          // explicit `ensureKeyPackage` with a write set.
+          if (!(error instanceof MarmotError && error.kind === "no_relay_list")) {
+            client.pump.emitError(toMarmotError(error, observed.take()));
+          }
+        }
+      })();
+    }
     return client;
   }
 
@@ -192,10 +213,16 @@ export class MarmotClient {
     });
   }
 
-  /** Publish the account KeyPackage to its NIP-65 write relays discovered via `lookupRelays`. */
-  async publishKeyPackage(lookupRelays: string[]): Promise<void> {
+  /**
+   * Drive the account `KeyPackage` slot's lifecycle: the NIP-65 write set is fetched from this
+   * account's newest kind-10002 on `options.lookupRelays`, then `ensure_key_package` runs inside
+   * the op queue. `no_relay_list` when the lookup relays are missing or the list is empty.
+   */
+  async ensureKeyPackage(): Promise<KeyPackageStatusResult> {
     this.guard();
-    const safe = lookupRelays.filter((relay) => safeRelayUrl(relay, this.allowLoopback));
+    const safe = (this.options.lookupRelays ?? []).filter((relay) =>
+      safeRelayUrl(relay, this.allowLoopback),
+    );
     let write: string[] | undefined;
     try {
       write = await writeRelaysOf(
@@ -211,9 +238,41 @@ export class MarmotClient {
     if (write === undefined || write.length === 0) {
       throw new MarmotError("no_relay_list");
     }
-    await this.op(async (engine) => {
-      await engine.publishKeyPackage(write);
-    });
+    return this.op(async (engine) => engine.ensureKeyPackage(write));
+  }
+
+  /**
+   * Sign this device out: withdraw the `KeyPackage` slot (kind-5 to the write set), leave every
+   * group this device is a non-admin member of and delete every `KeyPackage` bundle, in one durable
+   * transaction. `no_relay_list` when the lookup relays are missing or the list is empty. Admin
+   * groups this account alone administers stay in `keptAdminLeaves`.
+   */
+  async signOut(): Promise<SignOutResult> {
+    this.guard();
+    const safe = (this.options.lookupRelays ?? []).filter((relay) =>
+      safeRelayUrl(relay, this.allowLoopback),
+    );
+    let write: string[] | undefined;
+    try {
+      write = await writeRelaysOf(
+        this.options.relays,
+        this.options.timer,
+        this.account,
+        safe,
+        this.allowLoopback,
+      );
+    } catch (error) {
+      throw toMarmotError(error);
+    }
+    if (write === undefined || write.length === 0) {
+      throw new MarmotError("no_relay_list");
+    }
+    return this.op(async (engine) => engine.signOut(write));
+  }
+
+  /** The account `KeyPackage` slot's lifecycle standing. */
+  async keyPackageStatus(): Promise<KeyPackageStatusResult> {
+    return this.op(async (engine) => engine.keyPackageStatus());
   }
 
   /**
@@ -232,8 +291,12 @@ export class MarmotClient {
     this.pump.setInbox(relays);
   }
 
-  /** Resolve an account's published KeyPackages for inviting; non-found maps to a typed error. */
-  async lookupInvitees(pubkey: string, lookupRelays: string[]): Promise<Invitee[]> {
+  /**
+   * Resolve an account's published KeyPackages for inviting; non-found maps to a typed error.
+   * Selection runs against `group`'s invite requirements when given, creation requirements
+   * otherwise — relay I/O stays outside the pump while `select_key_packages` runs inside it.
+   */
+  async lookupInvitees(pubkey: string, lookupRelays: string[], group?: string): Promise<Invitee[]> {
     this.guard();
     const safe = lookupRelays.filter((relay) => safeRelayUrl(relay, this.allowLoopback));
     let lookup;
@@ -244,6 +307,8 @@ export class MarmotClient {
         pubkey,
         safe,
         this.allowLoopback,
+        async (events) =>
+          this.op(async (engine) => engine.selectKeyPackages(pubkey, events, group)),
       );
     } catch (error) {
       throw toMarmotError(error);

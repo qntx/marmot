@@ -16,6 +16,7 @@ import { safeRelayUrl } from "../transport/url.ts";
 const RELAY_LIST_KIND = 10002;
 const DM_RELAY_LIST_KIND = 10050;
 const KEY_PACKAGE_KIND = 30443;
+const DELETION_KIND = 5;
 
 /** Convert to the `@qntx/nostr` `Event` shape — only what its parsers consume. */
 function toNostrEvent(event: NostrEvent): Event {
@@ -118,9 +119,10 @@ export type InviteeLookup =
   | { type: "no_key_package" };
 
 /**
- * Resolve `pubkey`'s published KeyPackages for an invite: its NIP-65 write relays → the newest
- * kind-30443 per `d` slot → its NIP-17 inbox relays → one `Invitee` per slot. KeyPackage content
- * validation is the engine's.
+ * Resolve `pubkey`'s published KeyPackages for an invite: its NIP-65 write relays → its kind-30443
+ * publications and kind-5 deletion requests → `select` (the engine's D1 selection) → its NIP-17
+ * inbox relays → one `Invitee` per selected publication. An empty selection answers
+ * `no_key_package`.
  */
 export async function lookupInvitees(
   port: RelayPort,
@@ -128,40 +130,34 @@ export async function lookupInvitees(
   pubkey: string,
   lookupRelays: string[],
   allowLoopback: boolean,
+  select: (events: NostrEvent[]) => Promise<NostrEvent[]>,
 ): Promise<InviteeLookup> {
   const write = await writeRelaysOf(port, timer, pubkey, lookupRelays, allowLoopback);
   if (write === undefined || write.length === 0) {
     return { type: "no_relay_list" };
   }
-  const keyPackages = await fetchAuthored(
-    port,
-    timer,
-    pubkey,
-    KEY_PACKAGE_KIND,
-    write,
-    allowLoopback,
+  const [keyPackages, deletions] = await Promise.all([
+    fetchEvents(port, timer, write, { kinds: [KEY_PACKAGE_KIND], authors: [pubkey] }),
+    fetchEvents(port, timer, write, {
+      kinds: [DELETION_KIND],
+      authors: [pubkey],
+      "#k": [String(KEY_PACKAGE_KIND)],
+    }),
+  ]);
+  const fetched = [...keyPackages, ...deletions].filter(
+    (event) =>
+      event.pubkey === pubkey && (event.kind === KEY_PACKAGE_KIND || event.kind === DELETION_KIND),
   );
-  if (keyPackages.length === 0) {
+  const selected = await select(fetched);
+  if (selected.length === 0) {
     return { type: "no_key_package" };
   }
   const inboxRelays = await inboxRelaysOf(port, timer, pubkey, lookupRelays, allowLoopback);
   if (inboxRelays === undefined || inboxRelays.length === 0) {
     return { type: "no_inbox_relays" };
   }
-  const bySlot = new Map<string, NostrEvent>();
-  for (const event of keyPackages) {
-    const slot = event.tags.find((tag) => tag[0] === "d")?.[1] ?? "";
-    const current = bySlot.get(slot);
-    if (
-      current === undefined ||
-      event.createdAt > current.createdAt ||
-      (event.createdAt === current.createdAt && event.id < current.id)
-    ) {
-      bySlot.set(slot, event);
-    }
-  }
   return {
     type: "found",
-    invitees: [...bySlot.values()].map((keyPackage) => ({ keyPackage, inboxRelays })),
+    invitees: selected.map((keyPackage) => ({ keyPackage, inboxRelays })),
   };
 }

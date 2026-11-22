@@ -57,7 +57,7 @@ async function publish(engine: Engine, network: FakeRelayNetwork): Promise<void>
 }
 
 async function publishIdentity(engine: Engine, network: FakeRelayNetwork): Promise<void> {
-  await engine.publishKeyPackage([RELAY]);
+  await engine.ensureKeyPackage([RELAY]);
   await publish(engine, network);
   await engine.publishInboxRelays([RELAY]);
   await publish(engine, network);

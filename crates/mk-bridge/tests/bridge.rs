@@ -121,11 +121,15 @@ async fn every_request_variant() {
     );
     b.open().await;
     mark!(
-        "publish_key_package",
-        &a.call(Request::PublishKeyPackage(PublishKeyPackageRequest {
-            relays: vec![RELAY.to_owned()],
+        "ensure_key_package",
+        &a.call(Request::EnsureKeyPackage(EnsureKeyPackageRequest {
+            write_relays: vec![RELAY.to_owned()],
         }))
         .await,
+    );
+    mark!(
+        "key_package_status",
+        &a.call(Request::KeyPackageStatus(NoArgs {})).await,
     );
     mark!(
         "publish_inbox_relays",
@@ -362,6 +366,15 @@ async fn every_request_variant() {
         }))
         .await,
     );
+    mark!(
+        "select_key_packages",
+        &a.call(Request::SelectKeyPackages(SelectKeyPackagesRequest {
+            account: b.signer.account().0,
+            events: vec![key_package_of(&relay, &b.account_hex())],
+            group: Some(group.clone()),
+        }))
+        .await,
+    );
     // Protocol-v4 app surface requests against the live group.
     mark!(
         "send_intent",
@@ -410,6 +423,22 @@ async fn every_request_variant() {
             group: group.clone()
         }))
         .await
+    );
+    // `history_fetched` after `leave` reports the group no longer live.
+    mark!(
+        "history_fetched",
+        &b.call(Request::HistoryFetched(HistoryFetchedRequest {
+            group: group.clone()
+        }))
+        .await,
+    );
+    // `sign_out` after `leave` reports the group already left.
+    mark!(
+        "sign_out",
+        &b.call(Request::SignOut(SignOutRequest {
+            write_relays: vec![RELAY.to_owned()]
+        }))
+        .await,
     );
     // `signer_reply` while Ready is a typed protocol error.
     mark!(
@@ -776,8 +805,11 @@ async fn durability_gate() {
         .last()
         .map(|b| b.seq.get())
         .unwrap_or(0);
-    let response = a.call_once(Request::PublishKeyPackage(PublishKeyPackageRequest {
-        relays: vec![RELAY.to_owned()],
+    // Past the weekly refresh the slot wants a replacement: the ensure
+    // suspends on the signer like the publish request it replaced.
+    a.advance(8 * 86_400_000);
+    let response = a.call_once(Request::EnsureKeyPackage(EnsureKeyPackageRequest {
+        write_relays: vec![RELAY.to_owned()],
     }));
     let Response::SignerPending { requests } = &response else {
         panic!("key package signs: {response:?}");
@@ -858,11 +890,11 @@ async fn signer_refusal() {
     ] {
         let mut a = Member::new();
         a.open().await;
-        let response = a.call_once(Request::PublishKeyPackage(PublishKeyPackageRequest {
-            relays: vec![RELAY.to_owned()],
+        let response = a.call_once(Request::EnsureKeyPackage(EnsureKeyPackageRequest {
+            write_relays: vec![RELAY.to_owned()],
         }));
         let Response::SignerPending { requests } = response else {
-            panic!("publish_key_package suspends: {response:?}")
+            panic!("ensure_key_package suspends: {response:?}")
         };
         let replies = requests
             .iter()
@@ -1318,12 +1350,12 @@ async fn protocol_errors() {
     assert_eq!(error_kind(&response), "invalid_request");
 
     // Busy: suspend on a signer op, then any other request answers busy.
-    let response = busy.call_once(Request::PublishKeyPackage(PublishKeyPackageRequest {
-        relays: vec![RELAY.to_owned()],
+    let response = busy.call_once(Request::EnsureKeyPackage(EnsureKeyPackageRequest {
+        write_relays: vec![RELAY.to_owned()],
     }));
     assert!(
         matches!(response, Response::SignerPending { .. }),
-        "publish_key_package suspends"
+        "ensure_key_package suspends"
     );
     let response = busy.call_once(Request::Groups(NoArgs {}));
     assert_eq!(error_kind(&response), "busy");
@@ -2358,4 +2390,172 @@ async fn bridge_debug_redacts_pending_data() {
     assert!(matches!(sealed, Response::Ok { .. }), "seal: {sealed:?}");
     let debug = format!("{:?}", a.bridge);
     assert!(!debug.contains("debug-leak-probe"), "{debug}");
+}
+
+/// `select_key_packages` end to end: the host fetches the invitee's
+/// kind-30443 publications and kind-5 deletion requests, the session
+/// selects — under creation requirements with `group: null` and under a
+/// real group's invite requirements.
+#[tokio::test]
+async fn select_key_packages_over_the_wire() {
+    let mut relay = FakeRelay::new();
+    let mut a = Member::new();
+    a.open().await;
+    let mut b = Member::new();
+    b.open().await;
+    b.publish_identity(&mut relay).await;
+
+    let account = hex_to_32(&b.account_hex());
+    let fetched = relay.fetch(|event| event.kind == 30_443 && event.pubkey == account);
+    assert_eq!(fetched.len(), 1, "one publication on the relay");
+
+    let response = a
+        .call(Request::SelectKeyPackages(SelectKeyPackagesRequest {
+            account,
+            events: fetched.clone(),
+            group: None,
+        }))
+        .await;
+    let OpResult::KeyPackages(selected) = ok_result(response) else {
+        panic!("key_packages")
+    };
+    assert_eq!(selected.events, fetched);
+
+    // A group's invite requirements accept the same publication.
+    let response = a
+        .call(Request::CreateGroup(CreateGroupRequest {
+            name: "sel".to_owned(),
+            description: String::new(),
+            relays: vec![RELAY.to_owned()],
+            invitees: Vec::new(),
+            admins: Vec::new(),
+            components: Vec::new(),
+        }))
+        .await;
+    let OpResult::GroupCreated(created) = ok_result(response) else {
+        panic!("create_group")
+    };
+    let response = a
+        .call(Request::SelectKeyPackages(SelectKeyPackagesRequest {
+            account,
+            events: fetched.clone(),
+            group: Some(created.group.id.clone()),
+        }))
+        .await;
+    let OpResult::KeyPackages(selected) = ok_result(response) else {
+        panic!("key_packages")
+    };
+    assert_eq!(selected.events, fetched);
+
+    // A kind-5 deletion by B covering the slot empties the selection.
+    let slot = fetched[0]
+        .tags
+        .iter()
+        .find(|tag| tag.first().map(String::as_str) == Some("d"))
+        .and_then(|tag| tag.get(1))
+        .expect("d tag")
+        .clone();
+    let deletion: Event = b
+        .signer
+        .sign_event(
+            UnsignedEvent {
+                pubkey: account,
+                created_at: 1_700_000_000,
+                kind: 5,
+                tags: vec![vec![
+                    "a".to_owned(),
+                    format!("30443:{}:{slot}", b.account_hex()),
+                ]],
+                content: String::new(),
+            }
+            .into(),
+        )
+        .await
+        .expect("sign deletion")
+        .into();
+    let mut events = fetched;
+    events.push(deletion);
+    let response = a
+        .call(Request::SelectKeyPackages(SelectKeyPackagesRequest {
+            account,
+            events,
+            group: None,
+        }))
+        .await;
+    let OpResult::KeyPackages(selected) = ok_result(response) else {
+        panic!("key_packages")
+    };
+    assert!(selected.events.is_empty(), "covered slot selects nothing");
+}
+
+/// `sign_out` returns the group lists, queues exactly one kind-5 outbound
+/// and leaves the session answering `signed_out` to a later ensure.
+#[tokio::test(flavor = "current_thread")]
+async fn sign_out_withdraws_the_slot() {
+    let mut relay = FakeRelay::new();
+    let mut a = Member::new();
+    a.open().await;
+    a.publish_identity(&mut relay).await;
+
+    let response = a
+        .call(Request::SignOut(SignOutRequest {
+            write_relays: vec![RELAY.to_owned()],
+        }))
+        .await;
+    let OpResult::SignOut(sign_out) = ok_result(response) else {
+        panic!("sign_out")
+    };
+    assert!(sign_out.left.is_empty() && sign_out.kept_admin_leaves.is_empty());
+    a.ack_all().await;
+    let Response::Ok { result } = a.call(Request::TakeOutbound(NoArgs {})).await else {
+        panic!("take_outbound")
+    };
+    let OpResult::Outbound(OutboundResult { items }) = *result else {
+        panic!("outbound")
+    };
+    assert_eq!(items.len(), 1, "only the kind-5 is queued: {items:?}");
+    let deletion = &items[0];
+    assert_eq!(deletion.purpose, OutboundPurpose::KeyPackageDeletion);
+    assert_eq!(deletion.event.kind, 5);
+    let a_tags = deletion
+        .event
+        .tags
+        .iter()
+        .filter(|tag| tag.first().map(String::as_str) == Some("a"))
+        .count();
+    assert_eq!(a_tags, 1, "one a tag names the slot");
+    let k_tags: Vec<_> = deletion
+        .event
+        .tags
+        .iter()
+        .filter(|tag| tag.first().map(String::as_str) == Some("k"))
+        .collect();
+    assert_eq!(k_tags.len(), 1, "one k tag");
+    assert_eq!(k_tags[0].get(1).map(String::as_str), Some("30443"));
+
+    // A withdrawn slot refuses new publications.
+    let response = a
+        .call(Request::EnsureKeyPackage(EnsureKeyPackageRequest {
+            write_relays: vec![RELAY.to_owned()],
+        }))
+        .await;
+    assert_eq!(error_kind(&response), "signed_out");
+
+    // A repeat sign-out stages no second kind-5.
+    let response = a
+        .call(Request::SignOut(SignOutRequest {
+            write_relays: vec![RELAY.to_owned()],
+        }))
+        .await;
+    let OpResult::SignOut(again) = ok_result(response) else {
+        panic!("idempotent sign_out")
+    };
+    assert_eq!(again.left, Vec::<Vec<u8>>::new());
+    let Response::Ok { result } = a.call(Request::TakeOutbound(NoArgs {})).await else {
+        panic!("take_outbound")
+    };
+    let OpResult::Outbound(OutboundResult { items }) = *result else {
+        panic!("outbound")
+    };
+    assert!(items.is_empty(), "nothing new is staged: {items:?}");
 }

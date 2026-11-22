@@ -71,9 +71,10 @@ use cgka_traits::engine::{
 use cgka_traits::engine_state::EpochState;
 use cgka_traits::error::EngineError;
 use cgka_traits::group::ProtocolProfile;
+use cgka_traits::maintenance::KeyPackageLifecycleState;
 use cgka_traits::storage::{
-    AccountDeviceSignerBinding, AccountDeviceSignerStorage, DisbandRequestStatus, MessageStorage,
-    OutboundFanoutStorage,
+    AccountDeviceSignerBinding, AccountDeviceSignerStorage, DisbandRequestStatus,
+    MaintenanceStorage, MessageStorage, OutboundFanoutStorage,
 };
 use cgka_traits::transport_adapter::{
     FanoutPendingKind, FanoutTargetStatus, OutboundApplicationMessage, OutboundFanout,
@@ -81,7 +82,8 @@ use cgka_traits::transport_adapter::{
     TransportEndpointFailureKind, TransportPublishRequest, TransportPublishTarget,
 };
 use cgka_traits::{
-    CgkaEngine, GroupId as EngineGroupId, MemberId, MessageId, TransportEnvelope, TransportMessage,
+    CgkaEngine, GroupId as EngineGroupId, MemberId, MessageId, Timestamp, TransportEnvelope,
+    TransportMessage,
 };
 use sha2::Digest as _;
 use thiserror::Error;
@@ -92,7 +94,8 @@ use crate::agent_stream::{AgentStreamPolicy, StreamRoles};
 use crate::clock::{Clock, EngineConvergenceClock, EngineMaintenanceRandom, EngineWallClock, Time};
 use crate::delivered::{self, ExpiryHeap, HeldModifier, HeldQueue};
 use crate::events::{InputOutcome, InputReport, SessionEvent, input_outcome, session_event};
-use crate::key_package::{self, KeyPackageInfo, is_valid_client_name};
+use crate::key_package::{self, is_valid_client_name};
+use crate::key_package_lifecycle::{self, ReportFold, SignMode};
 use crate::kv::{CommitSeq, KvHost};
 use crate::media::{
     self, EncryptedMediaPolicy, Locator, MediaError, MediaReference, validate_locator,
@@ -244,7 +247,7 @@ pub struct PendingProof {
     signer: Arc<dyn AccountSigner>,
     clock: Arc<dyn Clock>,
     destination_policy: DestinationPolicy,
-    client_name: Option<String>,
+    pub(crate) client_name: Option<String>,
 }
 
 impl std::fmt::Debug for PendingProof {
@@ -352,6 +355,7 @@ impl PendingProof {
             handed: HashSet::new(),
             held: HashMap::new(),
             resolutions: Vec::new(),
+            key_package_sign_retry_ms: None,
             held_modifiers: HashMap::new(),
             tick_events: Vec::new(),
             expiry_heap: None,
@@ -441,6 +445,26 @@ fn open_session(mut session: Session) -> Result<Session, &'static str> {
         .engine
         .hydrate_all_stored_groups()
         .map_err(|error| error.privacy_safe_kind())?;
+    // D3: this device's stable `KeyPackage` slot lives in the lifecycle
+    // record, allocated once at open. An empty `stable_slot_id` is the
+    // engine's join-time sentinel — a fresh random slot replaces it.
+    let lifecycle = session
+        .provider
+        .key_package_lifecycle()
+        .map_err(|_| "lifecycle read")?;
+    if lifecycle
+        .as_ref()
+        .is_none_or(|lc| lc.stable_slot_id.is_empty())
+    {
+        let mut slot = [0u8; 32];
+        getrandom::fill(&mut slot).map_err(|_| "session rng")?;
+        let seeded = KeyPackageLifecycleState::slot_only(hex::encode(slot));
+        session
+            .provider
+            .store()
+            .transact(|| session.provider.put_key_package_lifecycle(&seeded))
+            .map_err(|_| "lifecycle write")?;
+    }
     Ok(session)
 }
 
@@ -498,6 +522,9 @@ pub enum SessionError {
     /// A leave was already requested for this group.
     #[error("leave already requested")]
     LeaveAlreadyRequested,
+    /// The `KeyPackage` slot was withdrawn by [`Session::sign_out`].
+    #[error("key package slot signed out")]
+    SignedOut,
     /// A member's advertised capabilities do not cover the group's required
     /// set.
     #[error("missing required capabilities")]
@@ -567,7 +594,7 @@ pub enum SessionError {
     Media(#[from] MediaError),
 }
 
-fn session_engine_error(error: EngineError) -> SessionError {
+pub(crate) fn session_engine_error(error: EngineError) -> SessionError {
     match error {
         EngineError::UnknownGroup(_) | EngineError::GroupNotHydrated(_) => {
             SessionError::UnknownGroup
@@ -867,17 +894,17 @@ pub struct GroupAvatar {
 /// `with_read_snapshot` scopes consistent.
 pub struct Session {
     pub(crate) provider: KvStorageProvider,
-    engine: Engine<KvStorageProvider>,
+    pub(crate) engine: Engine<KvStorageProvider>,
     signer: Arc<dyn AccountSigner>,
     clock: Arc<dyn Clock>,
     destination_policy: DestinationPolicy,
-    client_name: Option<String>,
+    pub(crate) client_name: Option<String>,
     /// Cumulative durable watermark reported by the host.
     acked: CommitSeq,
     /// Outbound id -> seq of the batch that made it releasable.
-    gate: BTreeMap<OutboundId, CommitSeq>,
+    pub(crate) gate: BTreeMap<OutboundId, CommitSeq>,
     /// Items handed out this incarnation and not yet reported.
-    handed: HashSet<OutboundId>,
+    pub(crate) handed: HashSet<OutboundId>,
     /// The in-memory fanout that marked each in-flight fanout's current
     /// attempts (mdk#2332). Only it can report those attempts as unexposed:
     /// a fanout value loaded from storage holds no attempt marks, so results
@@ -886,9 +913,12 @@ pub struct Session {
     /// when the fanout leaves storage or the stored record moves ahead of it
     /// (for example after a restart, where every interrupted attempt counts
     /// as exposed — the intended semantics).
-    held: HashMap<OutboundId, OutboundFanout>,
+    pub(crate) held: HashMap<OutboundId, OutboundFanout>,
     /// Publish resolutions produced since the last `drain_events`.
-    resolutions: Vec<SessionEvent>,
+    pub(crate) resolutions: Vec<SessionEvent>,
+    /// In-memory retry arm after a swallowed signer failure on the
+    /// `KeyPackage` lifecycle path (no durable row for a transient refusal).
+    pub(crate) key_package_sign_retry_ms: Option<u64>,
     /// The signer-refusal latch shared with the engine's `SignerAdapter`:
     /// armed around each kind-1059 ingest so a refused/failed unwrap can
     /// roll the span back instead of poisoning it as a permanent rejection.
@@ -991,6 +1021,7 @@ impl Session {
                 handed: HashSet::new(),
                 held: HashMap::new(),
                 resolutions: Vec::new(),
+                key_package_sign_retry_ms: None,
                 held_modifiers: HashMap::new(),
                 tick_events: Vec::new(),
                 expiry_heap: None,
@@ -1270,6 +1301,8 @@ impl Session {
             relays,
             purpose: match publication.purpose {
                 SessionPubPurpose::KeyPackage => OutboundPurpose::KeyPackage,
+                SessionPubPurpose::KeyPackageRepublish => OutboundPurpose::KeyPackageRepublish,
+                SessionPubPurpose::KeyPackageDeletion => OutboundPurpose::KeyPackageDeletion,
                 SessionPubPurpose::InboxRelays => OutboundPurpose::InboxRelays,
             },
         });
@@ -1301,10 +1334,7 @@ impl Session {
         results: &[RelayResult],
     ) -> Result<PublishResolution, SessionError> {
         self.handed.remove(id);
-        if let Some(resolution) = self
-            .report_session_publication(id, results)
-            .map_err(SessionError::Storage)?
-        {
+        if let Some(resolution) = self.report_session_publication(id, results)? {
             self.resolutions.push(SessionEvent::PublishResolved {
                 outbound: *id,
                 resolution,
@@ -1336,11 +1366,19 @@ impl Session {
         Ok(resolution)
     }
 
+    /// Update a session-owned publication's per-relay verdicts. When the
+    /// row belongs to the `KeyPackage` lifecycle — the pending
+    /// replacement's signed event, the current event, or a retained one —
+    /// the lifecycle record folds the same verdicts in the SAME
+    /// transaction: a first `Accepted` on the pending's row promotes it
+    /// atomically with the row update (C12/C13); a verdict on the
+    /// current event's row marks its `publication_targets`; a row for a
+    /// superseded event updates alone.
     fn report_session_publication(
-        &self,
+        &mut self,
         id: &OutboundId,
         results: &[RelayResult],
-    ) -> Result<Option<PublishResolution>, StorageError> {
+    ) -> Result<Option<PublishResolution>, SessionError> {
         let Some(mut publication) = self.provider.session_publication(id)? else {
             return Ok(None);
         };
@@ -1373,27 +1411,58 @@ impl Session {
             .any(|result| result.status == RelayStatus::Accepted);
         let retryable = results.iter().any(|result| retryable_status(result.status));
         let now_ms = self.now_ms();
-        self.provider
-            .store()
-            .transact(|| -> Result<(), StorageError> {
-                if complete {
-                    self.provider.delete_session_publication(id)?;
-                    self.provider.delete_outbound_retry(id)?;
-                    return Ok(());
-                }
+        let now_secs = now_ms / 1_000;
+        // The record is re-read at every report: the engine's join
+        // transaction writes the consumed marker into it.
+        let mut lifecycle = self.provider.key_package_lifecycle()?;
+        let fold = lifecycle.as_mut().map_or(Ok(ReportFold::RowOnly), |lc| {
+            key_package_lifecycle::note_report(lc, &publication, results, now_secs)
+        })?;
+        let store = self.provider.store().clone();
+        let rotated = store.transact(|| -> Result<bool, SessionError> {
+            if complete {
+                self.provider.delete_session_publication(id)?;
+                self.provider.delete_outbound_retry(id)?;
+            } else {
                 self.provider.put_session_publication(&publication)?;
-                if accepted {
-                    // One accepted target resets the backoff.
-                    self.provider.delete_outbound_retry(id)?;
-                } else if retryable {
-                    self.provider.record_outbound_failure(id, now_ms)?;
+                self.update_outbound_retry(id, accepted, retryable, now_ms)?;
+            }
+            match (fold, lifecycle.as_mut()) {
+                (ReportFold::Promote, Some(lc)) => {
+                    key_package_lifecycle::promote_pending(&mut self.engine, lc, now_secs)
                 }
-                Ok(())
-            })?;
+                (ReportFold::Updated, Some(lc)) => {
+                    self.provider.put_key_package_lifecycle(lc)?;
+                    Ok(false)
+                }
+                _ => Ok(false),
+            }
+        })?;
+        if rotated {
+            self.resolutions.push(SessionEvent::KeyPackageRotated);
+        }
         if complete {
             return Ok(Some(PublishResolution::Complete));
         }
         Ok(Some(PublishResolution::Pending))
+    }
+
+    /// One resolved report's effect on the publish-retry row: an
+    /// accepted target resets the backoff, a retryable one counts a
+    /// failure.
+    fn update_outbound_retry(
+        &self,
+        id: &OutboundId,
+        accepted: bool,
+        retryable: bool,
+        now_ms: u64,
+    ) -> Result<(), SessionError> {
+        if accepted {
+            self.provider.delete_outbound_retry(id)?;
+        } else if retryable {
+            self.provider.record_outbound_failure(id, now_ms)?;
+        }
+        Ok(())
     }
 
     async fn report_fanout(
@@ -1603,40 +1672,6 @@ impl Session {
 
     // ---- account publications ----
 
-    /// Build, sign and stage the account's kind-30443 `KeyPackage`
-    /// publication. Returns the parsed info of the published package.
-    ///
-    /// # Errors
-    /// [`SessionError`] for signer, engine or storage failures.
-    pub async fn publish_key_package(
-        &mut self,
-        relays: &[String],
-    ) -> Result<KeyPackageInfo, SessionError> {
-        self.check_relays(relays)?;
-        let key_package = self
-            .engine
-            .fresh_key_package()
-            .await
-            .map_err(session_engine_error)?;
-        let slot = self
-            .provider
-            .key_package_slot()
-            .map_err(SessionError::Storage)?;
-        let unsigned = key_package::key_package_event(
-            self.account(),
-            &key_package.bytes,
-            &hex::encode(slot),
-            self.client_name.as_deref(),
-            self.clock.now().unix_ms / 1_000,
-        )
-        .map_err(|_| SessionError::Internal("key package build"))?;
-        let signed = self.sign_checked(unsigned).await?;
-        let info = key_package::key_package_info(&signed)
-            .map_err(|_| SessionError::Internal("key package verify"))?;
-        self.stage_publication(&signed, relays, SessionPubPurpose::KeyPackage)?;
-        Ok(info)
-    }
-
     /// Build, sign and stage the account's kind-10050 inbox relay list.
     ///
     /// # Errors
@@ -1656,11 +1691,58 @@ impl Session {
         Ok(OutboundId(signed.id.0))
     }
 
+    /// D1 selection over one account's fetched kind-30443 `KeyPackage`
+    /// events and kind-5 deletion requests (`foundation/key-packages.md`,
+    /// "Selection and lifecycle"), ranked best-first. With `group`,
+    /// candidates are filtered against that group's invite requirements;
+    /// without one, against what `create_group` with no extra components
+    /// requires of an invitee — the Nostr routing component, whose data is
+    /// not decoded for requirements.
+    ///
+    /// # Errors
+    /// [`SessionError`] when the group's requirements cannot be read.
+    pub fn select_key_packages(
+        &self,
+        account: AccountId,
+        events: &[Event],
+        group: Option<&GroupId>,
+    ) -> Result<Vec<Event>, SessionError> {
+        let requirements = match group {
+            Some(group) => self
+                .engine
+                .invite_key_package_requirements(&engine_gid(group))
+                .map_err(session_engine_error)?,
+            None => self
+                .engine
+                .create_key_package_requirements(&CreateGroupRequest {
+                    name: String::new(),
+                    description: String::new(),
+                    members: Vec::new(),
+                    required_features: Vec::new(),
+                    app_components: vec![AppComponentData {
+                        component_id: NOSTR_ROUTING_COMPONENT_ID,
+                        data: Vec::new(),
+                    }],
+                    initial_admins: Vec::new(),
+                })
+                .map_err(session_engine_error)?,
+        };
+        Ok(key_package::select_key_packages_with(
+            account,
+            events,
+            self.now().unix_ms / 1_000,
+            Some(&requirements),
+        ))
+    }
+
     /// Sign `unsigned` through the account signer. Reply validation — right
     /// account, untouched commitment fields, committed id, verifying
     /// signature — lives in [`CheckedSigner`], installed once at
     /// [`Session::open`].
-    async fn sign_checked(&self, unsigned: UnsignedEvent) -> Result<Event, SessionError> {
+    pub(crate) async fn sign_checked(
+        &self,
+        unsigned: UnsignedEvent,
+    ) -> Result<Event, SessionError> {
         self.signer
             .sign_event(unsigned)
             .await
@@ -2230,7 +2312,7 @@ impl Session {
         Ok(SentMessage { outcome, message })
     }
 
-    fn finish_send(&mut self, result: SendResult) -> Result<SendOutcome, SessionError> {
+    pub(crate) fn finish_send(&mut self, result: SendResult) -> Result<SendOutcome, SessionError> {
         let queued = matches!(result, SendResult::Queued { .. });
         let leave = matches!(result, SendResult::LeaveRequested { .. });
         let disband = matches!(result, SendResult::DisbandRequested { .. });
@@ -2812,6 +2894,7 @@ impl Session {
     pub async fn ingest(&mut self, event: &Event) -> Result<InputReport, SessionError> {
         let outcome = self.ingest_verified(event).await?;
         self.drive().await?;
+        self.note_valid_state_bearing_inputs()?;
         Ok(InputReport {
             event: event.id,
             outcome,
@@ -2855,6 +2938,7 @@ impl Session {
             });
         }
         self.drive().await?;
+        self.note_valid_state_bearing_inputs()?;
         Ok(reports)
     }
 
@@ -3041,6 +3125,17 @@ impl Session {
         }
         // Fold each live, not-handed item's retry deadline into the wake.
         fold(self.retry_wake()?, &mut next);
+        // D3: the KeyPackage lifecycle driver runs relay-less here;
+        // signer failures are swallowed inside and re-armed in memory.
+        // Its earliest deadline is absolute — convert to a delay.
+        if let Some(due_ms) = self.drive_key_package(None, SignMode::Swallow).await? {
+            fold(Some(due_ms.saturating_sub(self.now_ms())), &mut next);
+        }
+        // D4: post-join and periodic self-update obligations; its answer
+        // is absolute like the lifecycle's.
+        if let Some(due_ms) = self.drive_self_update().await? {
+            fold(Some(due_ms.saturating_sub(self.now_ms())), &mut next);
+        }
         // Held modifiers past their window resolve finally and expired
         // index rows sweep (bounded), before `drive`: the produced events
         // surface on the next `drain_events` and the earliest hold/sweep
@@ -3088,19 +3183,39 @@ impl Session {
             .filter_map(|item| item.drop_pending.clone())
             .collect();
         let store = self.provider.store().clone();
-        let mut out = store
-            .transact(|| -> Result<Vec<SessionEvent>, StorageError> {
-                self.persist_media_secret_effects(&mapped)?;
-                self.provider.delete_pending_application_events(&dropped)?;
-                let mut out = Vec::new();
-                for item in mapped {
-                    self.process_mapped(item, now_ms, &mut out)?;
-                }
-                Ok(out)
-            })
-            .map_err(SessionError::Storage)?;
+        let mut out = store.transact(|| -> Result<Vec<SessionEvent>, SessionError> {
+            self.persist_media_secret_effects(&mapped)
+                .map_err(SessionError::Storage)?;
+            self.provider
+                .delete_pending_application_events(&dropped)
+                .map_err(SessionError::Storage)?;
+            self.process_mapped_events(mapped, now_ms)
+        })?;
         out.extend(std::mem::take(&mut self.tick_events));
         out.extend(std::mem::take(&mut self.resolutions));
+        Ok(out)
+    }
+
+    /// Apply every mapped engine event inside the caller's storage unit,
+    /// then reset or complete open self-update obligations for each
+    /// `EpochChanged` (D4).
+    fn process_mapped_events(
+        &mut self,
+        mapped: Vec<crate::events::MappedEvent>,
+        now_ms: u64,
+    ) -> Result<Vec<SessionEvent>, SessionError> {
+        let mut out = Vec::new();
+        let mut epoch_groups = Vec::new();
+        for item in mapped {
+            if let SessionEvent::EpochChanged { group, .. } = &item.event {
+                epoch_groups.push(group.clone());
+            }
+            self.process_mapped(item, now_ms, &mut out)
+                .map_err(SessionError::Storage)?;
+        }
+        for group in epoch_groups {
+            self.note_epoch_changed(&engine_gid(&group), Timestamp(now_ms / 1_000), &mut out)?;
+        }
         Ok(out)
     }
 
@@ -3406,7 +3521,7 @@ impl Session {
         }
     }
 
-    fn check_relays(&self, relays: &[String]) -> Result<(), SessionError> {
+    pub(crate) fn check_relays(&self, relays: &[String]) -> Result<(), SessionError> {
         if relays.is_empty() || !relays.iter().all(|relay| self.relay_allowed(relay)) {
             return Err(SessionError::InvalidRelayUrl);
         }
@@ -3422,7 +3537,7 @@ impl Session {
     }
 }
 
-fn engine_gid(group: &GroupId) -> EngineGroupId {
+pub(crate) fn engine_gid(group: &GroupId) -> EngineGroupId {
     EngineGroupId::new(group.0.clone())
 }
 
@@ -3462,7 +3577,7 @@ fn sha256(bytes: &[u8]) -> [u8; 32] {
     out
 }
 
-fn outbound_id_of(message_id: &MessageId) -> Result<OutboundId, SessionError> {
+pub(crate) fn outbound_id_of(message_id: &MessageId) -> Result<OutboundId, SessionError> {
     let bytes: [u8; 32] = message_id
         .as_slice()
         .try_into()

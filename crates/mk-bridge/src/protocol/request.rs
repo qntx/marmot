@@ -7,7 +7,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::ser::{hex_bytes, hex_str, hex_str_seq, u64_str};
+use super::ser::{hex_bytes, hex_str, hex_str_seq, opt_hex_bytes, u64_str};
 use super::types::{
     AppMessage, AttachmentInput, ComponentUpdate, Event, GroupAvatar, Invitee, MediaAttachmentRef,
     MediaReference, MessageIntent, RelayResult, SignerReply,
@@ -46,12 +46,25 @@ pub struct ReportPublishRequest {
     pub results: Vec<RelayResult>,
 }
 
-/// Build, sign and stage the account's kind-30443 `KeyPackage`.
+/// Ensure the account's `KeyPackage` slot carries a live publication.
+///
+/// Stage/sign/queue a replacement when due, republish the remembered
+/// signed event to relays the write set gained, promote an acknowledged
+/// pending.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct PublishKeyPackageRequest {
-    /// The relays to publish to.
-    pub relays: Vec<String>,
+pub struct EnsureKeyPackageRequest {
+    /// The account's NIP-65 write relay set.
+    pub write_relays: Vec<String>,
+}
+
+/// Withdraw the account's `KeyPackage` slot and leave every group this
+/// device is a non-admin member of (device sign-out).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SignOutRequest {
+    /// The account's NIP-65 write relay set.
+    pub write_relays: Vec<String>,
 }
 
 /// Build, sign and stage the account's kind-10050 inbox relay list.
@@ -117,6 +130,16 @@ pub struct LeaveRequest {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SelfUpdateRequest {
+    /// The group, hex.
+    #[serde(with = "hex_bytes")]
+    pub group: Vec<u8>,
+}
+
+/// Report the group's post-join history fetch completed (EOSE reached on
+/// every subscribed relay).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HistoryFetchedRequest {
     /// The group, hex.
     #[serde(with = "hex_bytes")]
     pub group: Vec<u8>,
@@ -317,6 +340,21 @@ pub struct ForgetGroupRequest {
     pub group: Vec<u8>,
 }
 
+/// Select one account's `KeyPackage` publications from fetched events.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SelectKeyPackagesRequest {
+    /// The account whose publications to select from, 32-byte hex.
+    #[serde(with = "hex_str")]
+    pub account: [u8; 32],
+    /// The fetched kind-30443 publications and kind-5 deletion requests.
+    pub events: Vec<Event>,
+    /// The group whose invite requirements filter candidates, or `null`
+    /// for creation requirements.
+    #[serde(with = "opt_hex_bytes")]
+    pub group: Option<Vec<u8>>,
+}
+
 /// A `call` request. The `"type"` tag must appear in
 /// [`crate::protocol::REQUEST_TYPES`] before decode; anything else answers
 /// `unsupported`.
@@ -333,8 +371,12 @@ pub enum Request {
     TakeOutbound(NoArgs),
     /// Report publish verdicts for one outbound item.
     ReportPublish(ReportPublishRequest),
-    /// Stage the account `KeyPackage`.
-    PublishKeyPackage(PublishKeyPackageRequest),
+    /// Ensure the account `KeyPackage` slot's publication lifecycle.
+    EnsureKeyPackage(EnsureKeyPackageRequest),
+    /// Read the account `KeyPackage` slot's lifecycle standing.
+    KeyPackageStatus(NoArgs),
+    /// Withdraw the `KeyPackage` slot and leave member groups.
+    SignOut(SignOutRequest),
     /// Stage the account inbox relay list.
     PublishInboxRelays(PublishInboxRelaysRequest),
     /// Create a group.
@@ -347,6 +389,8 @@ pub enum Request {
     Leave(LeaveRequest),
     /// Refresh own membership.
     SelfUpdate(SelfUpdateRequest),
+    /// Report the group's post-join history fetch completed.
+    HistoryFetched(HistoryFetchedRequest),
     /// Update the group profile.
     UpdateGroupProfile(UpdateGroupProfileRequest),
     /// Apply app-component updates.
@@ -387,4 +431,6 @@ pub enum Request {
     EnableDisbanding(EnableDisbandingRequest),
     /// Forget the group locally.
     ForgetGroup(ForgetGroupRequest),
+    /// Select invitee `KeyPackage` publications.
+    SelectKeyPackages(SelectKeyPackagesRequest),
 }

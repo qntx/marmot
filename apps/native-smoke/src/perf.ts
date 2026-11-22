@@ -141,7 +141,7 @@ class Bench {
   }
 
   async identity(member: Member): Promise<void> {
-    await member.engine.publishKeyPackage([RELAY]);
+    await member.engine.ensureKeyPackage([RELAY]);
     await this.publish(member);
     await member.engine.publishInboxRelays([RELAY]);
     await this.publish(member);
@@ -237,22 +237,23 @@ async function milestone(params: RunParams, body: Record<string, unknown>): Prom
   await post(`/${params.run}/journal`, { kind: "milestone", ...body });
 }
 
-/** ADR-031 timing 2: KeyPackage generation (`publish_key_package`, signer included and reported). */
+/** ADR-031 timing 2: KeyPackage generation (a fresh device's first `ensure_key_package`, signer included and reported). */
 async function kp(params: RunParams): Promise<Record<string, unknown>> {
   const bench = new Bench(params.run);
-  const a = await bench.member("kp", "sqlite");
-  await bench.identity(a);
+  const members: Member[] = [];
   const runs: number[] = [];
   const signer: number[] = [];
   for (let i = 0; i < params.reps; i += 1) {
+    const a = await bench.member(`kp${i}`, "sqlite");
+    members.push(a);
     const before = a.signerMs();
     const started = performance.now();
-    await a.engine.publishKeyPackage([RELAY]);
+    await a.engine.ensureKeyPackage([RELAY]);
     runs.push(performance.now() - started);
     signer.push(a.signerMs() - before);
     await bench.publish(a);
   }
-  await bench.close([a]);
+  await bench.close(members);
   return {
     case: "kp",
     runsMs: runs.map(round),

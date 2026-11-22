@@ -15,19 +15,19 @@ mod types;
 
 pub use request::{
     AckDurableRequest, AcknowledgeMessagesRequest, CreateGroupRequest, DisbandRequest,
-    DiscardAttachmentRequest, EnableDisbandingRequest, ForgetGroupRequest, GroupRequest,
-    IngestRequest, InviteRequest, LeaveRequest, NoArgs, OpenAttachmentRequest,
-    PublishInboxRelaysRequest, PublishKeyPackageRequest, RemoveMembersRequest,
-    ReportPublishRequest, Request, SealAttachmentRequest, SelfUpdateRequest, SendIntentRequest,
+    DiscardAttachmentRequest, EnableDisbandingRequest, EnsureKeyPackageRequest, ForgetGroupRequest,
+    GroupRequest, HistoryFetchedRequest, IngestRequest, InviteRequest, LeaveRequest, NoArgs,
+    OpenAttachmentRequest, PublishInboxRelaysRequest, RemoveMembersRequest, ReportPublishRequest,
+    Request, SealAttachmentRequest, SelectKeyPackagesRequest, SelfUpdateRequest, SendIntentRequest,
     SendMediaRequest, SendMessageRequest, SetAdminRequest, SetGroupAvatarRequest,
-    SetRetentionRequest, SignerReplyRequest, SubmitProofRequest, UpdateAppComponentsRequest,
-    UpdateGroupProfileRequest,
+    SetRetentionRequest, SignOutRequest, SignerReplyRequest, SubmitProofRequest,
+    UpdateAppComponentsRequest, UpdateGroupProfileRequest,
 };
 pub use result::{
     AttachmentData, AwaitingDurabilityResult, GroupCreatedResult, GroupResult, GroupsResult,
-    InboxRelaysResult, IngestedResult, KeyPackageResult, MessageSentResult, OpResult,
-    OutboundResult, PublishResolutionResult, ReadyResult, SealedAttachmentResult,
-    SendOutcomeResult, TickedResult,
+    InboxRelaysResult, IngestedResult, KeyPackageStatusResult, KeyPackagesResult,
+    MessageSentResult, OpResult, OutboundResult, PublishResolutionResult, ReadyResult,
+    SealedAttachmentResult, SendOutcomeResult, SignOutResult, TickedResult,
 };
 pub use types::*;
 
@@ -36,7 +36,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::{BridgeError, invalid_reason};
 
 /// Wire protocol version. Bumped on any breaking schema change.
-pub const PROTOCOL_VERSION: u32 = 5;
+pub const PROTOCOL_VERSION: u32 = 6;
 
 /// Maximum accepted request/config byte length.
 pub const MAX_REQUEST_BYTES: usize = 64 * 1024 * 1024;
@@ -52,18 +52,21 @@ pub const REQUEST_TYPES: &[&str] = &[
     "disband",
     "discard_attachment",
     "enable_disbanding",
+    "ensure_key_package",
     "forget_group",
     "group",
     "groups",
+    "history_fetched",
     "ingest",
     "invite",
+    "key_package_status",
     "leave",
     "open_attachment",
     "publish_inbox_relays",
-    "publish_key_package",
     "remove_members",
     "report_publish",
     "seal_attachment",
+    "select_key_packages",
     "self_update",
     "send_intent",
     "send_media",
@@ -71,6 +74,7 @@ pub const REQUEST_TYPES: &[&str] = &[
     "set_admin",
     "set_group_avatar",
     "set_retention",
+    "sign_out",
     "signer_reply",
     "submit_proof",
     "take_outbound",

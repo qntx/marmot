@@ -41,6 +41,11 @@ pub enum OutboundPurpose {
     Welcome,
     /// The account's `KeyPackage` (kind 30443).
     KeyPackage,
+    /// The account's `KeyPackage` re-sent to relays the write set gained
+    /// (the same signed event, a new outbound).
+    KeyPackageRepublish,
+    /// The kind-5 slot deletion a sign-out publishes (kind 5).
+    KeyPackageDeletion,
     /// The account's inbox relay list (kind 10050).
     InboxRelays,
 }
@@ -142,6 +147,8 @@ pub(crate) struct SessionPublication {
 #[serde(rename_all = "snake_case")]
 pub(crate) enum SessionPubPurpose {
     KeyPackage,
+    KeyPackageRepublish,
+    KeyPackageDeletion,
     InboxRelays,
 }
 
@@ -171,7 +178,6 @@ const PUB_DECODE: &str = "kv decode: session publication";
 const PUB_ENCODE: &str = "kv encode: session publication";
 const INBOX_DECODE: &str = "kv decode: session inbox";
 const INBOX_ENCODE: &str = "kv encode: session inbox";
-const META_DECODE: &str = "kv decode: session meta";
 const RETRY_DECODE: &str = "kv decode: outbound retry";
 const RETRY_ENCODE: &str = "kv encode: outbound retry";
 
@@ -397,17 +403,6 @@ impl KvStorageProvider {
         Ok(out)
     }
 
-    /// Read a session-owned meta row (raw bytes).
-    pub(crate) fn session_meta(&self, name: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
-        self.store().get(&keys::key(Table::Meta, &[name]))
-    }
-
-    /// Write a session-owned meta row (raw bytes).
-    pub(crate) fn put_session_meta(&self, name: &[u8], value: &[u8]) -> Result<(), StorageError> {
-        self.store()
-            .put(keys::key(Table::Meta, &[name]), value.to_vec())
-    }
-
     /// Persist one message's captured epoch media secret (32 raw bytes),
     /// inside the caller's storage unit when one is open. Keyed
     /// `group/transport_id` so group deletion and message invalidation
@@ -452,26 +447,5 @@ impl KvStorageProvider {
             Table::MediaSecret,
             &[group_id.as_slice(), transport_id.as_slice()],
         ))
-    }
-}
-
-/// Session meta row holding the stable random `d` slot id for kind-30443
-/// `KeyPackage` publications.
-pub(crate) const META_KEY_PACKAGE_SLOT: &[u8] = b"key-package-slot";
-
-impl KvStorageProvider {
-    /// The `KeyPackage` `d` slot id, generating and persisting one on first use.
-    pub(crate) fn key_package_slot(&self) -> Result<[u8; 32], StorageError> {
-        if let Some(value) = self.session_meta(META_KEY_PACKAGE_SLOT)? {
-            let bytes: [u8; 32] = value
-                .as_slice()
-                .try_into()
-                .map_err(|_| storage_err(META_DECODE))?;
-            return Ok(bytes);
-        }
-        let mut slot = [0u8; 32];
-        getrandom::fill(&mut slot).map_err(|_| storage_err("session rng"))?;
-        self.put_session_meta(META_KEY_PACKAGE_SLOT, &slot)?;
-        Ok(slot)
     }
 }

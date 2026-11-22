@@ -1375,7 +1375,7 @@ mod flow_tests {
     async fn unavailable_publication_backoff_paces_reoffer() {
         let mut a = open_member().await;
         a.session
-            .publish_key_package(&[RELAY.to_owned()])
+            .ensure_key_package(&[RELAY.to_owned()])
             .await
             .expect("key package");
         if let Some(seq) = a.session.awaiting_durability() {
@@ -1437,7 +1437,7 @@ mod flow_tests {
     async fn accepted_target_resets_retry_backoff() {
         let mut a = open_member().await;
         a.session
-            .publish_key_package(&[RELAY.to_owned(), RELAY2.to_owned()])
+            .ensure_key_package(&[RELAY.to_owned(), RELAY2.to_owned()])
             .await
             .expect("key package");
         if let Some(seq) = a.session.awaiting_durability() {
@@ -1510,7 +1510,7 @@ mod flow_tests {
     async fn retry_deadline_survives_restart() {
         let mut a = open_member().await;
         a.session
-            .publish_key_package(&[RELAY.to_owned()])
+            .ensure_key_package(&[RELAY.to_owned()])
             .await
             .expect("key package");
         if let Some(seq) = a.session.awaiting_durability() {
@@ -1556,7 +1556,7 @@ mod flow_tests {
     async fn next_wake_tracks_earliest_retry_deadline() {
         let mut a = open_member().await;
         a.session
-            .publish_key_package(&[RELAY.to_owned()])
+            .ensure_key_package(&[RELAY.to_owned()])
             .await
             .expect("key package");
         a.session
@@ -1614,7 +1614,7 @@ mod flow_tests {
     async fn retry_backoff_soak_counts_attempts() {
         let mut a = open_member().await;
         a.session
-            .publish_key_package(&[RELAY.to_owned()])
+            .ensure_key_package(&[RELAY.to_owned()])
             .await
             .expect("key package");
         if let Some(seq) = a.session.awaiting_durability() {

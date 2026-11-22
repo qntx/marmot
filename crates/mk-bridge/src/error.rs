@@ -156,6 +156,9 @@ pub enum BridgeError {
     ConfirmConflict,
     /// An outbound id no live obligation matches.
     UnknownOutbound,
+    /// The account's `KeyPackage` slot is withdrawn: this device signed
+    /// out and never publishes `KeyPackage` artifacts again.
+    SignedOut,
     /// A relay URL failed the profile or safety checks.
     InvalidRelayUrl,
     /// The app message touches a reserved event surface.
@@ -231,6 +234,7 @@ impl fmt::Display for BridgeError {
             Self::GroupBusy => f.write_str("group unsettled"),
             Self::ConfirmConflict => f.write_str("own-commit confirm conflict"),
             Self::UnknownOutbound => f.write_str("unknown outbound"),
+            Self::SignedOut => f.write_str("signed out"),
             Self::InvalidRelayUrl => f.write_str("invalid relay url"),
             Self::ReservedAppEvent => f.write_str("reserved app event surface"),
             Self::DisbandingNotEnabled => f.write_str("disbanding not enabled"),
@@ -287,6 +291,7 @@ pub(crate) fn session_error(error: &SessionError) -> BridgeError {
         SessionError::GroupBusy => BridgeError::GroupBusy,
         SessionError::ConfirmConflict => BridgeError::ConfirmConflict,
         SessionError::UnknownOutbound => BridgeError::UnknownOutbound,
+        SessionError::SignedOut => BridgeError::SignedOut,
         SessionError::InvalidRelayUrl => BridgeError::InvalidRelayUrl,
         SessionError::ReservedAppEvent => BridgeError::ReservedAppEvent,
         SessionError::DisbandingNotEnabled => BridgeError::DisbandingNotEnabled,

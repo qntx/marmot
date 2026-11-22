@@ -570,6 +570,14 @@ pub enum SessionEvent {
         /// The group.
         group: GroupId,
     },
+    /// A post-join or periodic self-update obligation completed — the
+    /// group's `SelfUpdated` rotation of this device's leaf is durable.
+    /// Emitted exactly once per obligation, when its evolution confirms or
+    /// the own-leaf baseline is observed rotated.
+    SelfUpdated {
+        /// The group.
+        group: GroupId,
+    },
     /// The group's canonical epoch advanced.
     EpochChanged {
         /// The group.
@@ -665,6 +673,10 @@ pub enum SessionEvent {
         /// The group.
         group: GroupId,
     },
+    /// A pending `KeyPackage` replacement was promoted after a relay
+    /// acknowledgement (D3); the previous current is retained for its
+    /// grace period.
+    KeyPackageRotated,
     /// An outbound obligation reached a resolution checkpoint.
     PublishResolved {
         /// The outbound item.

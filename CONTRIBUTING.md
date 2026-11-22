@@ -179,11 +179,21 @@ Scenarios 1–6 drive the public `Session` API; scenario 7
 action driven through `mk-bridge` request/response bytes — the same
 surface wasm and C hosts use.
 
+Scenario 17 asserts the sign-out contract only (wn's roster keeps one
+leaf for our account, the signed-out device ends removed, the remaining
+device's roster is unchanged). Chat after the sign-out is not part of it:
+our remaining device and wn both auto-commit the SelfRemove, and
+convergence of that race is an MDK defect — reproduced deterministically
+by the ignored `commit_before_referenced_proposal_converges` in
+`crates/mk-core/tests/fork_convergence.rs`.
+
 ## Fuzzing (`fuzz/`)
 
-Nine libFuzzer targets cover every decoder we own (kv batch, kv rows,
-event JSON, account proof, key-package event, imeta parse, agent-stream
-tags, plus the mk-bridge request and config decoders). The seed corpus is generated
+Fourteen libFuzzer targets cover every decoder we own (kv batch, kv rows,
+event JSON, account proof, key-package event, key-package selection,
+imeta parse, agent-stream tags, semantics, session rows, media decrypt,
+plus the mk-bridge request, config and FFI call decoders). The seed
+corpus is generated
 from real session artifacts and is gitignored — regenerate it when the row
 formats change:
 

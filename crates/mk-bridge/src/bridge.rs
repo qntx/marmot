@@ -18,17 +18,17 @@ use crate::host::{Host, QueueHost, lock};
 use crate::protocol::{
     AcknowledgeMessagesRequest, AttachmentData, AwaitingDurabilityResult, CallEnvelope, Config,
     ConfigProbe, CreateGroupRequest, DisbandRequest, DiscardAttachmentRequest, DrainResponse,
-    EnableDisbandingRequest, ForgetGroupRequest, GroupCreatedResult, GroupResult, GroupsResult,
-    InboxRelaysResult, IngestRequest, IngestedResult, InviteRequest, KeyPackageResult,
-    LeaveRequest, MAX_REQUEST_BYTES, MediaAttachmentRef, MessageSentResult, OpResult,
-    OpenAttachmentRequest, OpenResponse, OutboundResult, PROTOCOL_VERSION,
-    PublishInboxRelaysRequest, PublishKeyPackageRequest, PublishResolutionResult, REQUEST_TYPES,
-    ReadyResult, RemoveMembersRequest, ReportPublishRequest, Request, Response,
-    SealAttachmentRequest, SealedAttachmentResult, SelfUpdateRequest, SendIntentRequest,
-    SendMediaRequest, SendMessageRequest, SendOutcomeResult, SetAdminRequest,
-    SetGroupAvatarRequest, SetRetentionRequest, SignerReply, SignerRequest, SignerResult,
-    TickedResult, UpdateAppComponentsRequest, UpdateGroupProfileRequest, decode, encode, invalid,
-    reason_label,
+    EnableDisbandingRequest, EnsureKeyPackageRequest, ForgetGroupRequest, GroupCreatedResult,
+    GroupResult, GroupsResult, HistoryFetchedRequest, InboxRelaysResult, IngestRequest,
+    IngestedResult, InviteRequest, KeyPackagesResult, LeaveRequest, MAX_REQUEST_BYTES,
+    MediaAttachmentRef, MessageSentResult, OpResult, OpenAttachmentRequest, OpenResponse,
+    OutboundResult, PROTOCOL_VERSION, PublishInboxRelaysRequest, PublishResolutionResult,
+    REQUEST_TYPES, ReadyResult, RemoveMembersRequest, ReportPublishRequest, Request, Response,
+    SealAttachmentRequest, SealedAttachmentResult, SelectKeyPackagesRequest, SelfUpdateRequest,
+    SendIntentRequest, SendMediaRequest, SendMessageRequest, SendOutcomeResult, SetAdminRequest,
+    SetGroupAvatarRequest, SetRetentionRequest, SignOutRequest, SignerReply, SignerRequest,
+    SignerResult, TickedResult, UpdateAppComponentsRequest, UpdateGroupProfileRequest, decode,
+    encode, invalid, reason_label,
 };
 use crate::rows::decode_rows;
 use crate::signer::{QueueSigner, SignerState};
@@ -345,7 +345,9 @@ impl<H: Host> Bridge<H> {
             Request::OpenAttachment(args) => self.open_attachment(args),
             Request::SignerReply(_) => Self::error_response(BridgeError::NoPendingSigner),
             Request::ReportPublish(args) => self.run(op_report_publish(args), Vec::new()),
-            Request::PublishKeyPackage(args) => self.run(op_publish_key_package(args), Vec::new()),
+            Request::EnsureKeyPackage(args) => self.run(op_ensure_key_package(args), Vec::new()),
+            Request::KeyPackageStatus(_) => self.key_package_status(),
+            Request::SignOut(args) => self.run(op_sign_out(args), Vec::new()),
             Request::PublishInboxRelays(args) => {
                 self.run(op_publish_inbox_relays(args), Vec::new())
             }
@@ -354,6 +356,7 @@ impl<H: Host> Bridge<H> {
             Request::RemoveMembers(args) => self.run(op_remove_members(args), Vec::new()),
             Request::Leave(args) => self.run(op_leave(args), Vec::new()),
             Request::SelfUpdate(args) => self.run(op_self_update(args), Vec::new()),
+            Request::HistoryFetched(args) => self.history_fetched(args),
             Request::UpdateGroupProfile(args) => {
                 self.run(op_update_group_profile(args), Vec::new())
             }
@@ -368,6 +371,7 @@ impl<H: Host> Bridge<H> {
             Request::Disband(args) => self.run(op_disband(args), Vec::new()),
             Request::EnableDisbanding(args) => self.run(op_enable_disbanding(args), Vec::new()),
             Request::ForgetGroup(args) => self.forget_group(args),
+            Request::SelectKeyPackages(args) => self.select_key_packages(args),
             Request::Ingest(args) => self.run(op_ingest(args), Vec::new()),
             Request::Tick(_) => self.run(op_tick(), Vec::new()),
         }
@@ -529,6 +533,42 @@ impl<H: Host> Bridge<H> {
         let group = core::GroupId(args.group);
         self.sync_op(|session| {
             session.forget_group(&group)?;
+            Ok(OpResult::Done)
+        })
+    }
+
+    /// `select_key_packages`: the session's D1 selection over the host's
+    /// fetched publications and deletions.
+    fn select_key_packages(&mut self, args: SelectKeyPackagesRequest) -> Response {
+        let account = core::AccountId(args.account);
+        let events: Vec<core::Event> = args.events.into_iter().map(Into::into).collect();
+        let group = args.group.map(core::GroupId);
+        self.sync_op(move |session| {
+            Ok(OpResult::KeyPackages(KeyPackagesResult {
+                events: session
+                    .select_key_packages(account, &events, group.as_ref())?
+                    .into_iter()
+                    .map(Into::into)
+                    .collect(),
+            }))
+        })
+    }
+
+    /// `key_package_status`: the account `KeyPackage` slot's lifecycle
+    /// standing, read-only.
+    fn key_package_status(&mut self) -> Response {
+        self.sync_op(|session| {
+            Ok(OpResult::KeyPackageStatus(
+                session.key_package_status()?.into(),
+            ))
+        })
+    }
+
+    /// `history_fetched`: close the owed post-join fetch obligation.
+    fn history_fetched(&mut self, args: HistoryFetchedRequest) -> Response {
+        let group = core::GroupId(args.group);
+        self.sync_op(|session| {
+            session.history_fetched(&group)?;
             Ok(OpResult::Done)
         })
     }
@@ -800,21 +840,29 @@ fn op_report_publish(args: ReportPublishRequest) -> impl FnOnce(Box<Session>) ->
     }
 }
 
-/// `publish_key_package` as an operation future.
-fn op_publish_key_package(args: PublishKeyPackageRequest) -> impl FnOnce(Box<Session>) -> OpFuture {
+/// `ensure_key_package` as an operation future: one lifecycle pass over
+/// the host's NIP-65 write set, answered with the slot's standing.
+fn op_ensure_key_package(args: EnsureKeyPackageRequest) -> impl FnOnce(Box<Session>) -> OpFuture {
     move |mut session| {
         Box::pin(async move {
-            let info = session.publish_key_package(&args.relays).await;
+            let status = session.ensure_key_package(&args.write_relays).await;
             (
                 session,
-                info.map(|info| {
-                    OpResult::KeyPackage(KeyPackageResult {
-                        key_package: info.key_package,
-                        key_package_ref: info.key_package_ref,
-                        event_id: info.event_id.0,
-                        account: info.account.0,
-                    })
-                }),
+                status.map(|status| OpResult::KeyPackageStatus(status.into())),
+            )
+        })
+    }
+}
+
+/// `sign_out` as an operation future: one sign-out pass, the same
+/// suspension contract as `ensure_key_package`.
+fn op_sign_out(args: SignOutRequest) -> impl FnOnce(Box<Session>) -> OpFuture {
+    move |mut session| {
+        Box::pin(async move {
+            let report = session.sign_out(&args.write_relays).await;
+            (
+                session,
+                report.map(|report| OpResult::SignOut(report.into())),
             )
         })
     }

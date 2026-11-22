@@ -123,12 +123,41 @@
     ],
     "type": "ingested"
   },
-  "key_package": {
-    "account": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-    "event_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-    "key_package": "01",
-    "key_package_ref": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-    "type": "key_package"
+  "key_package_status": {
+    "current": {
+      "account": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "event_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "key_package": "01",
+      "key_package_ref": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    "next_due_ms": "1700000000000",
+    "pending": false,
+    "retained": 1,
+    "slot": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "type": "key_package_status"
+  },
+  "key_packages": {
+    "events": [
+      {
+        "content": "a2V5",
+        "created_at": "1700000000",
+        "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "kind": 30443,
+        "pubkey": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "sig": "55555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555",
+        "tags": [
+          [
+            "d",
+            "device-1"
+          ],
+          [
+            "i",
+            "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+          ]
+        ]
+      }
+    ],
+    "type": "key_packages"
   },
   "message_sent": {
     "message": {
@@ -195,6 +224,13 @@
       "type": "staged"
     },
     "type": "send_outcome"
+  },
+  "sign_out": {
+    "kept_admin_leaves": [],
+    "left": [
+      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    ],
+    "type": "sign_out"
   },
   "ticked": {
     "next_wake_ms": "9000",

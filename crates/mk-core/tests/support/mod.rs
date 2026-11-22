@@ -361,7 +361,7 @@ pub async fn flush(member: &mut Member, relay: &FakeRelay) {
 pub async fn publish_identity(member: &mut Member, relay: &FakeRelay, url: &str) {
     member
         .session
-        .publish_key_package(&[url.to_owned()])
+        .ensure_key_package(&[url.to_owned()])
         .await
         .expect("key package");
     flush(member, relay).await;

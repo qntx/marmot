@@ -49,10 +49,13 @@ use mk_core::{
 use nostr::prelude::{
     Event as NostrEvent, Filter, FromBech32, Kind, PublicKey, RelayUrl, SingleLetterTag, ToBech32,
 };
+use nostr_directory as _;
 use nostr_sdk::client::Client;
 use nostr_sdk::local_relay::{LocalRelay, RateLimit};
 use serde_json::Value;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use transport_nostr as _;
+use transport_nostr_peeler as _;
 
 pub const KIND_GROUP_MESSAGE: u16 = 445;
 pub const KIND_GIFT_WRAP: u16 = 1059;
@@ -579,7 +582,12 @@ impl Member {
 
 /// Open a fresh member, completing the account-proof handshake.
 pub async fn open_member() -> Member {
-    let signer = Arc::new(LocalSigner::new());
+    open_member_with(Arc::new(LocalSigner::new())).await
+}
+
+/// Open a member over `signer` — a second device of an existing account
+/// shares the signer's `Arc`.
+pub async fn open_member_with(signer: Arc<LocalSigner>) -> Member {
     let clock = Arc::new(WallClock::new());
     let host = Arc::new(RecordingHost::new());
     let signer_cfg: Arc<dyn AccountSigner> = signer.clone();
@@ -680,7 +688,7 @@ pub async fn flush(member: &mut Member, rig: &Rig) {
 pub async fn publish_identity(member: &mut Member, rig: &Rig) {
     member
         .session
-        .publish_key_package(std::slice::from_ref(&rig.url))
+        .ensure_key_package(std::slice::from_ref(&rig.url))
         .await
         .expect("key package");
     flush(member, rig).await;

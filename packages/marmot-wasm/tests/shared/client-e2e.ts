@@ -148,6 +148,7 @@ async function openInstance(handle: HandleSeed): Promise<MarmotClient> {
     clock: e2eClock(handle.skew),
     timer: handle.timer,
     relays: handle.port ?? handle.network.port(handle.portName),
+    lookupRelays: [LOOKUP],
     allowLoopback: false,
   });
   client.onMessages(async (batch) => {
@@ -194,7 +195,7 @@ export async function waitFor(
 
 /**
  * Publish the account's NIP-65 relay list (kind-10002, `["r", relay]` tags) onto the lookup relay,
- * then the client's own `publishKeyPackage` + `publishInboxRelays`.
+ * then the client's own `ensureKeyPackage` + `publishInboxRelays`.
  */
 export async function identity(handle: ClientHandle): Promise<void> {
   const event = await handle.signer.signEvent({
@@ -205,7 +206,7 @@ export async function identity(handle: ClientHandle): Promise<void> {
     content: "",
   });
   await handle.network.port(handle.portName).publish(LOOKUP, event);
-  await handle.client.publishKeyPackage([LOOKUP]);
+  await handle.client.ensureKeyPackage();
   await handle.client.publishInboxRelays([INBOX]);
   // The ops resolve once durable; their publish pass is async — wait until the relay actually
   // holds both events so a following `lookupInvitees` cannot read an empty store.
@@ -894,7 +895,8 @@ export async function scenarioOfflineSend(): Promise<ScenarioReport> {
     a: { port: gatedPort(network.port("a"), gate) },
   });
   gate.refused = true;
-  const publishedBefore = network.published().length;
+  const commits = () => network.published().filter((entry) => entry.event.kind === 445).length;
+  const publishedBefore = commits();
   await send(a, group, "offline-msg");
   await a.client.updateGroupProfile(group, { name: "renamed", description: "" });
   // Both items report pending and keep retrying; no publish reaches the relay network.
@@ -902,7 +904,7 @@ export async function scenarioOfflineSend(): Promise<ScenarioReport> {
     const pending = a.deliveries.filter((entry) => entry.resolution === "pending");
     return new Set(pending.map((entry) => entry.outbound)).size >= 2;
   }, "a pending outbound");
-  if (network.published().length !== publishedBefore) {
+  if (commits() !== publishedBefore) {
     throw new Error("an event was transmitted while dials were refused");
   }
   if (contents(b, group).includes("offline-msg")) {
@@ -945,7 +947,8 @@ export async function scenarioOfflineCommitRollback(): Promise<ScenarioReport> {
     a: { port: gatedPort(network.port("a"), gate) },
   });
   gate.refused = true;
-  const publishedBefore = network.published().length;
+  const commits = () => network.published().filter((entry) => entry.event.kind === 445).length;
+  const publishedBefore = commits();
   const snapshotBefore = await a.client.group(group);
   const epochBefore = snapshotBefore?.epoch;
   await a.client.selfUpdate(group);
@@ -953,7 +956,7 @@ export async function scenarioOfflineCommitRollback(): Promise<ScenarioReport> {
     () => a.deliveries.some((entry) => entry.resolution === "pending"),
     "a pending outbound",
   );
-  if (network.published().length !== publishedBefore) {
+  if (commits() !== publishedBefore) {
     throw new Error("an event was transmitted while dials were refused");
   }
   gate.refused = false;

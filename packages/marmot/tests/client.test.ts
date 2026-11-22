@@ -146,6 +146,8 @@ type Script = {
   sent: BridgeResponse;
   /** `send_outcome` answer for membership/lifecycle ops. */
   outcome: BridgeResponse;
+  /** `key_packages` answer: `auto` selects the kind-30443 inputs. */
+  keyPackages: NostrEvent[] | "auto";
   /** Wire errors to answer for the matching request types. */
   errors: Partial<Record<BridgeRequest["type"], WireError["kind"]>>;
   /** Emit `host.commit` (seq ascending) when these request types run. */
@@ -234,16 +236,23 @@ function scriptedBackend(script: Script): {
                         type: "ok",
                         result: { type: "group", group: script.groups[0] },
                       };
-                    case "publish_key_package":
+                    case "ensure_key_package":
+                    case "key_package_status":
                       return {
                         type: "ok",
                         result: {
-                          type: "key_package",
-                          keyPackage: Uint8Array.of(1),
-                          keyPackageRef: "00".repeat(32),
-                          eventId: "00".repeat(32),
-                          account: ACCOUNT,
+                          type: "key_package_status",
+                          slot: "11".repeat(32),
+                          current: undefined,
+                          pending: false,
+                          retained: 0,
+                          nextDueMs: undefined,
                         },
+                      };
+                    case "sign_out":
+                      return {
+                        type: "ok",
+                        result: { type: "sign_out", left: [], keptAdminLeaves: [] },
                       };
                     case "publish_inbox_relays":
                       return {
@@ -269,6 +278,17 @@ function scriptedBackend(script: Script): {
                     case "disband":
                     case "enable_disbanding":
                       return script.outcome;
+                    case "select_key_packages":
+                      return {
+                        type: "ok",
+                        result: {
+                          type: "key_packages",
+                          events:
+                            script.keyPackages === "auto"
+                              ? request.events.filter((e) => e.kind === 30_443)
+                              : script.keyPackages,
+                        },
+                      };
                     case "send_message":
                     case "create_group":
                       return request.type === "create_group"
@@ -377,6 +397,7 @@ function freshScript(): Script {
     groups: [],
     nextWake: undefined,
     errors: {},
+    keyPackages: "auto",
     outcome: {
       type: "ok",
       result: { type: "send_outcome", outcome: { type: "queued" } },
@@ -413,7 +434,12 @@ type Fixture = {
   subs: Array<{ relay: string; filters: RelayFilter[] }>;
 };
 
-async function open(script: Script, blob?: Uint8Array, sign?: Signer): Promise<Fixture> {
+async function open(
+  script: Script,
+  blob?: Uint8Array,
+  sign?: Signer,
+  lookupRelays?: string[],
+): Promise<Fixture> {
   const timer = manualTimer();
   const network = fakeRelay();
   const cursors = memoryCursorStore();
@@ -441,6 +467,7 @@ async function open(script: Script, blob?: Uint8Array, sign?: Signer): Promise<F
     timer,
     relays: port,
     allowLoopback: true,
+    ...(lookupRelays === undefined ? {} : { lookupRelays }),
   });
   return { client, script, timer, network, cursors, kv, clock, subs };
 }
@@ -501,6 +528,7 @@ describe("MarmotClient", () => {
     script.drains.push(
       { type: "events", events: [] }, // publishInboxRelays' post-op drain
       { type: "events", events: [] }, // the serialized takeOutbound job's drain
+      { type: "events", events: [] }, // history_fetched post-op drain (group EOSE at open)
       { type: "events", events: [{ type: "group_joined", group: GROUP }] },
     );
     script.groups = [snapshot()];
@@ -549,6 +577,7 @@ describe("MarmotClient", () => {
     script.drains.push(
       { type: "events", events: [] }, // open's first drain
       { type: "events", events: [] }, // the serialized takeOutbound job's drain
+      { type: "events", events: [] }, // history_fetched post-op drain (group EOSE at open)
       { type: "events", events: [{ type: "message_received", group: GROUP, message: msg }] },
     );
     script.groups = [snapshot()];
@@ -593,6 +622,7 @@ describe("MarmotClient", () => {
     script.drains.push(
       { type: "events", events: [] },
       { type: "events", events: [] }, // the serialized takeOutbound job's drain
+      { type: "events", events: [] }, // history_fetched post-op drain (group EOSE at open)
       { type: "events", events: [{ type: "message_received", group: GROUP, message: msg }] },
     );
     script.groups = [snapshot()];
@@ -705,6 +735,69 @@ describe("MarmotClient", () => {
     await fixture.client.close();
   });
 
+  test("signOut issues sign_out with the fetched write set", async () => {
+    const fixture = await open(freshScript(), undefined, undefined, [LOOKUP]);
+    // An authored NIP-65 list on the lookup relay: `read`-marked relays are
+    // excluded from the write set the request carries.
+    // The list is fetched by `writeRelaysOf` (an authors-filtered one-shot fetch, no
+    // signature check) — a literal fixture, not a pump-ingested event, so the fake
+    // pubkey is fine here.
+    await fixture.network.port("peer").publish(LOOKUP, {
+      id: "12".repeat(32),
+      pubkey: ACCOUNT,
+      createdAt: 1000n,
+      kind: 10002,
+      tags: [
+        ["r", RELAY],
+        ["r", RELAY2, "read"],
+      ],
+      content: "",
+      sig: "5".repeat(128),
+    });
+    const result = await fixture.client.signOut();
+    expect(result).toStrictEqual({ left: [], keptAdminLeaves: [] });
+    const calls = callsOf(fixture.script, "sign_out");
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({ type: "sign_out", writeRelays: [`${RELAY}/`] });
+    await fixture.client.close();
+  });
+
+  test("a publish in flight during signOut does not wedge the pump", async () => {
+    const script = freshScript();
+    // The KeyPackage row this item reports for is deleted inside the
+    // sign-out transaction before the verdicts land; `unknown_outbound`
+    // is the session's answer for the late report.
+    script.errors = { report_publish: "unknown_outbound" };
+    script.outbound = [
+      {
+        id: `0e${"0".repeat(62)}`,
+        event: event({ kind: 30443 }),
+        relays: [RELAY],
+        purpose: "key_package",
+      },
+    ];
+    const fixture = await open(
+      script,
+      encodeClientState({ nip44Extended: true, cursors: {}, inbox: [RELAY] }),
+    );
+    const errors: MarmotError[] = [];
+    fixture.client.onError((error) => errors.push(error));
+    await settle(fixture.timer, 5000);
+    expect(callsOf(script, "report_publish")).toHaveLength(1);
+    expect(errors).toHaveLength(0);
+    // The serialized queue still serves later ops.
+    await fixture.client.publishInboxRelays([RELAY]);
+    await settle(fixture.timer, 5000);
+    await fixture.client.close();
+  });
+
+  test("signOut maps a missing relay list to no_relay_list", async () => {
+    const fixture = await open(freshScript());
+    await expect(fixture.client.signOut()).rejects.toMatchObject({ kind: "no_relay_list" });
+    expect(callsOf(fixture.script, "sign_out")).toHaveLength(0);
+    await fixture.client.close();
+  });
+
   test("lookupInvitees maps non-found answers to typed errors", async () => {
     const fixture = await open(freshScript());
     await expect(fixture.client.lookupInvitees("f".repeat(64), [LOOKUP])).rejects.toMatchObject({
@@ -770,6 +863,24 @@ describe("MarmotClient", () => {
     await fixture.client.publishInboxRelays([RELAY]);
     await settle(fixture.timer, 5000);
     expect(errors.map((e) => e.kind)).toContain("subscription_limit");
+    await fixture.client.close();
+  });
+
+  test("group EOSE on every relay reports history_fetched once", async () => {
+    const script = freshScript();
+    script.groups = [snapshot()];
+    const fixture = await open(
+      script,
+      encodeClientState({ nip44Extended: true, cursors: {}, inbox: [] }),
+    );
+    await settle(fixture.timer, 5000);
+    const calls = callsOf(fixture.script, "history_fetched");
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({ type: "history_fetched", group: GROUP });
+    // A reopened subscription must not re-report in the same Pump lifetime.
+    await fixture.client.publishInboxRelays([RELAY]);
+    await settle(fixture.timer, 5000);
+    expect(callsOf(fixture.script, "history_fetched")).toHaveLength(1);
     await fixture.client.close();
   });
 
@@ -1080,6 +1191,7 @@ describe("MarmotClient", () => {
     script.drains.push(
       { type: "events", events: [] },
       { type: "events", events: [] }, // the serialized takeOutbound job's drain
+      { type: "events", events: [] }, // history_fetched post-op drain (group EOSE at open)
       {
         type: "events",
         events: [{ type: "message_received", group: GROUP, message: msg(`f3${"0".repeat(62)}`) }],
@@ -1584,6 +1696,7 @@ describe("MarmotClient", () => {
     script.drains.push(
       { type: "events", events: [] },
       { type: "events", events: [] },
+      { type: "events", events: [] }, // history_fetched post-op drain (group EOSE at open)
       {
         type: "events",
         events: [{ type: "message_received", group: GROUP, message: incoming }],
@@ -1633,6 +1746,7 @@ describe("MarmotClient", () => {
     script.drains.push(
       { type: "events", events: [] },
       { type: "events", events: [] },
+      { type: "events", events: [] }, // history_fetched post-op drain (group EOSE at open)
       {
         type: "events",
         events: [{ type: "message_received", group: GROUP, message: incoming }],
@@ -1716,6 +1830,7 @@ describe("MarmotClient", () => {
     script.drains.push(
       { type: "events", events: [] },
       { type: "events", events: [] },
+      { type: "events", events: [] }, // history_fetched post-op drain (group EOSE at open)
       {
         type: "events",
         events: cases.map((semantics, i) => ({

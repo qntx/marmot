@@ -22,7 +22,7 @@
 //! `mls` implements the `OpenMLS` storage trait, and `snapshot` owns group
 //! snapshot/checkpoint capture, restore, and the replay-state fingerprint.
 //! `keys` is the single source of every row key and scan prefix. `types`,
-//! [`key_package`], `outbox`, `clock`, `signer` and `events` hold the
+//! [`key_package`], `key_package_lifecycle`, `outbox`, `clock`, `signer` and `events` hold the
 //! session layer's data types and injected ports; `session` is the
 //! coordinator.
 //!
@@ -51,6 +51,7 @@ mod delivered;
 mod error;
 mod events;
 pub mod key_package;
+mod key_package_lifecycle;
 mod keys;
 pub mod kv;
 pub mod media;
@@ -58,6 +59,7 @@ mod mls;
 mod outbox;
 mod pacing;
 mod provider;
+mod self_update;
 mod semantics;
 mod ser;
 mod session;
@@ -74,6 +76,7 @@ pub use events::{
     Availability, Disposition, GroupChange, InputCategory, InputOutcome, InputReport, LocalState,
     ReceivedMessage, SessionEvent,
 };
+pub use key_package_lifecycle::{KeyPackageStatus, SignOutReport};
 pub use kv::{BatchCodecError, CommitSeq, KvBatch, KvHost, KvOp};
 pub use mls::KvOpenMlsStorage;
 pub use outbox::{Outbound, OutboundPurpose, PublishResolution, RelayResult, RelayStatus};

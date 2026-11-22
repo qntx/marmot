@@ -81,6 +81,63 @@ pub(crate) mod hex_bytes {
     }
 }
 
+/// `Vec<Vec<u8>>` as a list of lowercase hex strings of any length.
+pub(crate) mod hex_bytes_seq {
+    use super::{Deserialize, Deserializer, HEX, Serializer};
+
+    /// Serialize each byte string as lowercase hex.
+    pub(crate) fn serialize<S: Serializer>(
+        items: &[Vec<u8>],
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        serializer.collect_seq(items.iter().map(hex::encode))
+    }
+
+    /// Decode a list of lowercase hex strings of any length.
+    pub(crate) fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Vec<Vec<u8>>, D::Error> {
+        let texts = Vec::<String>::deserialize(deserializer)?;
+        texts
+            .into_iter()
+            .map(|text| hex::decode(&text).map_err(|_| serde::de::Error::custom(HEX)))
+            .collect()
+    }
+}
+
+/// `Option<Vec<u8>>` as a nullable lowercase hex string.
+pub(crate) mod opt_hex_bytes {
+    use super::{Deserialize, Deserializer, HEX, Serializer};
+
+    /// Serialize `Some` as lowercase hex, `None` as `null`.
+    // serde's `with` protocol passes `&Option<T>`; the signature is fixed.
+    #[allow(clippy::ref_option, reason = "serde `with` mandates `&Option<T>`")]
+    pub(crate) fn serialize<S: Serializer>(
+        bytes: &Option<Vec<u8>>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        match bytes {
+            Some(bytes) => serializer.serialize_str(&hex::encode(bytes)),
+            None => serializer.serialize_none(),
+        }
+    }
+
+    /// Decode `null` to `None` or a hex string of any length to `Some`.
+    pub(crate) fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<Vec<u8>>, D::Error> {
+        let text = Option::<String>::deserialize(deserializer)?;
+        text.map_or_else(
+            || Ok(None),
+            |text| {
+                hex::decode(&text)
+                    .map(Some)
+                    .map_err(|_| serde::de::Error::custom(HEX))
+            },
+        )
+    }
+}
+
 /// `Option<[u8; 32]>` as a nullable lowercase hex string.
 pub(crate) mod opt_hex32 {
     use super::{Deserialize, Deserializer, HEX, Serializer};

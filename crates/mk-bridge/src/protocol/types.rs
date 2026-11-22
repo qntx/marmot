@@ -860,6 +860,11 @@ pub enum OutboundPurpose {
     Welcome,
     /// The account's `KeyPackage` (kind 30443).
     KeyPackage,
+    /// A re-send of the same signed `KeyPackage` event to a relay that
+    /// newly joined the write set.
+    KeyPackageRepublish,
+    /// The kind-5 slot deletion a sign-out publishes.
+    KeyPackageDeletion,
     /// The account's inbox relay list (kind 10050).
     InboxRelays,
     /// An `mk-core` purpose this wire version does not know.
@@ -874,6 +879,8 @@ impl From<core::OutboundPurpose> for OutboundPurpose {
             core::OutboundPurpose::Commit => Self::Commit,
             core::OutboundPurpose::Welcome => Self::Welcome,
             core::OutboundPurpose::KeyPackage => Self::KeyPackage,
+            core::OutboundPurpose::KeyPackageRepublish => Self::KeyPackageRepublish,
+            core::OutboundPurpose::KeyPackageDeletion => Self::KeyPackageDeletion,
             core::OutboundPurpose::InboxRelays => Self::InboxRelays,
             // `OutboundPurpose` is `#[non_exhaustive]`.
             _ => Self::Unmapped,
@@ -1524,6 +1531,14 @@ pub enum SessionEvent {
         /// Why it was dropped.
         reason: DropReason,
     },
+    /// The account `KeyPackage` slot rotated to a new publication.
+    KeyPackageRotated,
+    /// This device's leaf completed a maintenance self-update rotation.
+    SelfUpdated {
+        /// The group, hex.
+        #[serde(with = "hex_bytes")]
+        group: Vec<u8>,
+    },
     /// An `mk-core` session event this wire version does not know.
     Unmapped,
 }
@@ -1666,13 +1681,15 @@ impl SessionEvent {
                 group: group.0,
                 reason: reason.into(),
             },
+            core::SessionEvent::KeyPackageRotated => Self::KeyPackageRotated,
+            core::SessionEvent::SelfUpdated { group } => Self::SelfUpdated { group: group.0 },
             // `SessionEvent` is `#[non_exhaustive]`.
             _ => Self::Unmapped,
         }
     }
 }
 
-/// What `publish_key_package` returns.
+/// A published `KeyPackage`'s identity, as reported by `key_package_status`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct KeyPackageInfo {

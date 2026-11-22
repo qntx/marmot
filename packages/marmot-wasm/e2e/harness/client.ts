@@ -196,6 +196,7 @@ const api: ClientHarness = {
       clock,
       timer,
       relays: nostrRelayPort(pool),
+      lookupRelays: [relayUrl],
       allowLoopback: true,
     });
     client.onDelivery((event) => {
@@ -230,7 +231,7 @@ const api: ClientHarness = {
       throw new Error("client.open first");
     }
     await nostrRelayPort(pool).publish(relayUrl, event);
-    await requireClient().publishKeyPackage([relayUrl]);
+    await requireClient().ensureKeyPackage();
     await requireClient().publishInboxRelays([relayUrl]);
   },
 

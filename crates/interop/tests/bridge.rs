@@ -40,9 +40,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use mk_bridge::protocol::{
-    self, AckDurableRequest, AcknowledgeMessagesRequest, AppMessage, DrainResponse, GroupRequest,
-    IngestRequest, NoArgs, OpResult, OpenResponse, PublishInboxRelaysRequest,
-    PublishKeyPackageRequest, RelayStatus, ReportPublishRequest, Request, Response,
+    self, AckDurableRequest, AcknowledgeMessagesRequest, AppMessage, DrainResponse,
+    EnsureKeyPackageRequest, GroupRequest, IngestRequest, NoArgs, OpResult, OpenResponse,
+    PublishInboxRelaysRequest, RelayStatus, ReportPublishRequest, Request, Response,
     SendMessageRequest, SessionEvent, SignerOp, SignerReply, SignerReplyRequest, SignerResult,
     SubmitProofRequest,
 };
@@ -333,13 +333,13 @@ impl BridgeMember {
     /// Stage the KeyPackage and inbox relay list, then publish both.
     async fn publish_identity(&mut self, rig: &Rig) {
         match self
-            .call(Request::PublishKeyPackage(PublishKeyPackageRequest {
-                relays: vec![rig.url.clone()],
+            .call(Request::EnsureKeyPackage(EnsureKeyPackageRequest {
+                write_relays: vec![rig.url.clone()],
             }))
             .await
         {
-            OpResult::KeyPackage(_) => {}
-            other => panic!("{}: publish_key_package: {other:?}", self.name),
+            OpResult::KeyPackageStatus(_) => {}
+            other => panic!("{}: ensure_key_package: {other:?}", self.name),
         }
         match self
             .call(Request::PublishInboxRelays(PublishInboxRelaysRequest {
@@ -382,7 +382,9 @@ impl BridgeMember {
                 other => panic!("{}: ingest: {other:?}", self.name),
             }
         }
-        self.call_blocking(Request::Tick(NoArgs {}));
+        // `tick` may suspend on the signer: the KeyPackage lifecycle
+        // stages and signs a replacement after consumption.
+        self.call(Request::Tick(NoArgs {})).await;
         let drained = self.drain_events();
         let ids: Vec<[u8; 32]> = drained
             .iter()

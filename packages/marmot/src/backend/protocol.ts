@@ -1,5 +1,5 @@
 /**
- * TypeScript mirror of the mk-bridge JSON wire protocol (`PROTOCOL_VERSION` 5). Decoded
+ * TypeScript mirror of the mk-bridge JSON wire protocol (`PROTOCOL_VERSION` 6). Decoded
  * representation: `u64` fields arrive as decimal strings and decode to `bigint`; identifiers (event
  * ids, pubkeys, group ids, nostr group ids, signatures, outbound ids, hashes, nonces) decode to
  * validated lowercase hex `string`s; payload blobs (`key_package`, component `data`, attachment
@@ -17,7 +17,7 @@ import type { InputCategory } from "../core/errors.ts";
 export type Complete<T extends never> = T;
 
 /** Wire protocol version. Bumped on any breaking schema change. */
-export const PROTOCOL_VERSION = 5;
+export const PROTOCOL_VERSION = 6;
 
 /** One reading of the injected clock (decimal strings on the wire). */
 export type ClockReading = {
@@ -314,6 +314,8 @@ export type OutboundPurpose =
   | "commit"
   | "welcome"
   | "key_package"
+  | "key_package_republish"
+  | "key_package_deletion"
   | "inbox_relays"
   | "unmapped";
 
@@ -323,6 +325,8 @@ export const OUTBOUND_PURPOSES = [
   "commit",
   "welcome",
   "key_package",
+  "key_package_republish",
+  "key_package_deletion",
   "inbox_relays",
   "unmapped",
 ] as const;
@@ -582,6 +586,8 @@ export type SessionEvent =
   | { type: "group_unrecoverable"; group: string }
   | { type: "publish_resolved"; outbound: string; resolution: PublishResolution }
   | { type: "app_event_dropped"; group: string; reason: DropReason }
+  | { type: "key_package_rotated" }
+  | { type: "self_updated"; group: string }
   | { type: "unmapped" };
 
 export const SESSION_EVENT_TYPES = [
@@ -604,6 +610,8 @@ export const SESSION_EVENT_TYPES = [
   "group_unrecoverable",
   "publish_resolved",
   "app_event_dropped",
+  "key_package_rotated",
+  "self_updated",
   "unmapped",
 ] as const;
 
@@ -611,7 +619,7 @@ export type _SessionEventComplete = Complete<
   Exclude<SessionEvent["type"], (typeof SESSION_EVENT_TYPES)[number]>
 >;
 
-/** What `publish_key_package` returns. */
+/** A published `KeyPackage`'s identity, as reported by `key_package_status`. */
 export type KeyPackageInfo = {
   /** Raw `KeyPackage` bytes. */
   keyPackage: Uint8Array;
@@ -707,7 +715,9 @@ export type BridgeRequest =
   | { type: "awaiting_durability" }
   | { type: "take_outbound" }
   | { type: "report_publish"; id: string; results: RelayResult[] }
-  | { type: "publish_key_package"; relays: string[] }
+  | { type: "ensure_key_package"; writeRelays: string[] }
+  | { type: "key_package_status" }
+  | { type: "sign_out"; writeRelays: string[] }
   | { type: "publish_inbox_relays"; relays: string[] }
   | {
       type: "create_group";
@@ -722,6 +732,7 @@ export type BridgeRequest =
   | { type: "remove_members"; group: string; members: string[] }
   | { type: "leave"; group: string }
   | { type: "self_update"; group: string }
+  | { type: "history_fetched"; group: string }
   | {
       type: "update_group_profile";
       group: string;
@@ -737,6 +748,13 @@ export type BridgeRequest =
   | { type: "disband"; group: string }
   | { type: "enable_disbanding"; group: string }
   | { type: "forget_group"; group: string }
+  | {
+      type: "select_key_packages";
+      account: string;
+      events: NostrEvent[];
+      /** The group whose invite requirements filter candidates; `undefined` = creation requirements. */
+      group: string | undefined;
+    }
   | { type: "seal_attachment"; group: string; attachment: AttachmentInput }
   | {
       type: "send_media";
@@ -769,18 +787,21 @@ export const REQUEST_TYPES = [
   "disband",
   "discard_attachment",
   "enable_disbanding",
+  "ensure_key_package",
   "forget_group",
   "group",
   "groups",
+  "history_fetched",
   "ingest",
   "invite",
+  "key_package_status",
   "leave",
   "open_attachment",
   "publish_inbox_relays",
-  "publish_key_package",
   "remove_members",
   "report_publish",
   "seal_attachment",
+  "select_key_packages",
   "self_update",
   "send_intent",
   "send_media",
@@ -788,6 +809,7 @@ export const REQUEST_TYPES = [
   "set_admin",
   "set_group_avatar",
   "set_retention",
+  "sign_out",
   "signer_reply",
   "submit_proof",
   "take_outbound",
@@ -800,12 +822,26 @@ export type _BridgeRequestComplete = Complete<
   Exclude<BridgeRequest["type"], (typeof REQUEST_TYPES)[number]>
 >;
 
-/** Result payloads returned by `publish_key_package`. */
-export type KeyPackageResult = {
-  keyPackage: Uint8Array;
-  keyPackageRef: string;
-  eventId: string;
-  account: string;
+/** `sign_out` result: which groups the device left and which admin groups it stays in. */
+export type SignOutResult = {
+  /** Groups the device left (`SelfRemove` committed or durable), hex each. */
+  left: string[];
+  /** Groups whose only admin leaf is this account's — the leaf stays, the host decides. */
+  keptAdminLeaves: string[];
+};
+
+/** `ensure_key_package`/`key_package_status` result: the slot's lifecycle standing. */
+export type KeyPackageStatusResult = {
+  /** The stable replaceable-event slot (`d` tag), hex. */
+  slot: string;
+  /** The promoted, acknowledged publication, or `undefined`. */
+  current: KeyPackageInfo | undefined;
+  /** Whether a replacement is staged or in flight. */
+  pending: boolean;
+  /** Retired private material still inside its grace period. */
+  retained: number;
+  /** Absolute Unix milliseconds of the earliest lifecycle deadline, or `undefined`. */
+  nextDueMs: bigint | undefined;
 };
 
 /** `seal_attachment` result: the blob to upload plus the send-time handle. */
@@ -829,12 +865,14 @@ export type OpResult =
   | { type: "outbound"; items: Outbound[] }
   | { type: "publish_resolution"; resolution: PublishResolution }
   | {
-      type: "key_package";
-      keyPackage: Uint8Array;
-      keyPackageRef: string;
-      eventId: string;
-      account: string;
+      type: "key_package_status";
+      slot: string;
+      current: KeyPackageInfo | undefined;
+      pending: boolean;
+      retained: number;
+      nextDueMs: bigint | undefined;
     }
+  | { type: "sign_out"; left: string[]; keptAdminLeaves: string[] }
   | { type: "inbox_relays"; outboundId: string }
   | { type: "group_created"; group: GroupSnapshot }
   | { type: "send_outcome"; outcome: SendOutcome }
@@ -844,7 +882,8 @@ export type OpResult =
   | { type: "ingested"; reports: InputReport[] }
   | { type: "ticked"; nextWakeMs: bigint | undefined }
   | { type: "groups"; groups: GroupSnapshot[] }
-  | { type: "group"; group: GroupSnapshot | undefined };
+  | { type: "group"; group: GroupSnapshot | undefined }
+  | { type: "key_packages"; events: NostrEvent[] };
 
 export const RESULT_TYPES = [
   "ready",
@@ -852,7 +891,8 @@ export const RESULT_TYPES = [
   "awaiting_durability",
   "outbound",
   "publish_resolution",
-  "key_package",
+  "key_package_status",
+  "sign_out",
   "inbox_relays",
   "group_created",
   "send_outcome",
@@ -863,6 +903,7 @@ export const RESULT_TYPES = [
   "ticked",
   "groups",
   "group",
+  "key_packages",
 ] as const;
 
 export type _OpResultComplete = Complete<Exclude<OpResult["type"], (typeof RESULT_TYPES)[number]>>;
@@ -897,6 +938,7 @@ export type PlainErrorKind =
   | "poisoned"
   | "reserved_app_event"
   | "send_rate_exceeded"
+  | "signed_out"
   | "storage"
   | "unknown_attachment"
   | "unknown_group"
@@ -958,6 +1000,7 @@ export const ERROR_KINDS = [
   "protocol_version_mismatch",
   "reserved_app_event",
   "send_rate_exceeded",
+  "signed_out",
   "signer",
   "storage",
   "too_large",
