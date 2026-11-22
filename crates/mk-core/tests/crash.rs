@@ -956,6 +956,19 @@ mod crash {
         for member in &runner.world.members {
             mk_core::testing::check_message_index(&member.host.durable_rows())
                 .expect("message index consistent at run end");
+            // C10's proof: an orphan bundle staged by a cut would go
+            // unseen — every reopen+settle must hold exactly
+            // `current + pending + retained` bundles.
+            if let Ok(status) = member.session.key_package_status() {
+                let expected = usize::from(status.current.is_some())
+                    + usize::from(status.pending)
+                    + status.retained as usize;
+                assert_eq!(
+                    mk_core::testing::key_package_bundle_count(&member.host.durable_rows()),
+                    expected,
+                    "bundles == current + pending + retained"
+                );
+            }
         }
         observed.batches = runner.world.members[measure]
             .host
