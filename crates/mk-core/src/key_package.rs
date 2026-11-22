@@ -296,6 +296,32 @@ pub(crate) fn key_package_event(
     })
 }
 
+/// The kind-5 slot deletion request a sign-out publishes to the
+/// `KeyPackage` write set (`transports/nostr.md` "Slot deletion"):
+/// exactly one `a` naming `30443:<author>:<d>` — no relay hint — and
+/// exactly one `k` of `30443`, empty content. `created_at` must cover
+/// every publication the slot ever made: NIP-09 `a` covers events with
+/// `created_at <=` the request's.
+pub(crate) fn slot_deletion_event(
+    pubkey: AccountId,
+    stable_slot_id: &str,
+    created_at: u64,
+) -> UnsignedEvent {
+    UnsignedEvent {
+        pubkey,
+        created_at,
+        kind: KIND_DELETION,
+        tags: vec![
+            vec![
+                "a".to_owned(),
+                format!("{KIND_KEY_PACKAGE}:{}:{stable_slot_id}", pubkey.to_hex()),
+            ],
+            vec!["k".to_owned(), KIND_KEY_PACKAGE.to_string()],
+        ],
+        content: String::new(),
+    }
+}
+
 /// The unsigned 10050 inbox-relay-list event body: one `relay` tag per URL,
 /// empty content.
 pub(crate) fn inbox_relays_event(

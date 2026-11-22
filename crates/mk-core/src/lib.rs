@@ -75,7 +75,7 @@ pub use events::{
     Availability, Disposition, GroupChange, InputCategory, InputOutcome, InputReport, LocalState,
     ReceivedMessage, SessionEvent,
 };
-pub use key_package_lifecycle::KeyPackageStatus;
+pub use key_package_lifecycle::{KeyPackageStatus, SignOutReport};
 pub use kv::{BatchCodecError, CommitSeq, KvBatch, KvHost, KvOp};
 pub use mls::KvOpenMlsStorage;
 pub use outbox::{Outbound, OutboundPurpose, PublishResolution, RelayResult, RelayStatus};

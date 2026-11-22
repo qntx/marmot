@@ -17,8 +17,10 @@
 //! and of every report — the engine's join transaction writes the
 //! consumed marker into it — and is never cached.
 
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 
+use cgka_traits::CgkaEngine;
+use cgka_traits::engine::SendIntent;
 use cgka_traits::maintenance::{
     KEY_PACKAGE_GENERATION_REVISION, KeyPackageLifecycleState, MaintenancePhase,
     PendingKeyPackageReplacement, RetainedKeyPackagePrivateMaterial, SignedPublicationArtifact,
@@ -36,8 +38,10 @@ use crate::outbox::{
 };
 
 use crate::provider::KvStorageProvider;
-use crate::session::{Session, SessionError, outbound_id_of, session_engine_error};
-use crate::types::OutboundId;
+use crate::session::{
+    GroupState, Session, SessionError, engine_gid, outbound_id_of, session_engine_error,
+};
+use crate::types::{GroupId, OutboundId};
 
 /// Replacement refresh bounds (marmot-session
 /// `KEY_PACKAGE_REFRESH_MIN/MAX_SECS`): the slot is republished on a
@@ -84,6 +88,20 @@ pub struct KeyPackageStatus {
     pub next_due_ms: Option<u64>,
 }
 
+/// [`Session::sign_out`]'s per-group outcome: which groups this device
+/// left, and where an admin leaf stayed because it cannot `SelfRemove`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct SignOutReport {
+    /// Groups this device left (`SelfRemove` staged or the leave request
+    /// already durable), sorted by group id bytes.
+    pub left: Vec<GroupId>,
+    /// Groups where this account's leaf is an admin that cannot
+    /// `SelfRemove` and has no sibling to name it — the leaf stays and
+    /// the host is told (design Q2), sorted by group id bytes.
+    pub kept_admin_leaves: Vec<GroupId>,
+}
+
 impl Session {
     /// Ensure this device's `KeyPackage` slot carries a live publication
     /// for `write_relays`: stage, sign and queue a replacement when one
@@ -99,6 +117,9 @@ impl Session {
         write_relays: &[String],
     ) -> Result<KeyPackageStatus, SessionError> {
         self.check_relays(write_relays)?;
+        if self.lifecycle_or_seed()?.slot_withdrawn_at.is_some() {
+            return Err(SessionError::SignedOut);
+        }
         self.drive_key_package(Some(write_relays), SignMode::Strict)
             .await?;
         self.key_package_status()
@@ -132,6 +153,200 @@ impl Session {
         })
     }
 
+    /// Sign this device out of the account's `KeyPackage` slot and every
+    /// group it can leave (design D1 "Leaving / signing out").
+    ///
+    /// First call withdraws the slot: a kind-5 deletion request
+    /// (`key_package::slot_deletion_event`, `created_at` covering every
+    /// publication the slot ever made) is signed, then one store
+    /// transaction deletes every `KeyPackage` bundle this device holds,
+    /// clears the lifecycle fields and sets `slot_withdrawn_at`, drops
+    /// every live `KeyPackage`/`KeyPackageRepublish` outbox row with its
+    /// retry pacing, and writes the deletion's outbox row to
+    /// `write_relays` ∪ the endpoints the lifecycle knew — a crash
+    /// either before or after the batch leaves a consistent slot (C18).
+    /// A repeat call skips the withdrawal and never stages a second
+    /// kind-5; `ensure_key_package` answers [`SessionError::SignedOut`]
+    /// afterwards and the tick's driver is inert.
+    ///
+    /// Groups run on every call: a group this account's leaf administers
+    /// is reported in [`SignOutReport::kept_admin_leaves`] and nothing is
+    /// sent (Q2 — it cannot `SelfRemove` and has no sibling to name its
+    /// leaf); otherwise `SendIntent::Leave` stages a `SelfRemove`.
+    /// `LeaveAlreadyRequested` counts as left; any other error aborts the
+    /// report — the caller retries `sign_out`, which skips the finished
+    /// withdrawal and continues.
+    ///
+    /// # Errors
+    /// [`SessionError::InvalidRelayUrl`] for an empty or disallowed write
+    /// set; [`SessionError`] for signer, engine or storage failures.
+    pub async fn sign_out(
+        &mut self,
+        write_relays: &[String],
+    ) -> Result<SignOutReport, SessionError> {
+        self.check_relays(write_relays)?;
+        self.withdraw_slot(write_relays).await?;
+        let mut report = SignOutReport::default();
+        for snapshot in self.groups()? {
+            if matches!(
+                snapshot.state,
+                GroupState::Removed | GroupState::Disbanded | GroupState::Unrecoverable
+            ) {
+                continue;
+            }
+            if snapshot.own_account_admin {
+                report.kept_admin_leaves.push(snapshot.id);
+                continue;
+            }
+            match self
+                .engine
+                .send(SendIntent::Leave {
+                    group_id: engine_gid(&snapshot.id),
+                })
+                .await
+                .map_err(session_engine_error)
+            {
+                Ok(result) => {
+                    self.finish_send(result)?;
+                    report.left.push(snapshot.id);
+                }
+                Err(SessionError::LeaveAlreadyRequested) => report.left.push(snapshot.id),
+                Err(error) => return Err(error),
+            }
+        }
+        report.left.sort_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
+        report
+            .kept_admin_leaves
+            .sort_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
+        Ok(report)
+    }
+
+    /// The withdrawal half of [`Session::sign_out`]: sign the slot's
+    /// kind-5, then in one store transaction drop every live
+    /// `KeyPackage`/`KeyPackageRepublish` publication row (and its
+    /// retry), retire every owned bundle, mark the slot withdrawn and
+    /// stage the deletion — C18's atomicity. A withdrawn slot is a
+    /// no-op, so a repeat `sign_out` never stages a second kind-5.
+    async fn withdraw_slot(&mut self, write_relays: &[String]) -> Result<(), SessionError> {
+        let mut lifecycle = self.lifecycle_or_seed()?;
+        if lifecycle.slot_withdrawn_at.is_some() {
+            return Ok(());
+        }
+        let now_secs = self.now_ms() / 1_000;
+        let created_at = [
+            Some(now_secs),
+            lifecycle.authored_event_created_at.map(|t| t.0),
+            lifecycle
+                .pending_replacement
+                .as_ref()
+                .map(|pending| pending.authored_created_at.0),
+        ]
+        .into_iter()
+        .flatten()
+        .max()
+        .unwrap_or(now_secs);
+        let signed = self
+            .sign_checked(key_package::slot_deletion_event(
+                self.account(),
+                &lifecycle.stable_slot_id,
+                created_at,
+            ))
+            .await?;
+        let mut relays: BTreeSet<String> = write_relays.iter().cloned().collect();
+        relays.extend(
+            lifecycle
+                .publication_targets
+                .iter()
+                .map(|target| target.endpoint.0.clone()),
+        );
+        if let Some(pending) = &lifecycle.pending_replacement {
+            relays.extend(
+                pending
+                    .targets
+                    .iter()
+                    .map(|target| target.endpoint.0.clone()),
+            );
+        }
+        let relays: Vec<String> = relays.into_iter().collect();
+        let deletion = SessionPublication {
+            id: signed.id.to_hex(),
+            event_json: signed.to_json(),
+            statuses: vec![PubTargetStatus::Attempting; relays.len()],
+            relays,
+            purpose: SessionPubPurpose::KeyPackageDeletion,
+        };
+        lifecycle.current_key_package = None;
+        lifecycle.current_key_package_ref = None;
+        lifecycle.current_not_before = None;
+        lifecycle.current_not_after = None;
+        lifecycle.authored_event_id = None;
+        lifecycle.authored_event_created_at = None;
+        lifecycle.authored_signed_event = None;
+        lifecycle.publication_targets.clear();
+        lifecycle.refresh_at = None;
+        lifecycle.pending_replacement = None;
+        lifecycle.retained_private_material.clear();
+        lifecycle.slot_withdrawn_at = Some(Timestamp(created_at));
+        lifecycle.phase = MaintenancePhase::Complete;
+        let provider = &self.provider;
+        let engine = &mut self.engine;
+        provider
+            .store()
+            .transact(|| Self::retire_slot_material(provider, engine, &lifecycle, &deletion))?;
+        if let Some(seq) = self.provider.last_seq() {
+            self.gate.insert(OutboundId(signed.id.0), seq);
+        }
+        Ok(())
+    }
+
+    /// The transacted side effects of [`Session::withdraw_slot`]: delete
+    /// the live `KeyPackage`/`KeyPackageRepublish` publication rows and
+    /// their retries, retire every owned bundle with the withdrawn
+    /// lifecycle record and stage the signed kind-5.
+    fn retire_slot_material(
+        provider: &KvStorageProvider,
+        engine: &mut cgka_engine::Engine<KvStorageProvider>,
+        lifecycle: &KeyPackageLifecycleState,
+        deletion: &SessionPublication,
+    ) -> Result<(), SessionError> {
+        for publication in provider
+            .session_publications()
+            .map_err(SessionError::Storage)?
+        {
+            if !matches!(
+                publication.purpose,
+                SessionPubPurpose::KeyPackage | SessionPubPurpose::KeyPackageRepublish
+            ) {
+                continue;
+            }
+            let id = OutboundId::from_hex(&publication.id)
+                .map_err(|_| SessionError::Internal("session publication id"))?;
+            provider
+                .delete_session_publication(&id)
+                .map_err(SessionError::Storage)?;
+            provider
+                .delete_outbound_retry(&id)
+                .map_err(SessionError::Storage)?;
+        }
+        let mut retired = Vec::new();
+        let mut seen = BTreeSet::new();
+        for package in engine
+            .durably_owned_key_packages()
+            .map_err(session_engine_error)?
+        {
+            if seen.insert(package.bytes().to_vec()) {
+                retired.push(package);
+            }
+        }
+        engine
+            .promote_key_package_lifecycle(&retired, lifecycle)
+            .map_err(session_engine_error)?;
+        provider
+            .put_session_publication(deletion)
+            .map_err(SessionError::Storage)?;
+        Ok(())
+    }
+
     /// One lifecycle pass; returns the earliest deadline as absolute Unix
     /// milliseconds for the caller's wake/status answer.
     ///
@@ -145,6 +360,10 @@ impl Session {
     ) -> Result<Option<u64>, SessionError> {
         let now_secs = self.now_ms() / 1_000;
         let mut lifecycle = self.lifecycle_or_seed()?;
+        // Withdrawn slots hold nothing and drive nothing.
+        if lifecycle.slot_withdrawn_at.is_some() {
+            return Ok(None);
+        }
         // (a) Sweep expired private material.
         self.sweep_lifecycle(&mut lifecycle, now_secs)?;
         // (b) Write-set growth re-sends the same signed event.
@@ -627,6 +846,9 @@ impl Session {
         &self,
         lifecycle: &KeyPackageLifecycleState,
     ) -> Result<Option<u64>, SessionError> {
+        if lifecycle.slot_withdrawn_at.is_some() {
+            return Ok(None);
+        }
         let now_ms = self.now_ms();
         let now_secs = now_ms / 1_000;
         let mut due: Option<u64> = None;

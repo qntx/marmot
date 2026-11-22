@@ -44,6 +44,8 @@ pub enum OutboundPurpose {
     /// The account's `KeyPackage` re-sent to relays the write set gained
     /// (the same signed event, a new outbound).
     KeyPackageRepublish,
+    /// The kind-5 slot deletion a sign-out publishes (kind 5).
+    KeyPackageDeletion,
     /// The account's inbox relay list (kind 10050).
     InboxRelays,
 }
@@ -146,6 +148,7 @@ pub(crate) struct SessionPublication {
 pub(crate) enum SessionPubPurpose {
     KeyPackage,
     KeyPackageRepublish,
+    KeyPackageDeletion,
     InboxRelays,
 }
 

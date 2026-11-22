@@ -50,8 +50,8 @@ mod lifecycle_tests {
     use std::sync::{Arc, Mutex};
 
     use mk_core::{
-        AccountId, AccountSigner, Availability, Clock, Event, InputOutcome, Outbound,
-        OutboundPurpose, SessionEvent, SignerError, SignerFuture, UnsignedEvent,
+        AccountId, AccountSigner, Availability, Clock, Event, GroupState, InputOutcome, Outbound,
+        OutboundPurpose, SessionError, SessionEvent, SignerError, SignerFuture, UnsignedEvent,
         testing::{LocalSigner, key_package_bundle_count},
     };
 
@@ -482,5 +482,235 @@ mod lifecycle_tests {
         assert!(status.pending);
         assert!(status.current.is_some(), "the current still stands");
         assert_bundle_invariant(&a);
+    }
+
+    /// Sign-out withdraws the slot atomically: one well-formed kind-5 to
+    /// the union write set, every bundle gone, every outstanding
+    /// `KeyPackage`/`KeyPackageRepublish` row dropped, `ensure` answers
+    /// `SignedOut` and ticks stage nothing.
+    #[tokio::test(flavor = "current_thread")]
+    async fn sign_out_withdraws_slot_and_deletes_bundles() {
+        let relay = FakeRelay::new();
+        let mut a = open_member().await;
+        publish_identity(&mut a, &relay, RELAY).await;
+        let current = key_package_of(&relay, RELAY, &a.account_hex());
+
+        // Grow the write set and leave the republish outstanding.
+        a.session
+            .ensure_key_package(&[RELAY.to_owned(), RELAY2.to_owned()])
+            .await
+            .expect("ensure");
+        let republish = take(&mut a)
+            .into_iter()
+            .find(|item| item.purpose == OutboundPurpose::KeyPackageRepublish)
+            .expect("republish outbound");
+
+        let report = a
+            .session
+            .sign_out(&[RELAY.to_owned()])
+            .await
+            .expect("sign_out");
+        assert_eq!(report.left, []);
+        assert_eq!(report.kept_admin_leaves, []);
+
+        let outbounds = take(&mut a);
+        assert_eq!(outbounds.len(), 1, "only the kind-5 is owed");
+        let deletion = &outbounds[0];
+        assert_eq!(deletion.purpose, OutboundPurpose::KeyPackageDeletion);
+        assert_eq!(deletion.event.kind, 5);
+        assert_eq!(deletion.event.pubkey, a.signer.account());
+        assert_eq!(deletion.event.content, "");
+        let a_tags: Vec<_> = deletion
+            .event
+            .tags
+            .iter()
+            .filter(|tag| tag.first().map(String::as_str) == Some("a"))
+            .collect();
+        assert_eq!(a_tags.len(), 1, "exactly one a tag");
+        assert_eq!(
+            a_tags[0].get(1).map(String::as_str),
+            Some(format!("30443:{}:{}", a.account_hex(), d_tag(&current)).as_str()),
+            "the a tag names the slot"
+        );
+        let k_tags: Vec<_> = deletion
+            .event
+            .tags
+            .iter()
+            .filter(|tag| tag.first().map(String::as_str) == Some("k"))
+            .collect();
+        assert_eq!(k_tags.len(), 1, "exactly one k tag");
+        assert_eq!(k_tags[0].get(1).map(String::as_str), Some("30443"));
+        assert!(
+            deletion.event.created_at >= current.created_at,
+            "the request covers every publication in the slot"
+        );
+        let mut expected: Vec<String> = republish.relays.clone();
+        expected.push(RELAY.to_owned());
+        expected.sort();
+        let mut got = deletion.relays.clone();
+        got.sort();
+        assert_eq!(got, expected, "the union write set carries the kind-5");
+
+        // Every bundle is gone and the status reads empty.
+        assert_eq!(
+            key_package_bundle_count(&a.host.durable_rows()),
+            0,
+            "no KeyPackage bundles remain"
+        );
+        let status = a.session.key_package_status().expect("status");
+        assert!(status.current.is_none() && !status.pending && status.retained == 0);
+        assert!(status.next_due_ms.is_none());
+        let error = a
+            .session
+            .ensure_key_package(&[RELAY.to_owned()])
+            .await
+            .expect_err("ensure after withdrawal");
+        assert!(matches!(error, SessionError::SignedOut));
+
+        // A repeat call skips the withdrawal: no second kind-5.
+        a.session
+            .sign_out(&[RELAY.to_owned()])
+            .await
+            .expect("idempotent sign_out");
+        a.session.tick().await.expect("tick");
+        assert!(
+            take(&mut a).is_empty(),
+            "nothing new is staged after withdrawal"
+        );
+    }
+
+    /// A non-admin member signs out: the group gets a `SelfRemove` the
+    /// admin commits; the leaver ends `Removed` and the admin's roster no
+    /// longer lists the account.
+    #[tokio::test(flavor = "current_thread")]
+    async fn sign_out_sends_self_remove_to_member_group() {
+        let relay = FakeRelay::new();
+        let mut b = open_member().await;
+        publish_identity(&mut b, &relay, RELAY).await;
+        let mut a = open_member().await;
+        publish_identity(&mut a, &relay, RELAY).await;
+        let gid = group_with(&mut b, &relay, RELAY, &[&a], "sign-out").await;
+        join_via_welcome(&mut a, &relay, RELAY).await;
+        assert!(
+            !a.session
+                .group(&gid)
+                .expect("group")
+                .expect("snapshot")
+                .own_account_admin,
+            "a is a plain member"
+        );
+
+        let report = a
+            .session
+            .sign_out(&[RELAY.to_owned()])
+            .await
+            .expect("sign_out");
+        assert_eq!(report.left, vec![gid.clone()]);
+        assert_eq!(report.kept_admin_leaves, []);
+        flush(&mut a, &relay).await;
+
+        // The admin applies and commits the SelfRemove proposal.
+        sync_member(&mut b, &relay, RELAY, &gid).await;
+        sync_member(&mut b, &relay, RELAY, &gid).await;
+        let b_snapshot = b.session.group(&gid).expect("group").expect("snapshot");
+        assert!(
+            !b_snapshot
+                .members
+                .iter()
+                .any(|member| member.account == a.signer.account()),
+            "the account is gone from the admin's roster"
+        );
+
+        // The leaver follows the commit to `Removed`.
+        let backlog = group_events(&relay, RELAY, &a.route_hex(&gid));
+        ingest_backlog(&mut a, &backlog).await;
+        a.session.tick().await.expect("tick");
+        flush(&mut a, &relay).await;
+        let a_snapshot = a.session.group(&gid).expect("group").expect("snapshot");
+        assert_eq!(a_snapshot.state, GroupState::Removed);
+    }
+
+    /// An admin leaf cannot `SelfRemove`: the group is reported in
+    /// `kept_admin_leaves` and nothing is sent there.
+    #[tokio::test(flavor = "current_thread")]
+    async fn sign_out_keeps_admin_leaf() {
+        let relay = FakeRelay::new();
+        let mut a = open_member().await;
+        publish_identity(&mut a, &relay, RELAY).await;
+        let mut b = open_member().await;
+        publish_identity(&mut b, &relay, RELAY).await;
+        let gid = group_with(&mut a, &relay, RELAY, &[&b], "admin-kept").await;
+        join_via_welcome(&mut b, &relay, RELAY).await;
+
+        let report = a
+            .session
+            .sign_out(&[RELAY.to_owned()])
+            .await
+            .expect("sign_out");
+        assert_eq!(report.kept_admin_leaves, vec![gid.clone()]);
+        assert_eq!(report.left, []);
+        let outbounds = take(&mut a);
+        assert!(
+            outbounds
+                .iter()
+                .all(|item| item.purpose == OutboundPurpose::KeyPackageDeletion),
+            "nothing but the kind-5 is owed: {outbounds:?}"
+        );
+
+        // The member still sees the admin's account after a settle.
+        sync_member(&mut b, &relay, RELAY, &gid).await;
+        let b_snapshot = b.session.group(&gid).expect("group").expect("snapshot");
+        assert!(
+            b_snapshot
+                .members
+                .iter()
+                .any(|member| member.account == a.signer.account()),
+            "the admin leaf stays"
+        );
+    }
+
+    /// A Welcome naming a deleted `KeyPackage` is ignored; the slot's
+    /// kind-5 also removes the publication from selection.
+    #[tokio::test(flavor = "current_thread")]
+    async fn deleted_package_joins_nothing_and_selects_nothing() {
+        let relay = FakeRelay::new();
+        let mut a = open_member().await;
+        publish_identity(&mut a, &relay, RELAY).await;
+        let published = key_package_of(&relay, RELAY, &a.account_hex());
+
+        let mut b = open_member().await;
+        publish_identity(&mut b, &relay, RELAY).await;
+        let _gid = group_with(&mut b, &relay, RELAY, &[&a], "deleted-kp").await;
+
+        a.session
+            .sign_out(&[RELAY.to_owned()])
+            .await
+            .expect("sign_out");
+        let deletion = take(&mut a)
+            .into_iter()
+            .find(|item| item.purpose == OutboundPurpose::KeyPackageDeletion)
+            .expect("kind-5");
+
+        // The Welcome names a bundle the device no longer holds.
+        let welcomes = welcomes_for(&relay, RELAY, &a.account_hex());
+        let events = ingest_backlog(&mut a, &welcomes).await;
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, SessionEvent::GroupJoined { .. })),
+            "no join from a deleted KeyPackage"
+        );
+        assert_eq!(a.session.groups().expect("groups"), []);
+
+        // Selection drops the slot's publications covered by its kind-5.
+        let selected = a
+            .session
+            .select_key_packages(
+                a.signer.account(),
+                &[published.clone(), deletion.event.clone()],
+                None,
+            )
+            .expect("select");
+        assert!(selected.is_empty(), "the slot is deleted");
     }
 }

@@ -521,6 +521,9 @@ pub enum SessionError {
     /// A leave was already requested for this group.
     #[error("leave already requested")]
     LeaveAlreadyRequested,
+    /// The `KeyPackage` slot was withdrawn by [`Session::sign_out`].
+    #[error("key package slot signed out")]
+    SignedOut,
     /// A member's advertised capabilities do not cover the group's required
     /// set.
     #[error("missing required capabilities")]
@@ -1298,6 +1301,7 @@ impl Session {
             purpose: match publication.purpose {
                 SessionPubPurpose::KeyPackage => OutboundPurpose::KeyPackage,
                 SessionPubPurpose::KeyPackageRepublish => OutboundPurpose::KeyPackageRepublish,
+                SessionPubPurpose::KeyPackageDeletion => OutboundPurpose::KeyPackageDeletion,
                 SessionPubPurpose::InboxRelays => OutboundPurpose::InboxRelays,
             },
         });
@@ -2307,7 +2311,7 @@ impl Session {
         Ok(SentMessage { outcome, message })
     }
 
-    fn finish_send(&mut self, result: SendResult) -> Result<SendOutcome, SessionError> {
+    pub(crate) fn finish_send(&mut self, result: SendResult) -> Result<SendOutcome, SessionError> {
         let queued = matches!(result, SendResult::Queued { .. });
         let leave = matches!(result, SendResult::LeaveRequested { .. });
         let disband = matches!(result, SendResult::DisbandRequested { .. });
@@ -3505,7 +3509,7 @@ impl Session {
     }
 }
 
-fn engine_gid(group: &GroupId) -> EngineGroupId {
+pub(crate) fn engine_gid(group: &GroupId) -> EngineGroupId {
     EngineGroupId::new(group.0.clone())
 }
 
