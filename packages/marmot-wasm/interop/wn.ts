@@ -422,6 +422,7 @@ async function run(): Promise<void> {
   const failures: string[] = [];
   let poolRef: Pool | undefined;
   let clientRef: MarmotClient | undefined;
+  let client2Ref: MarmotClient | undefined;
   try {
     const rigBase = { home, socket };
     await waitFor(
@@ -1366,6 +1367,92 @@ async function run(): Promise<void> {
       }, "our snapshot disbanded");
     });
 
+    // S17 — a second device of our account signs out: its SelfRemove
+    // commits, wn shows one leaf left, the first device keeps chatting.
+    await scenario("S17 second device signs out", async () => {
+      const backend2: Backend = await releaseBackend();
+      const client2 = await MarmotClient.open({
+        backend: backend2,
+        kv: memoryKv(),
+        cursors: memoryCursorStore(),
+        signer,
+        clock: {
+          now: () => ({
+            unixMs: BigInt(Date.now()),
+            monotonicMs: BigInt(Math.max(0, Date.now() - startMonotonic)),
+          }),
+        },
+        timer,
+        relays: nostrRelayPort(pool),
+        lookupRelays: [url],
+        allowLoopback: true,
+      });
+      client2Ref = client2;
+      const invites2: InviteEvent[] = [];
+      const changes2: GroupEvent[] = [];
+      client2.onInvite((event) => {
+        invites2.push(event);
+      });
+      client2.onGroupChange((event) => {
+        changes2.push(event);
+      });
+      await client2.ensureKeyPackage();
+      await waitFor(
+        () =>
+          served.relay
+            .events()
+            .filter((stored) => stored.kind === KEY_PACKAGE_KIND && stored.pubkey === signer.pubkey)
+            .length >= 2 || undefined,
+        "second device's KeyPackage on the relay",
+      );
+
+      let at = Date.now();
+      const created = await wn(rig, ["groups", "create", "m3b-17", ourNpub], rig.wnNpub);
+      const wnGid = wnGroupId(created);
+      const [gid1, gid2] = await Promise.all([
+        waitFor(
+          () => invites.flatMap((event) => (event.type === "joined" ? [event.group] : [])).at(-1),
+          "device 1 onInvite joined",
+        ),
+        waitFor(
+          () => invites2.flatMap((event) => (event.type === "joined" ? [event.group] : [])).at(-1),
+          "device 2 onInvite joined",
+        ),
+      ]);
+      if (gid1 !== wnGid || gid2 !== wnGid) {
+        throw new Error(`group id mismatch: device1 ${gid1} device2 ${gid2} wn ${wnGid}`);
+      }
+      log(`both devices joined ${wnGid} (${secs(at)})`);
+
+      at = Date.now();
+      const report = await client2.signOut();
+      if (!report.left.includes(gid2)) {
+        throw new Error(`signOut left ${JSON.stringify(report.left)}, expected ${gid2}`);
+      }
+      await waitFor(async () => {
+        const reply = await wn(rig, ["groups", "members", wnGid], rig.wnNpub);
+        const leaves = ptrArr(reply, "/result/members").filter((item) => {
+          const text = JSON.stringify(item);
+          return text.includes(ourNpub) || text.includes(signer.pubkey);
+        });
+        return leaves.length === 1 || undefined;
+      }, "wn members shows one leaf for our account");
+      await waitFor(
+        () =>
+          changes2.some((event) => event.group === gid2 && event.type === "group_state_changed") ||
+          undefined,
+        "device 2 observes its own removal",
+      );
+      log(`device 2 signed out; wn keeps one leaf (${secs(at)})`);
+
+      const ourText = `s17-us-${Math.floor(Date.now() / 1000)}`;
+      await client.sendMessage(gid1, { kind: CHAT_KIND, tags: [], content: ourText });
+      await waitFor(async () => {
+        const entries = await wnMessages(rig, wnGid);
+        return entries.some((entry) => entry.includes(ourText)) || undefined;
+      }, `wn messages list shows ${ourText}`);
+    });
+
     // S19 — our device consumed KeyPackage → rotation; wn re-invites.
     await scenario("S19 consumed KeyPackage rotates; wn re-invites", async () => {
       const [before] = served.relay
@@ -1442,6 +1529,11 @@ async function run(): Promise<void> {
       throw new Error(`${failures.length} scenario(s) failed`);
     }
   } finally {
+    try {
+      await client2Ref?.close();
+    } catch (error) {
+      log(`client2 close error: ${error instanceof Error ? error.message : String(error)}`);
+    }
     try {
       await clientRef?.close();
     } catch (error) {

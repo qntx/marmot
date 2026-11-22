@@ -1183,3 +1183,93 @@ async fn scenario19_consumed_key_package_rotates() {
     rig.relay.shutdown();
     eprintln!("SCENARIO-19 PASS {:.1}s", start.elapsed().as_secs_f64());
 }
+
+// ---- scenario 17: second device signs out ----------------------------
+
+/// S17: two devices of one account in one wn group; the second device
+/// signs out — its `SelfRemove` commits, wn shows one leaf left for the
+/// account, and the signed-out device ends `Removed` while the first
+/// device keeps chatting.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs wn/wnd built from the upstream.json wn pin; see CONTRIBUTING"]
+async fn scenario17_second_device_signs_out() {
+    let start = Instant::now();
+    let rig = Arc::new(rig("s17").await);
+
+    // Two devices of one account: the same secret over separate stores,
+    // each with its own KeyPackage slot.
+    let signer = Arc::new(mk_core::testing::LocalSigner::from_secret([0x5d; 32]).expect("secret"));
+    let mut a1 = open_member_with(Arc::clone(&signer)).await;
+    let mut a2 = open_member_with(signer).await;
+    publish_identity(&mut a1, &rig).await;
+    publish_identity(&mut a2, &rig).await;
+    let a_npub = a1.npub();
+    let a_hex = a1.account_hex();
+    assert_eq!(a2.account_hex(), a_hex, "one account, two devices");
+
+    let created = wn(
+        &rig.home,
+        &rig.socket,
+        Some(&rig.wn_npub),
+        &["groups", "create", "interop-17", &a_npub],
+    );
+    let wn_gid = wn_group_id(&created);
+    let gid = hex_group(&wn_gid);
+    join_wn_group(&rig, &mut a1, &gid).await;
+    join_wn_group(&rig, &mut a2, &gid).await;
+
+    // The second device signs out: its leaf's SelfRemove is staged and
+    // published; wn commits it, leaving one leaf for the account.
+    let report = a2
+        .session
+        .sign_out(std::slice::from_ref(&rig.url))
+        .await
+        .expect("sign_out");
+    assert_eq!(report.left, vec![gid.clone()], "the member group is left");
+    assert!(report.kept_admin_leaves.is_empty());
+    flush(&mut a2, &rig).await;
+
+    let wn_gid_ref = &wn_gid;
+    let npub_ref = &a_npub;
+    until(
+        || {
+            let rig = Arc::clone(&rig);
+            async move {
+                (wn_members(&rig, wn_gid_ref)
+                    .iter()
+                    .filter(|member| member.to_string().contains(npub_ref))
+                    .count()
+                    == 1)
+                    .then_some(())
+            }
+        },
+        "wn roster shows one leaf for our account",
+        90_000,
+        800,
+    )
+    .await;
+
+    // The signed-out device follows the commit to `Removed`.
+    let events = sync(&mut a2, &rig, &gid).await;
+    let _ = events;
+    let state = a2
+        .session
+        .group(&gid)
+        .expect("group")
+        .map(|group| group.state);
+    assert_eq!(state, Some(GroupState::Removed), "a2 is removed");
+
+    // The remaining device keeps the group: roster {wn, our leaf}.
+    let events = sync(&mut a1, &rig, &gid).await;
+    let _ = events;
+    let roster = a1.roster(&gid);
+    assert!(
+        roster.contains(&rig.wn_pub) && roster.contains(&a_hex),
+        "a1 roster {{wn, A}}: {roster:?}"
+    );
+    member_says(&rig, &mut a1, &gid, &wn_gid, "s17-still-here").await;
+    wn_says(&rig, &mut a1, &gid, &wn_gid, "s17-wn-replies").await;
+
+    rig.relay.shutdown();
+    eprintln!("SCENARIO-17 PASS {:.1}s", start.elapsed().as_secs_f64());
+}

@@ -582,7 +582,12 @@ impl Member {
 
 /// Open a fresh member, completing the account-proof handshake.
 pub async fn open_member() -> Member {
-    let signer = Arc::new(LocalSigner::new());
+    open_member_with(Arc::new(LocalSigner::new())).await
+}
+
+/// Open a member over `signer` — a second device of an existing account
+/// shares the signer's `Arc`.
+pub async fn open_member_with(signer: Arc<LocalSigner>) -> Member {
     let clock = Arc::new(WallClock::new());
     let host = Arc::new(RecordingHost::new());
     let signer_cfg: Arc<dyn AccountSigner> = signer.clone();
