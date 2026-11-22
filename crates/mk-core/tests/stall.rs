@@ -431,12 +431,28 @@ mod stall_tests {
 
         // One device leaves: the removed copy still sees the account's
         // other leaf — `RemovedDevice`, state `Removed`.
+        let route_a = a1.route_hex(&gid);
+        let seen: std::collections::BTreeSet<mk_core::EventId> =
+            group_events(&relay, RELAY, &route_a)
+                .iter()
+                .map(|event| event.id)
+                .collect();
         a2.session.leave(&gid).await.expect("leave");
         flush(&mut a2, &relay).await;
         // B ingests the SelfRemove proposal and auto-commits past jitter.
-        // The commit must postdate the proposal: `ingest_batch` orders
-        // same-second events by id, and a commit that lands before the
-        // proposal it references stays deferred past redelivery.
+        // a1's deliveries are ordered proposal-first: a commit ingested
+        // before the proposal it references stays deferred past
+        // redelivery (and event `created_at` is the signer's wall second,
+        // so same-second batch order is by id — not something clock
+        // advances can arrange). Ingesting the proposal alone first also
+        // keeps a1's auto-committer from forking the epoch: the covering
+        // commit lands before any jitter can fire.
+        let proposal_ids: std::collections::BTreeSet<mk_core::EventId> =
+            group_events(&relay, RELAY, &route_a)
+                .iter()
+                .filter(|event| !seen.contains(&event.id))
+                .map(|event| event.id)
+                .collect();
         b.clock.advance(60_000);
         let route = b.route_hex(&gid);
         ingest_backlog(&mut b, &group_events(&relay, RELAY, &route)).await;
@@ -445,7 +461,19 @@ mod stall_tests {
             b.session.tick().await.expect("tick");
             flush(&mut b, &relay).await;
         }
-        sync_member(&mut a1, &relay, RELAY, &gid).await;
+        for _ in 0..6 {
+            let feed = group_events(&relay, RELAY, &route_a);
+            let (proposals, rest): (Vec<Event>, Vec<Event>) = feed
+                .into_iter()
+                .partition(|event| proposal_ids.contains(&event.id));
+            if !proposals.is_empty() {
+                ingest_backlog(&mut a1, &proposals).await;
+            }
+            ingest_backlog(&mut a1, &rest).await;
+            a1.session.tick().await.expect("tick");
+            a1.clock.advance(2_000);
+            flush(&mut a1, &relay).await;
+        }
         sync_member(&mut a2, &relay, RELAY, &gid).await;
         let snap = snapshot(&a2, &gid);
         assert_eq!(snap.state, GroupState::Removed);
@@ -465,7 +493,19 @@ mod stall_tests {
             b.session.tick().await.expect("tick");
             flush(&mut b, &relay).await;
         }
-        sync_member(&mut a1, &relay, RELAY, &gid).await;
+        for _ in 0..6 {
+            let feed = group_events(&relay, RELAY, &route_a);
+            let (proposals, rest): (Vec<Event>, Vec<Event>) = feed
+                .into_iter()
+                .partition(|event| proposal_ids.contains(&event.id));
+            if !proposals.is_empty() {
+                ingest_backlog(&mut a1, &proposals).await;
+            }
+            ingest_backlog(&mut a1, &rest).await;
+            a1.session.tick().await.expect("tick");
+            a1.clock.advance(2_000);
+            flush(&mut a1, &relay).await;
+        }
         sync_member(&mut a2, &relay, RELAY, &gid).await;
         // a1's live copy processes the removal: no account leaf remains.
         let snap = snapshot(&a1, &gid);
