@@ -54,7 +54,7 @@ pub trait AccountSigner: Send + Sync + fmt::Debug {
 
     /// Sign `unsigned` and return the complete event. Implementations must
     /// set `id` to [`UnsignedEvent::id`] and a valid schnorr signature;
-    /// [`CheckedSigner`] rejects every reply that does not.
+    /// the session validates every reply and rejects one that does not.
     fn sign_event(&self, unsigned: UnsignedEvent) -> SignerFuture<'_, Result<Event, SignerError>>;
 
     /// NIP-44 seal `plaintext` for `peer`'s key.
