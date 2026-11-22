@@ -194,6 +194,7 @@ describe("decoder fuzz", () => {
       encodeClientState({
         cursors: { [`group|${pick(100)}|r`]: pick(2_000_000_000) },
         inbox: [`wss://r${pick(9)}.example`],
+        nip44Extended: true,
       }),
     );
     const states = Array.from({ length: ITERATIONS }, (_v, i) =>

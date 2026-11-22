@@ -66,7 +66,14 @@ export class SignerInvalidPayloadError extends Error {
   }
 }
 
-/** The account-signer surface the engine drives on `signer_pending`. */
+/**
+ * The account-signer surface the engine drives on `signer_pending`. Both NIP-44 directions must
+ * support extended length — plaintexts of at least 65,536 bytes under the 6-byte `00 00 ‖
+ * u32be(len)` prefix (spec `transports/nostr.md`) — including when the signer is a NIP-46 remote
+ * signer (the requirement covers its request/response events) or a NIP-07/NIP-55 extension;
+ * `MarmotClient.open` probes this once per client state and rejects `signer_unsupported` otherwise,
+ * and `@qntx/marmot/testing` `checkSignerNip44` is the host conformance check.
+ */
 export type Signer = {
   /** The account this session signs for, 32-byte hex. */
   readonly pubkey: string;

@@ -1,7 +1,8 @@
 /**
- * The client's persisted sync state: one versioned JSON blob (`{"v":1,"cursors":{...},"inbox":[]}`)
- * behind the `CursorStore`. Decoding is total — anything missing, malformed, wrong version or wrong
- * type yields the empty state (a full refetch), never a throw.
+ * The client's persisted sync state: one versioned JSON blob
+ * (`{"v":2,"cursors":{...},"inbox":[...],"nip44Extended":bool}`) behind the `CursorStore`. Decoding
+ * is total — anything missing, malformed, wrong version or wrong type yields the empty state (a
+ * full refetch and, while `nip44Extended` is unset, one signer probe at open), never a throw.
  */
 
 import { utf8Decode, utf8Encode } from "../backend/utf8.ts";
@@ -11,16 +12,21 @@ export type ClientState = {
   cursors: Record<string, number>;
   /** The account's persisted inbox relays. */
   inbox: string[];
+  /**
+   * The signer passed the open-time NIP-44 extended-length self round trip (spec
+   * `transports/nostr.md`).
+   */
+  nip44Extended: boolean;
 };
 
-const VERSION = 1;
+const VERSION = 2;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function empty(): ClientState {
-  return { cursors: {}, inbox: [] };
+  return { cursors: {}, inbox: [], nip44Extended: false };
 }
 
 /** Decode the stored blob; every malformed input yields the empty state. */
@@ -37,7 +43,7 @@ export function decodeClientState(bytes: Uint8Array | undefined): ClientState {
   if (!isRecord(parsed) || parsed["v"] !== VERSION || !isRecord(parsed["cursors"])) {
     return empty();
   }
-  if (!Array.isArray(parsed["inbox"])) {
+  if (!Array.isArray(parsed["inbox"]) || typeof parsed["nip44Extended"] !== "boolean") {
     return empty();
   }
   const cursors: Record<string, number> = {};
@@ -54,10 +60,17 @@ export function decodeClientState(bytes: Uint8Array | undefined): ClientState {
     }
     inbox.push(relay);
   }
-  return { cursors, inbox };
+  return { cursors, inbox, nip44Extended: parsed["nip44Extended"] };
 }
 
 /** Encode `state` as the versioned blob for `CursorStore.save`. */
 export function encodeClientState(state: ClientState): Uint8Array {
-  return utf8Encode(JSON.stringify({ v: VERSION, cursors: state.cursors, inbox: state.inbox }));
+  return utf8Encode(
+    JSON.stringify({
+      v: VERSION,
+      cursors: state.cursors,
+      inbox: state.inbox,
+      nip44Extended: state.nip44Extended,
+    }),
+  );
 }

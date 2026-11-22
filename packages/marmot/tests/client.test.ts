@@ -9,6 +9,7 @@ import {
   encodeResponse,
 } from "../src/backend/codec.ts";
 import type { Json } from "../src/backend/codec.ts";
+import { SignerRefusedError } from "../src/backend/engine.ts";
 import type { Signer } from "../src/backend/engine.ts";
 import { encodeKvBatch } from "../src/backend/kv.ts";
 import type { Backend, BridgeHandle, BridgeHost } from "../src/backend/port.ts";
@@ -27,7 +28,7 @@ import type {
 } from "../src/backend/protocol.ts";
 import { utf8Decode, utf8Encode } from "../src/backend/utf8.ts";
 import { MarmotClient } from "../src/client/client.ts";
-import type { MarmotError } from "../src/client/errors.ts";
+import { MarmotError } from "../src/client/errors.ts";
 import { COMMIT_SIZE_FLOOR_BYTES, MAX_TRACKED_COMMITS } from "../src/client/pump.ts";
 import { decodeClientState, encodeClientState } from "../src/client/state.ts";
 import { manualClock } from "../src/testing/clock.ts";
@@ -152,8 +153,13 @@ type Script = {
   calls: BridgeRequest[];
 };
 
-function scriptedBackend(script: Script): { backend: Backend; closed: () => boolean } {
+function scriptedBackend(script: Script): {
+  backend: Backend;
+  closed: () => boolean;
+  opened: () => number;
+} {
   let closed = false;
+  let opened = 0;
   let seq = 0n;
   const inflight = new Map<string, Outbound>();
   const done = (): BridgeResponse => DONE;
@@ -162,6 +168,7 @@ function scriptedBackend(script: Script): { backend: Backend; closed: () => bool
     create: (host: BridgeHost) => {
       const handle: BridgeHandle = {
         open: async () => {
+          opened += 1;
           await Promise.resolve();
           return utf8Encode(
             JSON.stringify(encodeOpenResponse({ type: "ready", account: ACCOUNT })),
@@ -299,9 +306,10 @@ function scriptedBackend(script: Script): { backend: Backend; closed: () => bool
       return handle;
     },
   };
-  return { backend, closed: () => closed };
+  return { backend, closed: () => closed, opened: () => opened };
 }
 
+/** An echo signer: `nip44Decrypt` undoes `nip44Encrypt`, so the open probe round-trips. */
 function signer(): Signer {
   return {
     pubkey: ACCOUNT,
@@ -315,8 +323,47 @@ function signer(): Signer {
         content: unsigned.content,
         sig: "5".repeat(128),
       }),
+    nip44Encrypt: async (_peer, plaintext) => Promise.resolve(`e${plaintext}`),
+    nip44Decrypt: async (_peer, ciphertext) =>
+      Promise.resolve(ciphertext.startsWith("e") ? ciphertext.slice(1) : ciphertext),
+  };
+}
+
+/** A pre-NIP-44-extended signer: it cannot round-trip the 65,536-byte probe plaintext. */
+function legacySigner(): Signer {
+  return {
+    ...signer(),
     nip44Encrypt: async () => Promise.resolve("cipher"),
     nip44Decrypt: async () => Promise.resolve("plain"),
+  };
+}
+
+/** A signer that refuses its NIP-44 legs, like a locked NIP-07 extension. */
+function refusingSigner(): Signer {
+  return {
+    ...signer(),
+    nip44Encrypt: async () => Promise.reject(new SignerRefusedError()),
+    nip44Decrypt: async () => Promise.reject(new SignerRefusedError()),
+  };
+}
+
+/** An echo signer that counts its NIP-44 invocations, so tests can detect a skipped probe. */
+function countingSigner(): { sign: Signer; nip44Calls: () => number } {
+  const base = signer();
+  let calls = 0;
+  return {
+    sign: {
+      ...base,
+      nip44Encrypt: async (peer, plaintext) => {
+        calls += 1;
+        return base.nip44Encrypt(peer, plaintext);
+      },
+      nip44Decrypt: async (peer, ciphertext) => {
+        calls += 1;
+        return base.nip44Decrypt(peer, ciphertext);
+      },
+    },
+    nip44Calls: () => calls,
   };
 }
 
@@ -430,7 +477,10 @@ const ingests = (script: Script): NostrEvent[][] =>
 
 describe("MarmotClient", () => {
   test("open subscribes for gift wraps on the persisted inbox relays", async () => {
-    const fixture = await open(freshScript(), encodeClientState({ cursors: {}, inbox: [RELAY] }));
+    const fixture = await open(
+      freshScript(),
+      encodeClientState({ nip44Extended: true, cursors: {}, inbox: [RELAY] }),
+    );
     await settle(fixture.timer, 5000);
     expect(fixture.network.openSubscriptions("c")).toBe(1);
     await fixture.client.close();
@@ -454,7 +504,10 @@ describe("MarmotClient", () => {
       { type: "events", events: [{ type: "group_joined", group: GROUP }] },
     );
     script.groups = [snapshot()];
-    const fixture = await open(script, encodeClientState({ cursors: {}, inbox: [RELAY] }));
+    const fixture = await open(
+      script,
+      encodeClientState({ nip44Extended: true, cursors: {}, inbox: [RELAY] }),
+    );
     await settle(fixture.timer, 5000);
 
     const invites: unknown[] = [];
@@ -499,7 +552,10 @@ describe("MarmotClient", () => {
       { type: "events", events: [{ type: "message_received", group: GROUP, message: msg }] },
     );
     script.groups = [snapshot()];
-    const fixture = await open(script, encodeClientState({ cursors: {}, inbox: [RELAY] }));
+    const fixture = await open(
+      script,
+      encodeClientState({ nip44Extended: true, cursors: {}, inbox: [RELAY] }),
+    );
     await settle(fixture.timer, 5000);
 
     const errors: string[] = [];
@@ -540,7 +596,10 @@ describe("MarmotClient", () => {
       { type: "events", events: [{ type: "message_received", group: GROUP, message: msg }] },
     );
     script.groups = [snapshot()];
-    const fixture = await open(script, encodeClientState({ cursors: {}, inbox: [RELAY] }));
+    const fixture = await open(
+      script,
+      encodeClientState({ nip44Extended: true, cursors: {}, inbox: [RELAY] }),
+    );
     await settle(fixture.timer, 5000);
 
     const errors: MarmotError[] = [];
@@ -563,7 +622,10 @@ describe("MarmotClient", () => {
       purpose: "application_message",
     };
     script.outbound = [outbound];
-    const fixture = await open(script, encodeClientState({ cursors: {}, inbox: [RELAY] }));
+    const fixture = await open(
+      script,
+      encodeClientState({ nip44Extended: true, cursors: {}, inbox: [RELAY] }),
+    );
     await settle(fixture.timer, 5000);
     expect(fixture.network.published()).toStrictEqual([
       { client: "c", relay: RELAY, event: outbound.event },
@@ -586,7 +648,10 @@ describe("MarmotClient", () => {
       purpose: "application_message",
     };
     script.outbound = [outbound];
-    const fixture = await open(script, encodeClientState({ cursors: {}, inbox: [RELAY] }));
+    const fixture = await open(
+      script,
+      encodeClientState({ nip44Extended: true, cursors: {}, inbox: [RELAY] }),
+    );
     fixture.network.mode(RELAY, "down");
     await settle(fixture.timer, 0);
     // Down: the publish ran (unavailable) and reported pending; the engine parks the
@@ -609,7 +674,10 @@ describe("MarmotClient", () => {
   test("a relay dropping the subscription schedules a re-plan", async () => {
     const script = freshScript();
     script.groups = [snapshot()];
-    const fixture = await open(script, encodeClientState({ cursors: {}, inbox: [RELAY] }));
+    const fixture = await open(
+      script,
+      encodeClientState({ nip44Extended: true, cursors: {}, inbox: [RELAY] }),
+    );
     await settle(fixture.timer, 5000);
     // Inbox 1059 + group 445 = two open subscriptions.
     expect(fixture.network.openSubscriptions("c")).toBe(2);
@@ -657,7 +725,10 @@ describe("MarmotClient", () => {
   test("close tears down every subscription", async () => {
     const script = freshScript();
     script.groups = [snapshot()];
-    const fixture = await open(script, encodeClientState({ cursors: {}, inbox: [RELAY] }));
+    const fixture = await open(
+      script,
+      encodeClientState({ nip44Extended: true, cursors: {}, inbox: [RELAY] }),
+    );
     await settle(fixture.timer, 5000);
     expect(fixture.network.openSubscriptions("c")).toBe(2);
     await fixture.client.close();
@@ -666,7 +737,10 @@ describe("MarmotClient", () => {
 
   test("reopen restores inbox subscriptions from the persisted state", async () => {
     const script = freshScript();
-    const first = await open(script, encodeClientState({ cursors: {}, inbox: [RELAY2] }));
+    const first = await open(
+      script,
+      encodeClientState({ nip44Extended: true, cursors: {}, inbox: [RELAY2] }),
+    );
     await settle(first.timer, 5000);
     const blob = first.cursors.bytes();
     await first.client.close();
@@ -686,7 +760,10 @@ describe("MarmotClient", () => {
       nostrGroupId: `${i.toString(16).padStart(2, "0")}${"d".repeat(62)}`,
       relays: [`wss://overflow-${i}.example`],
     }));
-    const fixture = await open(script, encodeClientState({ cursors: {}, inbox: [] }));
+    const fixture = await open(
+      script,
+      encodeClientState({ nip44Extended: true, cursors: {}, inbox: [] }),
+    );
     const errors: MarmotError[] = [];
     fixture.client.onError((error) => errors.push(error));
     // setInbox flags a re-plan; the post-op reconcile hits the relay cap.
@@ -723,7 +800,10 @@ describe("MarmotClient", () => {
       purpose: "application_message",
     };
     script.outbound = [outbound];
-    const fixture = await open(script, encodeClientState({ cursors: {}, inbox: [RELAY] }));
+    const fixture = await open(
+      script,
+      encodeClientState({ nip44Extended: true, cursors: {}, inbox: [RELAY] }),
+    );
     // Zero-delay open tick: take, publish, report → pending. The re-take that follows
     // every report finds nothing: the engine withholds the item until its deadline.
     await settle(fixture.timer, 0);
@@ -750,7 +830,10 @@ describe("MarmotClient", () => {
       purpose: "application_message",
     };
     script.outbound = [outbound];
-    const fixture = await open(script, encodeClientState({ cursors: {}, inbox: [RELAY] }));
+    const fixture = await open(
+      script,
+      encodeClientState({ nip44Extended: true, cursors: {}, inbox: [RELAY] }),
+    );
     fixture.network.mode(RELAY, "refuse");
     await settle(fixture.timer, 0);
     const reports = callsOf(script, "report_publish");
@@ -775,7 +858,10 @@ describe("MarmotClient", () => {
       purpose: "commit",
     };
     script.outbound = [outbound];
-    const fixture = await open(script, encodeClientState({ cursors: {}, inbox: [RELAY] }));
+    const fixture = await open(
+      script,
+      encodeClientState({ nip44Extended: true, cursors: {}, inbox: [RELAY] }),
+    );
     const errors: MarmotError[] = [];
     fixture.client.onError((error) => {
       errors.push(error);
@@ -807,7 +893,10 @@ describe("MarmotClient", () => {
       purpose: "commit",
     };
     script.outbound = [outbound];
-    const fixture = await open(script, encodeClientState({ cursors: {}, inbox: [RELAY] }));
+    const fixture = await open(
+      script,
+      encodeClientState({ nip44Extended: true, cursors: {}, inbox: [RELAY] }),
+    );
     const errors: MarmotError[] = [];
     fixture.client.onError((error) => {
       errors.push(error);
@@ -836,7 +925,10 @@ describe("MarmotClient", () => {
     };
     expect(wireEventBytes(outbound.event)).toBe(COMMIT_SIZE_FLOOR_BYTES);
     script.outbound = [outbound];
-    const fixture = await open(script, encodeClientState({ cursors: {}, inbox: [RELAY] }));
+    const fixture = await open(
+      script,
+      encodeClientState({ nip44Extended: true, cursors: {}, inbox: [RELAY] }),
+    );
     await settle(fixture.timer, 5000);
     expect(fixture.network.published()).toStrictEqual([
       { client: "c", relay: RELAY, event: outbound.event },
@@ -859,7 +951,10 @@ describe("MarmotClient", () => {
       purpose: "commit",
     };
     script.outbound = [outbound];
-    const fixture = await open(script, encodeClientState({ cursors: {}, inbox: [RELAY] }));
+    const fixture = await open(
+      script,
+      encodeClientState({ nip44Extended: true, cursors: {}, inbox: [RELAY] }),
+    );
     const errors: MarmotError[] = [];
     fixture.client.onError((error) => {
       errors.push(error);
@@ -886,7 +981,10 @@ describe("MarmotClient", () => {
       purpose: "commit",
     };
     script.outbound = [outbound];
-    const fixture = await open(script, encodeClientState({ cursors: {}, inbox: [RELAY] }));
+    const fixture = await open(
+      script,
+      encodeClientState({ nip44Extended: true, cursors: {}, inbox: [RELAY] }),
+    );
     const errors: MarmotError[] = [];
     fixture.client.onError((error) => {
       errors.push(error);
@@ -914,7 +1012,10 @@ describe("MarmotClient", () => {
       purpose: "commit",
     };
     script.outbound = [outbound];
-    const fixture = await open(script, encodeClientState({ cursors: {}, inbox: [RELAY] }));
+    const fixture = await open(
+      script,
+      encodeClientState({ nip44Extended: true, cursors: {}, inbox: [RELAY] }),
+    );
     const errors: MarmotError[] = [];
     fixture.client.onError((error) => {
       errors.push(error);
@@ -950,7 +1051,10 @@ describe("MarmotClient", () => {
     // 257 commits confirm in order: the first falls out of the 256-entry window.
     script.outbound = [evicted, ...fillers, tracked];
     script.resolutions.push(...script.outbound.map((): PublishResolution => "confirmed"));
-    const fixture = await open(script, encodeClientState({ cursors: {}, inbox: [RELAY] }));
+    const fixture = await open(
+      script,
+      encodeClientState({ nip44Extended: true, cursors: {}, inbox: [RELAY] }),
+    );
     const errors: MarmotError[] = [];
     fixture.client.onError((error) => {
       errors.push(error);
@@ -982,7 +1086,10 @@ describe("MarmotClient", () => {
       },
     );
     script.groups = [snapshot()];
-    const fixture = await open(script, encodeClientState({ cursors: {}, inbox: [RELAY] }));
+    const fixture = await open(
+      script,
+      encodeClientState({ nip44Extended: true, cursors: {}, inbox: [RELAY] }),
+    );
     await settle(fixture.timer, 5000);
 
     let release: () => void = () => undefined;
@@ -1007,7 +1114,10 @@ describe("MarmotClient", () => {
   test("the buffer flushes at 256 without waiting for the delay timer", async () => {
     const script = freshScript();
     script.groups = [snapshot()];
-    const fixture = await open(script, encodeClientState({ cursors: {}, inbox: [RELAY] }));
+    const fixture = await open(
+      script,
+      encodeClientState({ nip44Extended: true, cursors: {}, inbox: [RELAY] }),
+    );
     await settle(fixture.timer, 5000);
     const peer = fixture.network.port("peer");
     for (let i = 0; i < 260; i += 1) {
@@ -1030,7 +1140,10 @@ describe("MarmotClient", () => {
   test("two events inside the delay window ride one ingest batch", async () => {
     const script = freshScript();
     script.groups = [snapshot()];
-    const fixture = await open(script, encodeClientState({ cursors: {}, inbox: [RELAY] }));
+    const fixture = await open(
+      script,
+      encodeClientState({ nip44Extended: true, cursors: {}, inbox: [RELAY] }),
+    );
     await settle(fixture.timer, 5000);
     const peer = fixture.network.port("peer");
     await peer.publish(RELAY, groupEvent(1000n, "71"));
@@ -1058,7 +1171,10 @@ describe("MarmotClient", () => {
     script.drains.push({ type: "events", events: [] }, ...[0, 1, 2, 3, 4].map(chunk));
     // The engine keeps asking for zero-delay ticks — the deferred-peel model.
     script.nextWake = 0n;
-    const fixture = await open(script, encodeClientState({ cursors: {}, inbox: [RELAY] }));
+    const fixture = await open(
+      script,
+      encodeClientState({ nip44Extended: true, cursors: {}, inbox: [RELAY] }),
+    );
     const batches: string[][] = [];
     fixture.client.onMessages(async (batch) => {
       batches.push(batch.map((m) => m.message.content));
@@ -1077,7 +1193,10 @@ describe("MarmotClient", () => {
   test("an unavailable outcome caps the cursor at earliest createdAt − 1", async () => {
     const script = freshScript();
     script.groups = [snapshot()];
-    const fixture = await open(script, encodeClientState({ cursors: {}, inbox: [RELAY] }));
+    const fixture = await open(
+      script,
+      encodeClientState({ nip44Extended: true, cursors: {}, inbox: [RELAY] }),
+    );
     await settle(fixture.timer, 5000);
     const key = groupCursorKey(ROUTE, RELAY);
     const peer = fixture.network.port("peer");
@@ -1097,7 +1216,10 @@ describe("MarmotClient", () => {
   test("a future createdAt clamps the cursor to now", async () => {
     const script = freshScript();
     script.groups = [snapshot()];
-    const fixture = await open(script, encodeClientState({ cursors: {}, inbox: [RELAY] }));
+    const fixture = await open(
+      script,
+      encodeClientState({ nip44Extended: true, cursors: {}, inbox: [RELAY] }),
+    );
     await settle(fixture.timer, 5000);
     const key = groupCursorKey(ROUTE, RELAY);
     const nowSecs = Number(fixture.clock.now().unixMs / 1000n);
@@ -1116,6 +1238,7 @@ describe("MarmotClient", () => {
         [groupCursorKey(ROUTE, RELAY)]: 10_000,
       },
       inbox: [RELAY],
+      nip44Extended: true,
     });
     const fixture = await open(script, state);
     await settle(fixture.timer, 5000);
@@ -1133,7 +1256,10 @@ describe("MarmotClient", () => {
   test("200 random group churns stay inside the relay and subscription bounds", async () => {
     const script = freshScript();
     script.groups = [snapshot()];
-    const fixture = await open(script, encodeClientState({ cursors: {}, inbox: [RELAY] }));
+    const fixture = await open(
+      script,
+      encodeClientState({ nip44Extended: true, cursors: {}, inbox: [RELAY] }),
+    );
     await settle(fixture.timer, 5000);
     const errors: MarmotError[] = [];
     fixture.client.onError((error) => errors.push(error));
@@ -1182,7 +1308,10 @@ describe("MarmotClient", () => {
   test("close is idempotent and leaves zero pending timers", async () => {
     const script = freshScript();
     script.groups = [snapshot()];
-    const fixture = await open(script, encodeClientState({ cursors: {}, inbox: [RELAY] }));
+    const fixture = await open(
+      script,
+      encodeClientState({ nip44Extended: true, cursors: {}, inbox: [RELAY] }),
+    );
     await settle(fixture.timer, 5000);
     // An inbound wrap arms the 25 ms flush timer.
     await fixture.network.port("peer").publish(RELAY, wrap());
@@ -1202,7 +1331,10 @@ describe("MarmotClient", () => {
       script.reports = [
         { event: wrapEvent.id, outcome: { type: "unavailable", category: reason } },
       ];
-      const fixture = await open(script, encodeClientState({ cursors: {}, inbox: [RELAY] }));
+      const fixture = await open(
+        script,
+        encodeClientState({ nip44Extended: true, cursors: {}, inbox: [RELAY] }),
+      );
       const invites: unknown[] = [];
       fixture.client.onInvite((invite) => {
         invites.push(invite);
@@ -1220,7 +1352,11 @@ describe("MarmotClient", () => {
     const wrapEvent = wrap(190_000n);
     const fixture = await open(
       script,
-      encodeClientState({ cursors: { [inboxCursorKey(RELAY)]: 200_000 }, inbox: [RELAY] }),
+      encodeClientState({
+        nip44Extended: true,
+        cursors: { [inboxCursorKey(RELAY)]: 200_000 },
+        inbox: [RELAY],
+      }),
     );
     await settle(fixture.timer, 5000);
     expect(fixture.network.openSubscriptions("c")).toBe(1);
@@ -1244,7 +1380,10 @@ describe("MarmotClient", () => {
   });
 
   test("a failed media upload discards every sealed handle and rejects upload_failed", async () => {
-    const fixture = await open(freshScript(), encodeClientState({ cursors: {}, inbox: [RELAY] }));
+    const fixture = await open(
+      freshScript(),
+      encodeClientState({ nip44Extended: true, cursors: {}, inbox: [RELAY] }),
+    );
     const attachments: AttachmentInput[] = [
       {
         plaintext: Uint8Array.of(1),
@@ -1285,7 +1424,10 @@ describe("MarmotClient", () => {
         purpose: "application_message",
       },
     ];
-    const fixture = await open(script, encodeClientState({ cursors: {}, inbox: [RELAY] }));
+    const fixture = await open(
+      script,
+      encodeClientState({ nip44Extended: true, cursors: {}, inbox: [RELAY] }),
+    );
     await settle(fixture.timer, 5000);
     expect(fixture.network.published()).toHaveLength(0);
     const reports = callsOf(script, "report_publish");
@@ -1385,7 +1527,10 @@ describe("MarmotClient", () => {
   test("forgetGroup forgets and reconciles subscriptions away", async () => {
     const script = freshScript();
     script.groups = [snapshot()];
-    const fixture = await open(script, encodeClientState({ cursors: {}, inbox: [RELAY] }));
+    const fixture = await open(
+      script,
+      encodeClientState({ nip44Extended: true, cursors: {}, inbox: [RELAY] }),
+    );
     await settle(fixture.timer, 5000);
     expect(fixture.network.openSubscriptions()).toBe(2);
     script.groups = [];
@@ -1445,7 +1590,10 @@ describe("MarmotClient", () => {
       },
     );
     script.groups = [snapshot()];
-    const fixture = await open(script, encodeClientState({ cursors: {}, inbox: [RELAY] }));
+    const fixture = await open(
+      script,
+      encodeClientState({ nip44Extended: true, cursors: {}, inbox: [RELAY] }),
+    );
     await settle(fixture.timer, 5000);
     const batches: Array<Array<{ semantics: unknown; expiresAt: bigint | undefined }>> = [];
     fixture.client.onMessages(async (batch) => {
@@ -1491,7 +1639,10 @@ describe("MarmotClient", () => {
       },
     );
     script.groups = [snapshot()];
-    const fixture = await open(script, encodeClientState({ cursors: {}, inbox: [RELAY] }));
+    const fixture = await open(
+      script,
+      encodeClientState({ nip44Extended: true, cursors: {}, inbox: [RELAY] }),
+    );
     await settle(fixture.timer, 5000);
     const batches: Array<Array<{ attachments: unknown }>> = [];
     fixture.client.onMessages(async (batch) => {
@@ -1527,7 +1678,10 @@ describe("MarmotClient", () => {
         avatar: { url: "https://blossom.example/a.png", dim: undefined, thumbhash: undefined },
       },
     ];
-    const fixture = await open(script, encodeClientState({ cursors: {}, inbox: [] }));
+    const fixture = await open(
+      script,
+      encodeClientState({ nip44Extended: true, cursors: {}, inbox: [] }),
+    );
     const groupSnapshots = await fixture.client.groups();
     const avatars = groupSnapshots.map((g) => g.avatar);
     expect(avatars).toStrictEqual([
@@ -1572,7 +1726,10 @@ describe("MarmotClient", () => {
       },
     );
     script.groups = [snapshot()];
-    const fixture = await open(script, encodeClientState({ cursors: {}, inbox: [RELAY] }));
+    const fixture = await open(
+      script,
+      encodeClientState({ nip44Extended: true, cursors: {}, inbox: [RELAY] }),
+    );
     await settle(fixture.timer, 5000);
     const batches: Array<Array<{ semantics: unknown }>> = [];
     fixture.client.onMessages(async (batch) => {
@@ -1617,5 +1774,85 @@ describe("MarmotClient", () => {
       kind: "send_rate_exceeded",
     });
     await fixture.client.close();
+  });
+});
+
+type ProbeOutcome = {
+  client: MarmotClient | undefined;
+  error: unknown;
+  opened: () => number;
+  cursors: ReturnType<typeof memoryCursorStore>;
+  kv: ReturnType<typeof memoryKv>;
+};
+
+/** Like `open` but captures a rejection and exposes the backend's `open` count. */
+async function probeOpen(
+  script: Script,
+  options: { blob?: Uint8Array | undefined; sign: Signer },
+): Promise<ProbeOutcome> {
+  const cursors = memoryCursorStore();
+  const kv = memoryKv();
+  const { backend, opened } = scriptedBackend(script);
+  if (options.blob !== undefined) {
+    await cursors.save(options.blob);
+  }
+  const result = await MarmotClient.open({
+    backend,
+    kv,
+    cursors,
+    signer: options.sign,
+    clock: manualClock(),
+    timer: manualTimer(),
+    relays: fakeRelay().port("c"),
+    allowLoopback: true,
+  }).then(
+    (client) => ({ client, error: undefined }),
+    (error: unknown) => ({ client: undefined, error }),
+  );
+  return { ...result, opened, cursors, kv };
+}
+
+describe("MarmotClient.open — the NIP-44 extended-length probe", () => {
+  test("a signer that cannot round-trip the probe rejects signer_unsupported before open", async () => {
+    const outcome = await probeOpen(freshScript(), { sign: legacySigner() });
+    expect(outcome.error).toBeInstanceOf(MarmotError);
+    expect((outcome.error as MarmotError).kind).toBe("signer_unsupported");
+    expect(outcome.opened()).toBe(0);
+    expect(outcome.kv.batches()).toHaveLength(0);
+  });
+
+  test("a refusing signer rejects signer_refused before the engine opens", async () => {
+    const outcome = await probeOpen(freshScript(), { sign: refusingSigner() });
+    expect(outcome.error).toBeInstanceOf(MarmotError);
+    expect((outcome.error as MarmotError).kind).toBe("signer_refused");
+    expect(outcome.opened()).toBe(0);
+    expect(outcome.kv.batches()).toHaveLength(0);
+  });
+
+  test("a passing probe persists nip44Extended and a second open does not probe", async () => {
+    const { sign, nip44Calls } = countingSigner();
+    const first = await probeOpen(freshScript(), { sign });
+    expect(first.error).toBeUndefined();
+    expect(nip44Calls()).toBe(2);
+    const state = decodeClientState(first.cursors.bytes());
+    expect(state.nip44Extended).toBe(true);
+    await first.client?.close();
+
+    const second = await probeOpen(freshScript(), { sign, blob: first.cursors.bytes() });
+    expect(second.error).toBeUndefined();
+    expect(nip44Calls()).toBe(2);
+    await second.client?.close();
+  });
+
+  test("a v1 blob decodes to the empty state and probes again", async () => {
+    const { sign, nip44Calls } = countingSigner();
+    const v1 = utf8Encode('{"v":1,"cursors":{"inbox|wss://r":9},"inbox":["wss://r"]}');
+    const outcome = await probeOpen(freshScript(), { sign, blob: v1 });
+    expect(outcome.error).toBeUndefined();
+    expect(nip44Calls()).toBe(2);
+    const state = decodeClientState(outcome.cursors.bytes());
+    expect(state.cursors).toStrictEqual({});
+    expect(state.nip44Extended).toBe(true);
+    await outcome.client?.close();
   });
 });

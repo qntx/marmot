@@ -1,11 +1,16 @@
 /**
  * `MarmotClient` — the application surface: one `Engine` behind the `Pump`, typed errors, typed
  * events. Public ops run through the pump; relay lookups run outside it; every relay URL passes
- * `safeRelayUrl` before it can open a connection. Peer-supplied media locators on received messages
- * are filtered through `safeMediaUrl` and a group avatar URL that fails it is dropped — hosts using
- * `@qntx/marmot/backend` directly get the raw values and must apply `safeMediaUrl` (or
- * `mk_core::media::Locator::destination` + `check_resolved_address` in Rust) before fetching;
- * DNS-resolved addresses remain the host's check, same as relays.
+ * `safeRelayUrl` before it can open a connection. The signer must support NIP-44 extended length
+ * (spec `transports/nostr.md`), including through NIP-46 request/response events and NIP-07/NIP-55
+ * extensions: `open` probes it once per account per client state — a self round trip of a
+ * 65,536-byte plaintext — caches the pass as `nip44Extended` in the persisted state, and rejects
+ * `signer_refused` or `signer_unsupported` before the engine opens; clearing the `CursorStore`
+ * re-probes. Peer-supplied media locators on received messages are filtered through `safeMediaUrl`
+ * and a group avatar URL that fails it is dropped — hosts using `@qntx/marmot/backend` directly get
+ * the raw values and must apply `safeMediaUrl` (or `mk_core::media::Locator::destination` +
+ * `check_resolved_address` in Rust) before fetching; DNS-resolved addresses remain the host's
+ * check, same as relays.
  */
 
 import { Engine } from "../backend/engine.ts";
@@ -24,7 +29,7 @@ import type {
 } from "../backend/protocol.ts";
 import * as groups from "../groups/index.ts";
 import type { UploadPort } from "../groups/index.ts";
-import { observeSigner } from "../invites/index.ts";
+import { observeSigner, probeNip44Extended } from "../invites/index.ts";
 import type { InviteEvent } from "../invites/index.ts";
 import { lookupInvitees, writeRelaysOf } from "../keys/index.ts";
 import type { CursorStore, KvDriver } from "../storage/driver.ts";
@@ -34,7 +39,7 @@ import { MarmotError, toMarmotError } from "./errors.ts";
 import type { MarmotErrorKind } from "./errors.ts";
 import { Pump } from "./pump.ts";
 import type { ClientMessage, DeliveryEvent, DropEvent, GroupEvent } from "./pump.ts";
-import { decodeClientState } from "./state.ts";
+import { decodeClientState, encodeClientState } from "./state.ts";
 import type { ClientState } from "./state.ts";
 
 export type MarmotClientOptions = {
@@ -90,6 +95,29 @@ export class MarmotClient {
 
   static async open(options: MarmotClientOptions): Promise<MarmotClient> {
     const observed = observeSigner(options.signer);
+    let state: ClientState;
+    try {
+      state = decodeClientState(await options.cursors.load());
+    } catch {
+      state = { cursors: {}, inbox: [], nip44Extended: false };
+    }
+    // The spec requires NIP-44 extended length of every signer a client uses: probe once per
+    // client state, before anything opens, and cache the pass as `nip44Extended`.
+    if (!state.nip44Extended) {
+      const verdict = await probeNip44Extended(options.signer);
+      if (verdict === "refused") {
+        throw new MarmotError("signer_refused");
+      }
+      if (verdict === "unsupported") {
+        throw new MarmotError("signer_unsupported");
+      }
+      state = { ...state, nip44Extended: true };
+      try {
+        await options.cursors.save(encodeClientState(state));
+      } catch (error) {
+        throw toMarmotError(error);
+      }
+    }
     let engine: Engine;
     try {
       engine = await Engine.open({
@@ -101,12 +129,6 @@ export class MarmotClient {
       });
     } catch (error) {
       throw toMarmotError(error, observed.take());
-    }
-    let state: ClientState;
-    try {
-      state = decodeClientState(await options.cursors.load());
-    } catch {
-      state = { cursors: {}, inbox: [] };
     }
     const client = new MarmotClient(options, engine, observed, state);
     client.pump.start();

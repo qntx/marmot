@@ -73,3 +73,24 @@ export function pendingInvites(reports: InputReport[]): InviteEvent[] {
   }
   return [...reasons].map((reason) => ({ type: "pending", reason }));
 }
+
+/**
+ * One self round trip at the NIP-44 extended-length boundary (spec `transports/nostr.md`): the
+ * signer must encrypt and decrypt its own 65,536-byte plaintext exactly — that size needs the
+ * 6-byte `00 00 ‖ u32be(len)` prefix a legacy signer cannot produce. `SignerRefusedError` maps to
+ * "refused" (retryable: unlock and open again); any other throw or a mismatched round trip maps to
+ * "unsupported". `MarmotClient.open` runs this once per client state and caches the pass as
+ * `nip44Extended`.
+ */
+export async function probeNip44Extended(
+  signer: Signer,
+): Promise<"ok" | "refused" | "unsupported"> {
+  const plaintext = "a".repeat(65_536);
+  try {
+    const ciphertext = await signer.nip44Encrypt(signer.pubkey, plaintext);
+    const recovered = await signer.nip44Decrypt(signer.pubkey, ciphertext);
+    return recovered === plaintext ? "ok" : "unsupported";
+  } catch (error) {
+    return error instanceof SignerRefusedError ? "refused" : "unsupported";
+  }
+}

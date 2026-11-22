@@ -14,6 +14,7 @@ export type MarmotErrorKind =
   | "closed"
   | "signer_refused"
   | "signer_failed"
+  | "signer_unsupported"
   | "unsafe_relay"
   | "no_relay_list"
   | "no_inbox_relays"
