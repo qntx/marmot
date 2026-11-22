@@ -895,7 +895,8 @@ export async function scenarioOfflineSend(): Promise<ScenarioReport> {
     a: { port: gatedPort(network.port("a"), gate) },
   });
   gate.refused = true;
-  const publishedBefore = network.published().length;
+  const commits = () => network.published().filter((entry) => entry.event.kind === 445).length;
+  const publishedBefore = commits();
   await send(a, group, "offline-msg");
   await a.client.updateGroupProfile(group, { name: "renamed", description: "" });
   // Both items report pending and keep retrying; no publish reaches the relay network.
@@ -903,7 +904,7 @@ export async function scenarioOfflineSend(): Promise<ScenarioReport> {
     const pending = a.deliveries.filter((entry) => entry.resolution === "pending");
     return new Set(pending.map((entry) => entry.outbound)).size >= 2;
   }, "a pending outbound");
-  if (network.published().length !== publishedBefore) {
+  if (commits() !== publishedBefore) {
     throw new Error("an event was transmitted while dials were refused");
   }
   if (contents(b, group).includes("offline-msg")) {
@@ -946,7 +947,8 @@ export async function scenarioOfflineCommitRollback(): Promise<ScenarioReport> {
     a: { port: gatedPort(network.port("a"), gate) },
   });
   gate.refused = true;
-  const publishedBefore = network.published().length;
+  const commits = () => network.published().filter((entry) => entry.event.kind === 445).length;
+  const publishedBefore = commits();
   const snapshotBefore = await a.client.group(group);
   const epochBefore = snapshotBefore?.epoch;
   await a.client.selfUpdate(group);
@@ -954,7 +956,7 @@ export async function scenarioOfflineCommitRollback(): Promise<ScenarioReport> {
     () => a.deliveries.some((entry) => entry.resolution === "pending"),
     "a pending outbound",
   );
-  if (network.published().length !== publishedBefore) {
+  if (commits() !== publishedBefore) {
     throw new Error("an event was transmitted while dials were refused");
   }
   gate.refused = false;

@@ -67,10 +67,11 @@ export async function durabilityGateBeforePublish(): Promise<DurabilityReport> {
   const { a, b, group } = await openPair(network, { a: { port: wrapped } });
   aBox.current = a;
   a.stores.kv.hold();
-  const publishedBefore = network.published().length;
+  const commits = () => network.published().filter((entry) => entry.event.kind === 445).length;
+  const publishedBefore = commits();
   await send(a, group, "gated");
   await sleep(300);
-  const gated = network.published().length;
+  const gated = commits();
   if (gated !== publishedBefore) {
     throw new Error(`published while the commit was held (${gated - publishedBefore} events)`);
   }

@@ -144,7 +144,12 @@ export class MarmotClient {
         try {
           await client.ensureKeyPackage();
         } catch (error) {
-          client.pump.emitError(toMarmotError(error, observed.take()));
+          // `no_relay_list` is expected before the account's kind-10002
+          // exists anywhere: the slot simply stays unstaged until a later
+          // explicit `ensureKeyPackage` with a write set.
+          if (!(error instanceof MarmotError && error.kind === "no_relay_list")) {
+            client.pump.emitError(toMarmotError(error, observed.take()));
+          }
         }
       })();
     }
