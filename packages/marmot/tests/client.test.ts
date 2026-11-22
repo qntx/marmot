@@ -528,6 +528,7 @@ describe("MarmotClient", () => {
     script.drains.push(
       { type: "events", events: [] }, // publishInboxRelays' post-op drain
       { type: "events", events: [] }, // the serialized takeOutbound job's drain
+      { type: "events", events: [] }, // history_fetched post-op drain (group EOSE at open)
       { type: "events", events: [{ type: "group_joined", group: GROUP }] },
     );
     script.groups = [snapshot()];
@@ -576,6 +577,7 @@ describe("MarmotClient", () => {
     script.drains.push(
       { type: "events", events: [] }, // open's first drain
       { type: "events", events: [] }, // the serialized takeOutbound job's drain
+      { type: "events", events: [] }, // history_fetched post-op drain (group EOSE at open)
       { type: "events", events: [{ type: "message_received", group: GROUP, message: msg }] },
     );
     script.groups = [snapshot()];
@@ -620,6 +622,7 @@ describe("MarmotClient", () => {
     script.drains.push(
       { type: "events", events: [] },
       { type: "events", events: [] }, // the serialized takeOutbound job's drain
+      { type: "events", events: [] }, // history_fetched post-op drain (group EOSE at open)
       { type: "events", events: [{ type: "message_received", group: GROUP, message: msg }] },
     );
     script.groups = [snapshot()];
@@ -1188,6 +1191,7 @@ describe("MarmotClient", () => {
     script.drains.push(
       { type: "events", events: [] },
       { type: "events", events: [] }, // the serialized takeOutbound job's drain
+      { type: "events", events: [] }, // history_fetched post-op drain (group EOSE at open)
       {
         type: "events",
         events: [{ type: "message_received", group: GROUP, message: msg(`f3${"0".repeat(62)}`) }],
@@ -1692,6 +1696,7 @@ describe("MarmotClient", () => {
     script.drains.push(
       { type: "events", events: [] },
       { type: "events", events: [] },
+      { type: "events", events: [] }, // history_fetched post-op drain (group EOSE at open)
       {
         type: "events",
         events: [{ type: "message_received", group: GROUP, message: incoming }],
@@ -1825,6 +1830,7 @@ describe("MarmotClient", () => {
     script.drains.push(
       { type: "events", events: [] },
       { type: "events", events: [] },
+      { type: "events", events: [] }, // history_fetched post-op drain (group EOSE at open)
       {
         type: "events",
         events: cases.map((semantics, i) => ({
