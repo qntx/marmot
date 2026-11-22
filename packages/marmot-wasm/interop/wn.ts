@@ -546,6 +546,10 @@ async function run(): Promise<void> {
     const s1 = { wnGid: "", ourGid: "" };
 
     async function scenario(name: string, runScenario: () => Promise<void>): Promise<void> {
+      const only = process.env["WN_ONLY"];
+      if (only !== undefined && !name.includes(only)) {
+        return;
+      }
       const start = Date.now();
       try {
         await runScenario();
@@ -1477,15 +1481,19 @@ async function run(): Promise<void> {
         content: ourText,
       });
       log(`s17 send outcome ${outcome.outcome.type}`);
+      let lastSend = Date.now();
       // A send that lands Queued behind convergence needs a later engine
-      // op to drain it; retry until a copy is staged.
+      // op to drain it, and a commit lost to a fork needs a fresh send:
+      // retry while nothing shows on wn's side.
       await waitFor(async () => {
-        if (outcome.outcome.type === "queued") {
+        if (outcome.outcome.type === "queued" || Date.now() - lastSend > 10_000) {
           outcome = await client.sendMessage(gid1, {
             kind: CHAT_KIND,
             tags: [],
             content: ourText,
           });
+          lastSend = Date.now();
+          log(`s17 resend outcome ${outcome.outcome.type}`);
         }
         const entries = await wnMessages(rig, wnGid);
         return entries.some((entry) => entry.includes(ourText)) || undefined;

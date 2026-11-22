@@ -1280,7 +1280,28 @@ async fn scenario17_second_device_signs_out() {
         "a1 roster {{wn, A}}: {roster:?}"
     );
     member_says(&rig, &mut a1, &gid, &wn_gid, "s17-still-here").await;
-    wn_says(&rig, &mut a1, &gid, &wn_gid, "s17-wn-replies").await;
+    // `wn_says` inline so a timeout dumps the divergence a racing
+    // SelfRemove auto-commit may have left (fork convergence state).
+    wn_send(&rig, &wn_gid, "s17-wn-replies");
+    let deadline = Instant::now() + Duration::from_millis(90_000);
+    loop {
+        let events = sync(&mut a1, &rig, &gid).await;
+        let got = events.iter().any(|event| {
+            matches!(event, SessionEvent::MessageReceived { message, .. } if message.content.contains("s17-wn-replies"))
+        });
+        if got {
+            break;
+        }
+        if Instant::now() > deadline {
+            let snapshot = a1.session.group(&gid).expect("group");
+            let listed = wn_messages(&rig, &wn_gid, 600);
+            panic!(
+                "a1 never decoded wn reply; group={snapshot:?}; \
+                 wn messages={listed:?}"
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(800)).await;
+    }
 
     rig.relay.shutdown();
     eprintln!("SCENARIO-17 PASS {:.1}s", start.elapsed().as_secs_f64());
