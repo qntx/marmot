@@ -149,13 +149,17 @@ pub fn key_package_info(event: &Event) -> Result<KeyPackageInfo, KeyPackageError
 }
 
 /// Whether the tag's value list holds each `0x%04x` of `expected_ids`
-/// exactly once, in any order, and nothing else.
+/// exactly once, in any order, and nothing else: no duplicate values and
+/// the value set exactly equals `expected_ids`.
 fn id_list_tag_matches(values: &[String], expected_ids: impl IntoIterator<Item = u16>) -> bool {
     let expected: BTreeSet<String> = expected_ids
         .into_iter()
         .map(|id| format!("0x{id:04x}"))
         .collect();
-    values.len() == expected.len() && values.iter().all(|value| expected.contains(value))
+    let actual: BTreeSet<&String> = values.iter().collect();
+    actual.len() == values.len()
+        && values.len() == expected.len()
+        && actual.iter().all(|value| expected.contains(value.as_str()))
 }
 
 /// [`key_package_info`] plus the decoded metadata, computed once.

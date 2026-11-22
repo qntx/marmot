@@ -186,7 +186,7 @@ fn set_single_tag(draft: &mut UnsignedEvent, name: &str, value: &str) {
 
 /// One tag/content mutation both implementations reject identically.
 fn mutate(draft: &mut UnsignedEvent, rng: &mut Rng) {
-    match rng.below(10) {
+    match rng.below(11) {
         // Missing `i`.
         0 => draft
             .tags
@@ -232,8 +232,26 @@ fn mutate(draft: &mut UnsignedEvent, rng: &mut Rng) {
                 draft.tags.push(tag);
             }
         }
+        // A repeated value standing in for a missing one, same length —
+        // both sides require set equality, not just membership.
+        9 => substitute_tag_value(draft, "mls_proposals"),
         // Valid: no mutation.
         _ => {}
+    }
+}
+
+/// Rewrite the last value of `name`'s tag to equal its first: same length,
+/// a duplicate, one expected id missing — both sides reject.
+fn substitute_tag_value(draft: &mut UnsignedEvent, name: &str) {
+    if let Some(tag) = draft
+        .tags
+        .iter_mut()
+        .find(|tag| tag.first().map(String::as_str) == Some(name))
+        && tag.len() > 2
+        && let Some(first) = tag.get(1).cloned()
+        && let Some(last) = tag.last_mut()
+    {
+        *last = first;
     }
 }
 

@@ -447,6 +447,33 @@ async fn rejected_candidates() {
 }
 
 #[tokio::test]
+async fn repeated_capability_id() {
+    let signer = Arc::new(LocalSigner::new());
+    let (member, package) = device_package(&signer).await;
+    let now = now(&member);
+
+    // `["0x0008","0x0008"]` against expected {0x0008,0x000a}: right length,
+    // every value in the set, but the repeat stands in for a missing
+    // advertisement — MDK's `require_multi_value_key_package_tag_matches`
+    // rejects it, and so must we.
+    let repeated = resigned(&signer, &package, |draft| {
+        for tag in &mut draft.tags {
+            if tag.first().map(String::as_str) == Some("mls_proposals")
+                && tag.len() > 2
+                && let Some(first) = tag.get(1).cloned()
+            {
+                *tag.last_mut().expect("value") = first;
+            }
+        }
+    })
+    .await;
+    assert!(
+        select_key_packages(signer.account(), &[repeated], now).is_empty(),
+        "a repeated id standing in for a missing one selects nothing",
+    );
+}
+
+#[tokio::test]
 async fn duplicated_d_tag() {
     let signer = Arc::new(LocalSigner::new());
     let (member, package) = device_package(&signer).await;
