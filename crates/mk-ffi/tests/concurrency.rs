@@ -195,7 +195,7 @@ fn concurrent_callers_serialize_on_one_handle() {
 
 /// `free` racing a storm of callers on one handle: every call resolves
 /// its engine `Arc` through the registry before `free` removes it, so
-/// every answer is a well-formed `not_open`/`closed` envelope and the
+/// every answer is a well-formed `not_open`/`closed`/`poisoned` envelope and the
 /// detached engine still releases the host context exactly once.
 #[test]
 fn free_racing_callers_answers_every_call() {
@@ -214,8 +214,10 @@ fn free_racing_callers_answers_every_call() {
                 let handle = addr as *mut MkBridge;
                 for _ in 0..CALLS_PER_THREAD {
                     let kind = error_kind_of(&ffi_call(handle, &envelope));
+                    // `poisoned`: the job landed behind the shutdown `free`
+                    // enqueued — the documented answer for that ordering.
                     assert!(
-                        kind == "not_open" || kind == "closed",
+                        matches!(kind.as_str(), "not_open" | "closed" | "poisoned"),
                         "unexpected answer: {kind}"
                     );
                 }
