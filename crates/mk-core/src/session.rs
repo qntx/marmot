@@ -56,7 +56,7 @@ use cgka_traits::app_components::{
     GroupLifecycleV1, NOSTR_ROUTING_COMPONENT_ID, NostrRoutingV1, decode_components_list,
     decode_group_avatar_url_v1, decode_group_lifecycle_v1, decode_nostr_routing_v1,
     decode_quic_varint, default_group_components, encode_group_avatar_url_v1, encode_quic_varint,
-    is_loopback_host, is_public_ip, validate_and_normalize_group_avatar_url,
+    is_loopback_host, reject_non_public_ip, validate_and_normalize_group_avatar_url,
     validate_nostr_relay_url,
 };
 use cgka_traits::app_event::{
@@ -131,15 +131,17 @@ pub struct SessionConfig {
 /// Local safety policy for relay URLs before anything is published.
 ///
 /// Every URL passes MDK's relay-URL profile check
-/// ([`validate_nostr_relay_url`]); additionally, literal hosts that are
-/// loopback, private or link-local, and `localhost`, are refused unless
-/// `allow_loopback` — a dev/test flag, default off. DNS resolution checks
-/// (public A/AAAA records) are the host transport's job: a hostname that
-/// resolves to a private address is not something this layer can see.
+/// ([`validate_nostr_relay_url`]); additionally, every literal IP is
+/// classified: public addresses pass, loopback passes only under
+/// `allow_loopback` — a dev/test flag, default off — and private,
+/// link-local and other special-use addresses never pass. `localhost`
+/// follows the loopback rule. DNS resolution checks (public A/AAAA
+/// records) are the host transport's job: a hostname that resolves to a
+/// private address is not something this layer can see.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct DestinationPolicy {
-    /// Permit loopback/private/link-local literal hosts and `localhost`
-    /// (tests and local relays only).
+    /// Permit loopback literal hosts and `localhost` (tests and local
+    /// relays only); private/link-local/special-use addresses stay refused.
     pub allow_loopback: bool,
 }
 
@@ -3385,16 +3387,20 @@ impl Session {
         if validate_nostr_relay_url(relay).is_err() {
             return false;
         }
-        if self.destination_policy.allow_loopback {
-            return true;
-        }
         let Ok(url) = url::Url::parse(relay) else {
             return false;
         };
+        let allow_loopback = self.destination_policy.allow_loopback;
         match url.host() {
-            Some(url::Host::Domain(domain)) => !is_loopback_host(url::Host::Domain(domain)),
-            Some(url::Host::Ipv4(addr)) => is_public_ip(std::net::IpAddr::V4(addr)),
-            Some(url::Host::Ipv6(addr)) => is_public_ip(std::net::IpAddr::V6(addr)),
+            Some(url::Host::Domain(domain)) => {
+                allow_loopback || !is_loopback_host(url::Host::Domain(domain))
+            }
+            Some(url::Host::Ipv4(addr)) => {
+                reject_non_public_ip(std::net::IpAddr::V4(addr), allow_loopback).is_ok()
+            }
+            Some(url::Host::Ipv6(addr)) => {
+                reject_non_public_ip(std::net::IpAddr::V6(addr), allow_loopback).is_ok()
+            }
             None => false,
         }
     }

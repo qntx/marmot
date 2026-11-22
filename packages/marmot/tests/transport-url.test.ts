@@ -120,11 +120,13 @@ describe("safeRelayUrl — allowLoopback", () => {
       "wss://localhost",
       "wss://foo.localhost",
       "ws://127.0.0.1",
+      "ws://127.0.0.1:7777",
       "wss://127.0.0.1",
       "ws://127.1",
       "ws://2130706433",
       "ws://[::1]",
       "wss://[::1]",
+      "wss://relay.example.com",
     ]) {
       expect(safeRelayUrl(url, true)).toBe(true);
     }
@@ -140,6 +142,7 @@ describe("safeRelayUrl — allowLoopback", () => {
       "ws://[::ffff:127.0.0.1]",
       "wss://[::ffff:10.0.0.1]",
       "wss://169.254.169.254",
+      "wss://[fd00::1]",
       "wss://[fe80::1]",
     ]) {
       expect(safeRelayUrl(url, true)).toBe(false);
