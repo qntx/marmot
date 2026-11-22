@@ -28,8 +28,11 @@
 
 use sha2::{Digest, Sha256};
 
+use std::collections::HashMap;
+
 use cgka_traits::engine::SendIntent;
 use cgka_traits::engine_state::EpochState;
+use cgka_traits::error::EngineError;
 use cgka_traits::maintenance::{
     DurableGroupEvolution, GroupEvolutionPhase, GroupEvolutionSemantic, MaintenanceObligation,
     MaintenancePhase, MaintenanceTrigger, PostJoinHistoryFetchCompletion,
@@ -159,28 +162,55 @@ impl Session {
     /// Only deadlines strictly in the future contribute — anything due now
     /// was acted on this pass or cannot be, so a past deadline never arms
     /// an immediate re-wake.
+    ///
+    /// Scoping: one obligation scan for the whole pass, live group ids
+    /// rather than snapshots, and groups that owe nothing and are not
+    /// periodic-enrolled cost exactly one maintenance-row read.
     pub(crate) async fn drive_self_update(&mut self) -> Result<Option<u64>, SessionError> {
         let now_ms = self.now_ms();
         let now = Timestamp(now_ms / 1_000);
         let mut due: Option<u64> = None;
-        for snapshot in self.groups()? {
-            let gid = engine_gid(&snapshot.id);
-            let mut obligations = self.open_obligations(&gid)?;
-            if matches!(
-                snapshot.state,
-                GroupState::Removed | GroupState::Disbanded | GroupState::Unrecoverable
-            ) {
-                // The obligation outlives the membership it was minted
-                // under: verdict it once rather than let the send gate
-                // refuse forever.
-                self.fail_terminal_obligations(obligations)?;
-                continue;
-            }
 
+        // One obligation scan for the pass, bucketed by group.
+        let mut by_group: HashMap<EngineGroupId, Vec<MaintenanceObligation>> = HashMap::new();
+        for obligation in self
+            .provider
+            .list_maintenance_obligations()
+            .map_err(SessionError::Storage)?
+        {
+            if open_obligation(&obligation) {
+                by_group
+                    .entry(obligation.group_id.clone())
+                    .or_default()
+                    .push(obligation);
+            }
+        }
+        for obligations in by_group.values_mut() {
+            obligations.sort_by_key(|obligation| obligation.created_at);
+        }
+
+        for gid in self.engine.live_group_ids().map_err(session_engine_error)? {
+            let mut obligations = by_group.remove(&gid).unwrap_or_default();
             let mut maintenance = self
                 .provider
                 .group_maintenance(&gid)
                 .map_err(SessionError::Storage)?;
+            // Skip groups that owe nothing and are not periodic-enrolled:
+            // one maintenance-row read, nothing else touched.
+            if obligations.is_empty()
+                && maintenance
+                    .as_ref()
+                    .is_none_or(|state| !state.periodic_enrolled)
+            {
+                continue;
+            }
+            // The obligation outlives the membership it was minted under:
+            // verdict a terminal copy's rows once rather than let the send
+            // gate refuse forever.
+            if !obligations.is_empty() && self.group_is_terminal(&gid)? {
+                self.fail_terminal_obligations(obligations)?;
+                continue;
+            }
             // (1) Periodic scheduling: only while no obligation is open.
             if let Some(state) = &mut maintenance
                 && state.periodic_enrolled
@@ -194,23 +224,49 @@ impl Session {
                     .await?;
             }
         }
+        // Open obligations of groups the engine no longer lists live
+        // (removed/disbanded/forgotten) get the same terminal verdict;
+        // quarantined copies stay open — they may still recover.
+        for (gid, obligations) in by_group {
+            if self.group_is_terminal(&gid)? {
+                self.fail_terminal_obligations(obligations)?;
+            }
+        }
         Ok(due)
     }
 
-    /// The group's open obligations in creation order.
-    fn open_obligations(
+    /// Whether the group's durable record marks the local copy terminal:
+    /// removed, unrecoverable or disbanded. A group with no record at all
+    /// counts as terminal — its obligations could never pass the gate.
+    fn group_is_terminal(&self, gid: &EngineGroupId) -> Result<bool, SessionError> {
+        let record = match self.engine.group_record(gid) {
+            Ok(record) => record,
+            Err(EngineError::UnknownGroup(_)) => return Ok(true),
+            Err(error) => return Err(session_engine_error(error)),
+        };
+        if record.removed || record.unrecoverable || record.disbanded.is_some() {
+            return Ok(true);
+        }
+        Ok(matches!(
+            self.engine.epoch_state(gid),
+            Some(EpochState::Disbanded(_) | EpochState::Unrecoverable(_))
+        ))
+    }
+
+    /// Write an obligation row only when it changed since the value read
+    /// this pass (MDK `put_maintenance_obligation_if_changed`): a waiting
+    /// obligation must not cost a KV batch per tick.
+    fn put_obligation_if_changed(
         &self,
-        gid: &EngineGroupId,
-    ) -> Result<Vec<MaintenanceObligation>, SessionError> {
-        let mut obligations: Vec<MaintenanceObligation> = self
-            .provider
-            .list_maintenance_obligations_for_group(gid)
-            .map_err(SessionError::Storage)?
-            .into_iter()
-            .filter(open_obligation)
-            .collect();
-        obligations.sort_by_key(|obligation| obligation.created_at);
-        Ok(obligations)
+        before: &MaintenanceObligation,
+        after: &MaintenanceObligation,
+    ) -> Result<(), SessionError> {
+        if after != before {
+            self.provider
+                .put_maintenance_obligation(after)
+                .map_err(SessionError::Storage)?;
+        }
+        Ok(())
     }
 
     /// Verdict every open obligation of a removed/disbanded copy
@@ -491,9 +547,7 @@ impl Session {
     ) -> Result<(), SessionError> {
         let open = self.self_update_gate_open(gid).unwrap_or_default();
         if !open {
-            self.provider
-                .put_maintenance_obligation(obligation)
-                .map_err(SessionError::Storage)?;
+            // Nothing changed: no row write, just the re-check deadline.
             fold_ms(due, now_ms + SELF_UPDATE_RECHECK_SECS * 1_000);
             return Ok(());
         }
@@ -503,6 +557,7 @@ impl Session {
                 group_id: gid.clone(),
             })
             .await;
+        let before = obligation.clone();
         if let Ok(result) = sent {
             self.finish_send(result)?;
             obligation.phase = MaintenancePhase::PendingPublication;
@@ -513,9 +568,7 @@ impl Session {
             // leave the phase for the next pass.
             obligation.last_failure_code = Some("self_update_send_failed".into());
         }
-        self.provider
-            .put_maintenance_obligation(obligation)
-            .map_err(SessionError::Storage)?;
+        self.put_obligation_if_changed(&before, obligation)?;
         fold_ms(due, now_ms + SELF_UPDATE_RECHECK_SECS * 1_000);
         Ok(())
     }
