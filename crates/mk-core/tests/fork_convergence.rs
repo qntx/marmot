@@ -318,4 +318,124 @@ mod fork_tests {
             "b must decode a1's post-fork message"
         );
     }
+
+    /// The S17 ingest order, mk-only: the proposal goes to b only; b
+    /// auto-commits and confirms. a1's first sight of the pair ingests the
+    /// commit BEFORE the proposal it references — the exact order a
+    /// `(created_at, id)`-sorted batch produces whenever the commit's id
+    /// sorts lower. `commit_first = false` is the control order.
+    async fn commit_before_proposal(commit_first: bool) {
+        let relay = FakeRelay::new();
+        let mut b = open_member().await; // admin
+        let mut a1 = open_member().await;
+        let mut a2 = open_member().await;
+        publish_identity(&mut b, &relay, RELAY).await;
+        publish_identity(&mut a1, &relay, RELAY).await;
+        publish_identity(&mut a2, &relay, RELAY).await;
+
+        let gid: GroupId = group_with(&mut b, &relay, RELAY, &[&a1, &a2], "order").await;
+        join_via_welcome(&mut a1, &relay, RELAY).await;
+        join_via_welcome(&mut a2, &relay, RELAY).await;
+        sync_member(&mut b, &relay, RELAY, &gid).await;
+        sync_member(&mut a1, &relay, RELAY, &gid).await;
+        sync_member(&mut a2, &relay, RELAY, &gid).await;
+
+        a2.session.leave(&gid).await.expect("leave");
+        flush(&mut a2, &relay).await;
+        let route = b.route_hex(&gid);
+        let proposal = group_events(&relay, RELAY, &route)
+            .last()
+            .expect("proposal")
+            .clone();
+        eprintln!("[order] proposal {}", proposal.id);
+
+        // P to b only; b auto-commits C_B past jitter and confirms — a1 has
+        // seen nothing of either yet.
+        let (rb, _) = ingest_reported(&mut b, vec![proposal.clone()]).await;
+        eprintln!("[order] b proposal outcome {:?}", rb[0].outcome);
+        fire_auto_commit(&mut b, &relay).await;
+        let everything = group_events(&relay, RELAY, &route);
+        let commit = everything
+            .iter()
+            .rev()
+            .find(|event| event.id != proposal.id)
+            .expect("b commit")
+            .clone();
+        eprintln!(
+            "[order] commit {} b epoch {}",
+            commit.id,
+            snapshot(&b, &gid).epoch
+        );
+
+        // a1's first sight: the pair in the tested order, one `ingest` each
+        // (per-event drive equals the batch's trailing drive).
+        let (first, second) = if commit_first {
+            (&commit, &proposal)
+        } else {
+            (&proposal, &commit)
+        };
+        let r1 = a1.session.ingest(first).await.expect("first ingest");
+        let r2 = a1.session.ingest(second).await.expect("second ingest");
+        eprintln!(
+            "[order] a1 first={} {} -> {:?}; second={} {} -> {:?}",
+            first.id, first.created_at, r1.outcome, second.id, second.created_at, r2.outcome
+        );
+
+        // a1's jittered auto-commit then ordinary settle rounds.
+        a1.clock.advance(5_000);
+        a1.session.tick().await.expect("tick");
+        flush(&mut a1, &relay).await;
+        let a1_hex = a1.account_hex();
+        for pass in 0..8 {
+            for member in [&mut b, &mut a1] {
+                member.clock.advance(2_000);
+                let backlog = group_events(&relay, RELAY, &member.route_hex(&gid));
+                let (reports, _) = ingest_reported(member, backlog).await;
+                for report in &reports {
+                    if member.account_hex() == a1_hex
+                        && !matches!(
+                            report.outcome,
+                            InputOutcome::Accepted | InputOutcome::Rejected { .. }
+                        )
+                    {
+                        eprintln!(
+                            "[order]   pass {pass} a1 {} -> {:?}",
+                            report.event, report.outcome
+                        );
+                    }
+                }
+                member.session.tick().await.expect("tick");
+                flush(member, &relay).await;
+            }
+        }
+
+        eprintln!(
+            "[order] settled: b {} a1 {}",
+            snapshot(&b, &gid).epoch,
+            snapshot(&a1, &gid).epoch
+        );
+        send_chat(&mut b, &relay, &gid, "b-after-order").await;
+        let a1_ev = sync_member(&mut a1, &relay, RELAY, &gid).await;
+        eprintln!("[order] a1 recv {:?}", received(&a1_ev));
+        assert!(
+            received(&a1_ev).contains(&"b-after-order".to_owned()),
+            "a1 must converge on b's branch and decode b's post message"
+        );
+        assert_eq!(snapshot(&b, &gid).epoch, snapshot(&a1, &gid).epoch);
+    }
+
+    /// S17 order: commit ingested before its referenced proposal. This is
+    /// the deterministic upstream-MDK reproduction of the S17 flake —
+    /// un-ignore when the MDK pin carries the fix.
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore = "upstream MDK defect: a competing commit ingested before the proposal it references never replays once this member's own auto-commit consumes the proposal (the S17 flake)"]
+    async fn commit_before_referenced_proposal_converges() {
+        commit_before_proposal(true).await;
+    }
+
+    /// Control: proposal ingested before the referencing commit.
+    #[tokio::test(flavor = "current_thread")]
+    async fn proposal_before_referencing_commit_converges() {
+        commit_before_proposal(false).await;
+    }
 }
