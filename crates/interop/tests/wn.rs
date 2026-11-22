@@ -92,7 +92,12 @@ fn wn_group_id(created: &Value) -> String {
 /// mk-core creates a group, invites wn by its fetched `KeyPackage`, wn
 /// accepts, both rosters converge. Returns the MLS group id (asserted
 /// identical on the wn side).
-async fn mk_group_with_wn(rig: &Arc<Rig>, a: &mut Member, name: &str) -> GroupId {
+async fn mk_group_with_wn(
+    rig: &Arc<Rig>,
+    a: &mut Member,
+    name: &str,
+    admins: Vec<AccountId>,
+) -> GroupId {
     let wn_kp = until(
         || {
             let rig = Arc::clone(rig);
@@ -113,7 +118,7 @@ async fn mk_group_with_wn(rig: &Arc<Rig>, a: &mut Member, name: &str) -> GroupId
                 key_package: wn_kp,
                 inbox_relays: vec![rig.url.clone()],
             }],
-            admins: Vec::new(),
+            admins,
             components: Vec::new(),
         })
         .await
@@ -270,7 +275,7 @@ async fn scenario1_mk_core_invites_wn() {
     let mut a = open_member().await;
     publish_identity(&mut a, &rig).await;
 
-    let gid = mk_group_with_wn(&rig, &mut a, "interop-1").await;
+    let gid = mk_group_with_wn(&rig, &mut a, "interop-1", Vec::new()).await;
     let wn_gid = gid.to_string();
 
     wn_says(&rig, &mut a, &gid, &wn_gid, "hello-from-wn").await;
@@ -346,7 +351,7 @@ async fn scenario3_bulk_and_membership() {
     publish_identity(&mut a, &rig).await;
     let a_hex = a.account_hex();
 
-    let gid = mk_group_with_wn(&rig, &mut a, "interop-3").await;
+    let gid = mk_group_with_wn(&rig, &mut a, "interop-3", Vec::new()).await;
     let wn_gid = gid.to_string();
 
     // wn sends its share through the CLI (CLI-bound, ~35 ms/msg in the
@@ -1249,7 +1254,8 @@ async fn scenario17_second_device_signs_out() {
     )
     .await;
 
-    // The signed-out device follows the commit to `Removed`.
+    // The signed-out device follows the commit to `Removed`; the account
+    // keeps a leaf through a1, so `access` is `RemovedDevice`.
     let gid2 = gid.clone();
     until_member(
         &mut a2,
@@ -1258,15 +1264,14 @@ async fn scenario17_second_device_signs_out() {
             let rig = Arc::clone(&rig);
             Box::pin(async move {
                 let _ = sync(&mut *a, &rig, &gid2).await;
-                let removed = a
-                    .session
-                    .group(&gid2)
-                    .expect("group")
-                    .is_some_and(|s| s.state == GroupState::Removed);
+                let removed = a.session.group(&gid2).expect("group").is_some_and(|s| {
+                    s.state == GroupState::Removed
+                        && s.access == mk_core::GroupAccess::RemovedDevice
+                });
                 removed.then_some(())
             })
         },
-        "a2 is removed",
+        "a2 is removed (device-scoped)",
         120_000,
     )
     .await;
@@ -1337,4 +1342,110 @@ async fn scenario21_post_join_self_update() {
 
     rig.relay.shutdown();
     eprintln!("SCENARIO-21 PASS {:.1}s", start.elapsed().as_secs_f64());
+}
+
+// ---- scenario 20: stall detection ------------------------------------
+
+/// S20 (D2): wn renames the group (a Commit) and sends three messages at
+/// the new epoch; the commit is dropped from our device's feed. Three
+/// deferred events suspect the stall once; one unfloored refetch that
+/// still lacks the commit leaves the counter full — `access: Stalled`.
+///
+/// Our device creates the group and seats wn as an admin rather than
+/// joining a wn-created one: a copy installed through a Welcome keeps
+/// `local_copy_welcome_created_at`, and the stall counter's
+/// `transport_message_predates_local_copy` filter drops every event
+/// inside the pre-copy clock-skew window — on wall-clock time nothing
+/// wn emits right after our join would ever count. A self-created copy
+/// has no Welcome floor, so the withheld wn commit defers the chats for
+/// real.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs wn/wnd built from the upstream.json wn pin; see CONTRIBUTING"]
+async fn scenario20_stall_detection() {
+    let start = Instant::now();
+    let rig = Arc::new(rig("s20").await);
+    let mut a = open_member().await;
+    publish_identity(&mut a, &rig).await;
+
+    let wn_account = AccountId::from_hex(&rig.wn_pub).expect("wn hex");
+    let gid = mk_group_with_wn(&rig, &mut a, "interop-20", vec![wn_account]).await;
+    let wn_gid = gid.to_string();
+
+    // Everything currently on the group route is already ingested.
+    let route = a.route_hex(&gid);
+    let seen: std::collections::BTreeSet<mk_core::EventId> = fetch_group(&rig, &route)
+        .await
+        .into_iter()
+        .map(|event| event.id)
+        .collect();
+
+    // The rename is one commit; the three chats ride it. Dropping the
+    // commit (the earliest fresh event on the route) leaves the chats
+    // transport-deferred.
+    wn(
+        &rig.home,
+        &rig.socket,
+        Some(&rig.wn_npub),
+        &["groups", "rename", &wn_gid, "interop-20-renamed"],
+    );
+    for i in 0..3 {
+        wn_send(&rig, &wn_gid, &format!("s20-m{i}"));
+    }
+    let mut fresh: Vec<mk_core::Event> = until(
+        || {
+            let rig = Arc::clone(&rig);
+            let seen = seen.clone();
+            let route = route.clone();
+            async move {
+                let fresh: Vec<mk_core::Event> = fetch_group(&rig, &route)
+                    .await
+                    .into_iter()
+                    .filter(|event| !seen.contains(&event.id))
+                    .collect();
+                (fresh.len() >= 4).then_some(fresh)
+            }
+        },
+        "wn's commit plus three chats on the route",
+        90_000,
+        800,
+    )
+    .await;
+    fresh.sort_by_key(|event| (event.created_at, event.id));
+    let dropped = fresh[0].id;
+    let without_commit: Vec<mk_core::Event> = fresh
+        .iter()
+        .filter(|event| event.id != dropped)
+        .cloned()
+        .collect();
+
+    // Exactly one suspicion across the whole feed.
+    let events = ingest(&mut a, without_commit).await;
+    let suspected = events
+        .iter()
+        .filter(
+            |event| matches!(event, SessionEvent::GroupStallSuspected { group } if *group == gid),
+        )
+        .count();
+    assert_eq!(suspected, 1, "three deferred events suspect once");
+
+    // The one refetch still cannot land the missing commit: the counter
+    // stays full at the same epoch and the copy flags `Stalled`.
+    let refetch: Vec<mk_core::Event> = fetch_group(&rig, &route)
+        .await
+        .into_iter()
+        .filter(|event| event.id != dropped)
+        .collect();
+    let _ = ingest(&mut a, refetch).await;
+    a.session.history_fetched(&gid).expect("history_fetched");
+    let events = a.session.drain_events().expect("drain");
+    let stalled = events
+        .iter()
+        .filter(|event| matches!(event, SessionEvent::GroupStalled { group } if *group == gid))
+        .count();
+    assert_eq!(stalled, 1, "one stalled event after the refetch");
+    let snapshot = a.session.group(&gid).expect("group").expect("snapshot");
+    assert_eq!(snapshot.access, mk_core::GroupAccess::Stalled);
+
+    rig.relay.shutdown();
+    eprintln!("SCENARIO-20 PASS {:.1}s", start.elapsed().as_secs_f64());
 }

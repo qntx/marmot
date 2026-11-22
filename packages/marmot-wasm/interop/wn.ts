@@ -34,7 +34,7 @@ import { finalizeEvent, generateSecretKey } from "nostr-tools";
 
 import type { Backend } from "@qntx/marmot/backend";
 import { MarmotClient, nostrRelayPort, MarmotError } from "@qntx/marmot/client";
-import type { ClientMessage, GroupEvent, InviteEvent, Timer } from "@qntx/marmot/client";
+import type { ClientMessage, GroupEvent, InviteEvent, RelayPort, Timer } from "@qntx/marmot/client";
 import { memoryCursorStore, memoryKv } from "@qntx/marmot/testing";
 import { Pool } from "@qntx/nostr";
 import { decode, npubEncode } from "@qntx/nostr/nips/nip19";
@@ -1462,6 +1462,13 @@ async function run(): Promise<void> {
           ) || undefined,
         "device 2 observes its own removal",
       );
+      // The signed-out device lost its leaf; the account lives on through
+      // device 1 — `access` is removed_device, not removed.
+      const snapshots2 = await client2.groups();
+      const snapshot2 = snapshots2.find((item) => item.id === gid2);
+      if (snapshot2?.access !== "removed_device") {
+        throw new Error(`device 2 access ${String(snapshot2?.access)}, expected removed_device`);
+      }
       log(`device 2 signed out; wn keeps one leaf (${secs(at)})`);
 
       // Device 1 applies wn's removal commit too: the shared leaf update
@@ -1554,6 +1561,134 @@ async function run(): Promise<void> {
         const entries = await wnMessages(rig, wnGid);
         return entries.some((entry) => entry.includes(ourText)) || undefined;
       }, `wn messages list shows ${ourText}`);
+    });
+
+    // S20 (D2) — a third device of our account behind a censoring
+    // RelayPort: wn's rename commit never reaches it, three chats defer,
+    // the session suspects once, the Pump's one unfloored refetch still
+    // lacks the commit, and the copy reports `access: stalled`.
+    //
+    // The device creates the group and seats wn as an admin rather than
+    // joining a wn-created one: a Welcome-installed copy floors
+    // `local_copy_welcome_created_at`, and the pre-copy skew window
+    // swallows everything wn could emit on wall-clock time — a
+    // self-created copy has no such floor, so the withheld wn commit
+    // defers the chats for real.
+    await scenario("S20 stall detection", async () => {
+      const inner = nostrRelayPort(pool);
+      // The first kind-445 seen on the armed route — the one commit —
+      // is dropped every time it reappears, refetch replay included.
+      const drop = { route: undefined as string | undefined, id: undefined as string | undefined };
+      const droppingPort: RelayPort = {
+        publish: async (relay, event) => inner.publish(relay, event),
+        connect: async (relay) => inner.connect(relay),
+        subscribe: (relay, filters, handlers) =>
+          inner.subscribe(relay, filters, {
+            ...handlers,
+            event: (event) => {
+              const h = event.tags.find((tag) => tag[0] === "h")?.[1];
+              if (drop.route !== undefined && event.kind === 445 && h === drop.route) {
+                drop.id ??= event.id;
+                if (event.id === drop.id) {
+                  return;
+                }
+              }
+              handlers.event(event);
+            },
+          }),
+      };
+      const backend3: Backend = await releaseBackend();
+      const client3 = await MarmotClient.open({
+        backend: backend3,
+        kv: memoryKv(),
+        cursors: memoryCursorStore(),
+        signer,
+        clock: {
+          now: () => ({
+            unixMs: BigInt(Date.now()),
+            monotonicMs: BigInt(Math.max(0, Date.now() - startMonotonic)),
+          }),
+        },
+        timer,
+        relays: droppingPort,
+        lookupRelays: [url],
+        allowLoopback: true,
+      });
+      const invites3: InviteEvent[] = [];
+      const changes3: GroupEvent[] = [];
+      client3.onInvite((event) => {
+        invites3.push(event);
+      });
+      client3.onGroupChange((event) => {
+        changes3.push(event);
+      });
+      await client3.ensureKeyPackage();
+      await client3.publishInboxRelays([url]);
+      await waitFor(
+        () =>
+          served.relay
+            .events()
+            .filter((stored) => stored.kind === KEY_PACKAGE_KIND && stored.pubkey === signer.pubkey)
+            .length >= 3 || undefined,
+        "third device's KeyPackage on the relay",
+      );
+
+      let at = Date.now();
+      const invitees3 = await client3.lookupInvitees(rig.wnPub, [url]);
+      if (invitees3.length === 0) {
+        throw new Error("lookupInvitees returned no key packages for m3b-20");
+      }
+      const snapshot3 = await client3.createGroup({
+        name: "m3b-20",
+        description: "",
+        relays: [url],
+        invitees: invitees3,
+        admins: [rig.wnPub],
+      });
+      const gid = snapshot3.id;
+      const wnGid = gid;
+      await waitFor(async () => {
+        const gids = await wnInviteGids(rig);
+        return gids.includes(gid) || undefined;
+      }, `wn groups invites shows ${gid}`);
+      await wn(rig, ["groups", "accept", wnGid], rig.wnNpub);
+      await waitFor(async () => {
+        const roster = await client3.group(gid);
+        if (roster === undefined) {
+          return undefined;
+        }
+        return roster.members.some((member) => member.account === rig.wnPub) || undefined;
+      }, `wn member ${rig.wnNpub} in m3b-20 roster`);
+      await sleep(2000);
+      const route = snapshot3.nostrGroupId;
+      log(`device 3 created ${wnGid}; wn accepted as admin (${secs(at)})`);
+
+      // Arm the drop, then the rename is one commit and three chats ride
+      // it — the device sees the chats but never the commit.
+      at = Date.now();
+      drop.route = route;
+      await wn(rig, ["groups", "rename", wnGid, "m3b-20-renamed"], rig.wnNpub);
+      for (const text of ["s20-m0", "s20-m1", "s20-m2"]) {
+        // oxlint-disable-next-line no-await-in-loop -- sends are sequential by design
+        await wn(rig, ["messages", "send", wnGid, text], rig.wnNpub);
+      }
+
+      // Three deferred events suspect once; the Pump's unfloored replay
+      // still lacks the dropped commit, so `history_fetched` flags the
+      // copy stalled — exactly one refetch deep.
+      await waitFor(
+        () =>
+          changes3.some((event) => event.group === gid && event.type === "group_stalled") ||
+          undefined,
+        "device 3 stalls after one refetch",
+      );
+      const snapshots3 = await client3.groups();
+      const stalled3 = snapshots3.find((item) => item.id === gid);
+      if (stalled3?.access !== "stalled") {
+        throw new Error(`device 3 access ${String(stalled3?.access)}, expected stalled`);
+      }
+      log(`device 3 flagged stalled after one refetch (${secs(at)})`);
+      await client3.close();
     });
 
     // S21 — post-join self-update: the Pump reports history_fetched at
