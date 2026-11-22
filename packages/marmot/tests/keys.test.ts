@@ -1,5 +1,7 @@
 import { describe, expect, test } from "vite-plus/test";
 
+import { finalizeEvent, Keys } from "@qntx/nostr";
+
 import type { NostrEvent } from "../src/backend/protocol.ts";
 import { inboxRelaysOf, lookupInvitees, writeRelaysOf } from "../src/keys/index.ts";
 import type { InviteeLookup } from "../src/keys/index.ts";
@@ -9,17 +11,57 @@ import { manualTimer } from "../src/testing/timer.ts";
 const LOOKUP = "wss://lookup.example";
 const R1 = "wss://r1.example";
 const R2 = "wss://r2.example";
-const PUB = "aa".repeat(32);
 
-function event(partial: Partial<NostrEvent> & { id: string }): NostrEvent {
+const KEYS = Keys.fromSecretKey(new Uint8Array(32).fill(9));
+const OTHER = Keys.fromSecretKey(new Uint8Array(32).fill(8));
+const PUB = KEYS.publicKey;
+
+/**
+ * A genuinely signed event — `fetchEvents` verifies id + signature before dedupe, so fixtures
+ * cannot fake them. The id comes out of `finalizeEvent`; `content` distinguishes fixtures.
+ */
+function event(
+  partial: {
+    kind?: number;
+    createdAt?: bigint;
+    tags?: string[][];
+    content: string;
+  },
+  keys = KEYS,
+): NostrEvent {
+  const wire = finalizeEvent(
+    {
+      kind: partial.kind ?? 10002,
+      tags: partial.tags ?? [],
+      content: partial.content,
+      created_at: Number(partial.createdAt ?? 1000n),
+    },
+    keys,
+  );
   return {
+    id: wire.id,
+    pubkey: wire.pubkey,
+    createdAt: BigInt(wire.created_at),
+    kind: wire.kind,
+    tags: wire.tags.map((tag) => [...tag]),
+    content: wire.content,
+    sig: wire.sig,
+  };
+}
+
+/**
+ * A forgery attributed to `PUB`: a newer relay list with the victim's pubkey but a signature that
+ * cannot verify, so `verifyInbound` drops it.
+ */
+function forgedRelayList(relays: string[]): NostrEvent {
+  return {
+    id: "ef".repeat(32),
     pubkey: PUB,
-    createdAt: 1000n,
+    createdAt: 9000n,
     kind: 10002,
-    tags: [],
+    tags: relays.map((relay) => ["r", relay]),
     content: "",
     sig: "00".repeat(64),
-    ...partial,
   };
 }
 
@@ -35,6 +77,11 @@ async function serve(relay: string, events: NostrEvent[]) {
 }
 
 const timer = manualTimer();
+
+/** The relay on whichever of two same-`createdAt` events carries the lower id. */
+function lowerIdRelay(a: NostrEvent, relayA: string, b: NostrEvent, relayB: string): string {
+  return a.id < b.id ? relayA : relayB;
+}
 
 function found(lookup: InviteeLookup): Extract<InviteeLookup, { type: "found" }> {
   if (lookup.type !== "found") {
@@ -52,7 +99,7 @@ describe("writeRelaysOf", () => {
   test("write-marked and unmarked r tags are kept, read-only dropped", async () => {
     const port = await serve(LOOKUP, [
       event({
-        id: "01".repeat(32),
+        content: "list",
         tags: [
           ["r", R1],
           ["r", R2, "write"],
@@ -67,21 +114,24 @@ describe("writeRelaysOf", () => {
   });
 
   test("the newest kind-10002 wins; a createdAt tie picks the lower id", async () => {
-    const port = await serve(LOOKUP, [
-      event({ id: "03".repeat(32), createdAt: 2000n, tags: [["r", R2]] }),
-      event({ id: "01".repeat(32), createdAt: 1000n, tags: [["r", R1]] }),
-      event({ id: "02".repeat(32), createdAt: 2000n, tags: [["r", "wss://older.example"]] }),
-    ]);
-    // Same createdAt (2000): id "02…" < "03…" wins.
+    const older = event({ content: "older", createdAt: 1000n, tags: [["r", R1]] });
+    const tiedA = event({ content: "tied-a", createdAt: 2000n, tags: [["r", R2]] });
+    const tiedB = event({
+      content: "tied-b",
+      createdAt: 2000n,
+      tags: [["r", "wss://older.example"]],
+    });
+    const port = await serve(LOOKUP, [tiedA, older, tiedB]);
+    const relay = lowerIdRelay(tiedA, R2, tiedB, "wss://older.example");
     await expect(writeRelaysOf(port, timer, PUB, [LOOKUP], false)).resolves.toStrictEqual([
-      "wss://older.example/",
+      `${relay}/`,
     ]);
   });
 
   test("unsafe relays in the list are filtered out of the result", async () => {
     const port = await serve(LOOKUP, [
       event({
-        id: "01".repeat(32),
+        content: "unsafe",
         tags: [
           ["r", R1],
           ["r", "wss://10.0.0.1"],
@@ -95,18 +145,26 @@ describe("writeRelaysOf", () => {
 
   test("events by another author or another kind do not count", async () => {
     const port = await serve(LOOKUP, [
-      event({ id: "01".repeat(32), pubkey: "bb".repeat(32), tags: [["r", R1]] }),
-      event({ id: "02".repeat(32), kind: 10050, tags: [["relay", R1]] }),
+      event({ content: "other-author", tags: [["r", R1]] }, OTHER),
+      event({ content: "other-kind", kind: 10050, tags: [["relay", R1]] }),
     ]);
     await expect(writeRelaysOf(port, timer, PUB, [LOOKUP], false)).resolves.toBeUndefined();
+  });
+
+  test("a forged kind-10002 with a newer created_at does not steer the lookup", async () => {
+    const genuine = event({ content: "genuine", createdAt: 1000n, tags: [["r", R1]] });
+    const port = await serve(LOOKUP, [genuine, forgedRelayList(["wss://evil.example"])]);
+    await expect(writeRelaysOf(port, timer, PUB, [LOOKUP], false)).resolves.toStrictEqual([
+      `${R1}/`,
+    ]);
   });
 });
 
 describe("inboxRelaysOf", () => {
   test("the newest kind-10050 relay tags", async () => {
     const port = await serve(LOOKUP, [
-      event({ id: "01".repeat(32), kind: 10050, createdAt: 1000n, tags: [["relay", R1]] }),
-      event({ id: "02".repeat(32), kind: 10050, createdAt: 2000n, tags: [["relay", R2]] }),
+      event({ content: "old", kind: 10050, createdAt: 1000n, tags: [["relay", R1]] }),
+      event({ content: "new", kind: 10050, createdAt: 2000n, tags: [["relay", R2]] }),
     ]);
     await expect(inboxRelaysOf(port, timer, PUB, [LOOKUP], false)).resolves.toStrictEqual([
       `${R2}/`,
@@ -115,24 +173,24 @@ describe("inboxRelaysOf", () => {
 });
 
 describe("lookupInvitees", () => {
-  const kp = (id: string, createdAt: bigint, slot?: string): NostrEvent =>
+  const kp = (content: string, createdAt: bigint, slot?: string): NostrEvent =>
     event({
-      id,
+      content,
       kind: 30_443,
       createdAt,
       tags: slot === undefined ? [] : [["d", slot]],
     });
-  const deletion = (id: string, k?: string): NostrEvent =>
+  const deletion = (content: string, k?: string): NostrEvent =>
     event({
-      id,
+      content,
       kind: 5,
       createdAt: 2000n,
       tags: k === undefined ? [] : [["k", k]],
     });
   const relayList = (relays: string[]): NostrEvent =>
-    event({ id: "f0".repeat(32), tags: relays.map((relay) => ["r", relay]) });
+    event({ content: "write-list", tags: relays.map((relay) => ["r", relay]) });
   const dmList = (relays: string[]): NostrEvent =>
-    event({ id: "f1".repeat(32), kind: 10050, tags: relays.map((relay) => ["relay", relay]) });
+    event({ content: "dm-list", kind: 10050, tags: relays.map((relay) => ["relay", relay]) });
   /** The engine's stand-in: keeps every fetched publication. */
   const keepKeyPackages = async (events: NostrEvent[]): Promise<NostrEvent[]> =>
     Promise.resolve(events.filter((entry) => entry.kind === 30_443));
@@ -159,7 +217,7 @@ describe("lookupInvitees", () => {
     const network = fakeRelay();
     const writer = network.port("a");
     await writer.publish(LOOKUP, relayList([LOOKUP]));
-    await writer.publish(`${LOOKUP}/`, kp("02".repeat(32), 1000n));
+    await writer.publish(`${LOOKUP}/`, kp("kp", 1000n));
     const port = network.port("r");
     await expect(
       lookupInvitees(port, timer, PUB, [LOOKUP], false, keepKeyPackages),
@@ -173,16 +231,17 @@ describe("lookupInvitees", () => {
     const writer = network.port("a");
     await writer.publish(LOOKUP, relayList([LOOKUP]));
     await writer.publish(LOOKUP, dmList([R1, R2]));
-    const picked = kp("04".repeat(32), 2000n, "a");
-    const packages = [kp("03".repeat(32), 1000n, "a"), picked, kp("05".repeat(32), 1500n, "b")];
+    const picked = kp("kp-b", 2000n, "a");
+    const packages = [kp("kp-a", 1000n, "a"), picked, kp("kp-c", 1500n, "b")];
     for (const kpEvent of packages) {
       // The KeyPackage fetch happens on the normalized write relay.
       // oxlint-disable-next-line no-await-in-loop -- publishes serialize like the real port
       await writer.publish(`${LOOKUP}/`, kpEvent);
     }
     // A 30443-scoped deletion is fetched too; an untagged one is not.
-    await writer.publish(`${LOOKUP}/`, deletion("06".repeat(32), "30443"));
-    await writer.publish(`${LOOKUP}/`, deletion("07".repeat(32)));
+    const scopedDeletion = deletion("del-scoped", "30443");
+    await writer.publish(`${LOOKUP}/`, scopedDeletion);
+    await writer.publish(`${LOOKUP}/`, deletion("del-untagged"));
 
     let received: NostrEvent[] = [];
     const port = network.port("r");
@@ -193,10 +252,10 @@ describe("lookupInvitees", () => {
       }),
     );
     expect(received.map((entry) => entry.id).toSorted()).toStrictEqual(
-      [...packages.map((entry) => entry.id), "06".repeat(32)].toSorted(),
+      [...packages.map((entry) => entry.id), scopedDeletion.id].toSorted(),
     );
     expect(lookup.invitees).toHaveLength(1);
-    expect(lookup.invitees[0]?.keyPackage.id).toBe("04".repeat(32));
+    expect(lookup.invitees[0]?.keyPackage.id).toBe(picked.id);
     expect(lookup.invitees[0]?.inboxRelays).toStrictEqual([`${R1}/`, `${R2}/`]);
   });
 });

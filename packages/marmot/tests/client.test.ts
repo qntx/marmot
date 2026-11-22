@@ -40,6 +40,7 @@ import type { ManualTimer } from "../src/testing/timer.ts";
 import { wireEventBytes } from "../src/transport/nostr.ts";
 import { groupCursorKey, inboxCursorKey } from "../src/transport/plan.ts";
 import type { RelayFilter, RelayPort } from "../src/transport/port.ts";
+import { markVerified } from "../src/transport/verify.ts";
 
 const ACCOUNT = "a".repeat(64);
 const RELAY = "wss://r1.example";
@@ -739,10 +740,10 @@ describe("MarmotClient", () => {
     const fixture = await open(freshScript(), undefined, undefined, [LOOKUP]);
     // An authored NIP-65 list on the lookup relay: `read`-marked relays are
     // excluded from the write set the request carries.
-    // The list is fetched by `writeRelaysOf` (an authors-filtered one-shot fetch, no
-    // signature check) — a literal fixture, not a pump-ingested event, so the fake
-    // pubkey is fine here.
-    await fixture.network.port("peer").publish(LOOKUP, {
+    // The list is fetched by `writeRelaysOf` (an authors-filtered one-shot fetch that
+    // re-verifies inbound events) — `markVerified` plays the role of a RelayPort whose pool
+    // already verified the object, so the fake pubkey fixture still lands.
+    const list = {
       id: "12".repeat(32),
       pubkey: ACCOUNT,
       createdAt: 1000n,
@@ -753,7 +754,9 @@ describe("MarmotClient", () => {
       ],
       content: "",
       sig: "5".repeat(128),
-    });
+    };
+    markVerified(list);
+    await fixture.network.port("peer").publish(LOOKUP, list);
     const result = await fixture.client.signOut();
     expect(result).toStrictEqual({ left: [], keptAdminLeaves: [] });
     const calls = callsOf(fixture.script, "sign_out");
