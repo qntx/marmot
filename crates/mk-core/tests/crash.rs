@@ -64,6 +64,26 @@
 //!   `Leaving` (admin step-down-and-leave) and the remove flow cuts while
 //!   the removed member realizes its local-leaf removal. Disband is not
 //!   in the session API (M5) — there is nothing to interrupt.
+//! - 10 KeyPackage staging: cuts inside `ensure_key_package`'s
+//!   `stage_key_package_replacement` transaction — either the whole
+//!   pending row (new bundle + lifecycle record) is durable or none of
+//!   it is; a reopen never observes a half-staged replacement. Covered
+//!   by both cut variants at every `KeyPackage` step batch.
+//! - 11 signed-not-published: cuts after the signed KeyPackage outbound
+//!   batch — the durable rows re-release the identical signed event, so
+//!   the authored-event multiset stays byte-identical.
+//! - 12 acknowledgement-uncertain promotion: cuts at the
+//!   `report_publish` batch that atomically promotes the pending
+//!   KeyPackage — a reopen re-derives the promotable state from the
+//!   durable row and the resumed report promotes exactly once.
+//! - 13 promotion atomicity: the report row update and
+//!   `promote_key_package_lifecycle` commit in one `transact`, so no cut
+//!   exposes a mixed old/new `current` — pinned by the `key_package`
+//!   observer projection at every boundary.
+//! - 14 consumed-not-replaced: cuts after a Welcome join commit is
+//!   durable but before the next `Tick` staged the replacement — the
+//!   reopened session re-reads the `last_consumed_key_package_ref`
+//!   marker and the resumed `Tick` stages the same-slot replacement.
 //!
 //! mdk#3524 (fixed by mdk#3531, v0.18.0): at the leaving-flow cuts where
 //! the step-down's staging is durable but its fanout is not, the reopened
@@ -228,6 +248,11 @@ mod crash {
         /// No outstanding obligations (`awaiting_durability` and
         /// `take_outbound` both empty).
         obligations_clear: bool,
+        /// `key_package_status` projection — `(current.is_some(),
+        /// pending, retained)`; `None` when the lifecycle row is
+        /// unreadable. Event ids are not comparable across runs, only
+        /// the lifecycle shape is.
+        key_package: Option<(bool, bool, u32)>,
     }
 
     #[derive(PartialEq, Debug)]
@@ -265,6 +290,7 @@ mod crash {
             mk_core::OutboundPurpose::Commit => "commit",
             mk_core::OutboundPurpose::Welcome => "welcome",
             mk_core::OutboundPurpose::KeyPackage => "key-package",
+            mk_core::OutboundPurpose::KeyPackageRepublish => "key-package-republish",
             mk_core::OutboundPurpose::InboxRelays => "inbox-relays",
             _ => "other",
         }
@@ -831,6 +857,11 @@ mod crash {
                         .take_outbound()
                         .expect("take_outbound")
                         .is_empty();
+                let key_package = member
+                    .session
+                    .key_package_status()
+                    .ok()
+                    .map(|status| (status.current.is_some(), status.pending, status.retained));
                 members.push(MemberObs {
                     groups,
                     net_payloads,
@@ -839,6 +870,7 @@ mod crash {
                         .map(|(kind, name, recipient)| (*kind, *name, account_index(recipient)))
                         .collect(),
                     obligations_clear,
+                    key_package,
                 });
             }
             Observed {
@@ -956,10 +988,11 @@ mod crash {
     /// state, not bytes").
     fn equivalent(a: &Observed, b: &Observed) -> bool {
         a.members.len() == b.members.len()
-            && a.members
-                .iter()
-                .zip(b.members.iter())
-                .all(|(a, b)| a.groups == b.groups && a.net_payloads == b.net_payloads)
+            && a.members.iter().zip(b.members.iter()).all(|(a, b)| {
+                a.groups == b.groups
+                    && a.net_payloads == b.net_payloads
+                    && a.key_package == b.key_package
+            })
     }
 
     /// Reference run once, then every `(k, variant)` cut of `cut_member`.
@@ -1146,6 +1179,34 @@ mod crash {
             Step::Tick(0),
         ];
         matrix(FLOW, 2, 0, "publish-lifecycle").await;
+    }
+
+    /// KeyPackage lifecycle cuts: both variants at every batch of the
+    /// invitee's `ensure` staging (C10), signed-outbound release (C11),
+    /// report/promotion transaction (C12, C13) and the post-consumption
+    /// `Tick` that stages the same-slot replacement (C14). The
+    /// `key_package` observer projection pins `current`/`pending`/
+    /// `retained` equality; authored-event equality pins C11's
+    /// byte-identical re-release.
+    #[tokio::test(flavor = "current_thread")]
+    async fn restart_boundaries_key_package_lifecycle() {
+        const FLOW: &[Step] = &[
+            Step::KeyPackage(0),
+            Step::Flush(0),
+            Step::InboxRelays(0),
+            Step::Flush(0),
+            Step::KeyPackage(1),
+            Step::InboxRelays(1),
+            Step::Flush(1),
+            Step::Create(1, "crash-key-package", &[0], &[]),
+            Step::Flush(1),
+            Step::Deliver(0),
+            Step::Tick(0),
+            Step::Flush(0),
+            Step::Deliver(1),
+            Step::Tick(1),
+        ];
+        matrix(FLOW, 2, 0, "key-package-lifecycle").await;
     }
 
     /// Joiner-side cuts over the same flow — the multi-part apply of an
