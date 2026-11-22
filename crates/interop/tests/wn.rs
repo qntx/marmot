@@ -1298,11 +1298,7 @@ async fn scenario17_second_device_signs_out() {
             // reported Duplicate/OwnEcho was effectively unprocessed on a1;
             // then a few settle rounds tell whether redelivery heals.
             let backlog = fetch_group(&rig, &a1.route_hex(&gid)).await;
-            let reports = a1
-                .session
-                .ingest_batch(backlog)
-                .await
-                .expect("heal ingest");
+            let reports = a1.session.ingest_batch(backlog).await.expect("heal ingest");
             eprintln!("[s17-diag] re-ingest reports:");
             for report in &reports {
                 eprintln!("[s17-diag]   {} -> {:?}", report.event, report.outcome);
