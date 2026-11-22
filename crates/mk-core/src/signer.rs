@@ -53,8 +53,8 @@ pub trait AccountSigner: Send + Sync + fmt::Debug {
     fn account(&self) -> AccountId;
 
     /// Sign `unsigned` and return the complete event. Implementations must
-    /// set `id` to [`UnsignedEvent::id`] and a valid schnorr signature; the
-    /// session does not re-derive them.
+    /// set `id` to [`UnsignedEvent::id`] and a valid schnorr signature;
+    /// [`CheckedSigner`] rejects every reply that does not.
     fn sign_event(&self, unsigned: UnsignedEvent) -> SignerFuture<'_, Result<Event, SignerError>>;
 
     /// NIP-44 seal `plaintext` for `peer`'s key.
@@ -106,6 +106,76 @@ fn signer_failed(error: SignerError) -> MarmotSignerError {
 }
 
 const NIP04_UNSUPPORTED: &str = "nip04 unsupported";
+
+/// The reply is not the requested event: a hostile or buggy signer can never
+/// make the session publish a different event or an invalid signature.
+const SIGNER_REPLY_MISMATCH: &str = "signer reply mismatch";
+
+/// [`AccountSigner`] wrapper installed once by `Session::open` so EVERY
+/// `sign_event` path — direct `sign_checked` calls, MDK seal/Welcome signing
+/// through [`SignerAdapter`], and the bridge's `QueueSigner` — gets the same
+/// reply validation: the signed event must come from the account, carry the
+/// request's `pubkey`/`kind`/`content`/`tags`/`created_at` untouched, commit
+/// to [`UnsignedEvent::id`] and hold a verifying schnorr signature. Anything
+/// else is [`SignerError::Failed`]; the signer ran and answered wrong.
+pub(crate) struct CheckedSigner {
+    inner: Arc<dyn AccountSigner>,
+}
+
+impl CheckedSigner {
+    pub(crate) const fn new(inner: Arc<dyn AccountSigner>) -> Self {
+        Self { inner }
+    }
+}
+
+impl fmt::Debug for CheckedSigner {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CheckedSigner").finish_non_exhaustive()
+    }
+}
+
+impl AccountSigner for CheckedSigner {
+    fn account(&self) -> AccountId {
+        self.inner.account()
+    }
+
+    fn sign_event(&self, unsigned: UnsignedEvent) -> SignerFuture<'_, Result<Event, SignerError>> {
+        let inner = Arc::clone(&self.inner);
+        Box::pin(async move {
+            let id = unsigned.id();
+            let signed = inner.sign_event(unsigned.clone()).await?;
+            if signed.pubkey == inner.account()
+                && signed.pubkey == unsigned.pubkey
+                && signed.created_at == unsigned.created_at
+                && signed.kind == unsigned.kind
+                && signed.tags == unsigned.tags
+                && signed.content == unsigned.content
+                && signed.id == id
+                && signed.verify().is_ok()
+            {
+                Ok(signed)
+            } else {
+                Err(SignerError::Failed(SIGNER_REPLY_MISMATCH.to_owned()))
+            }
+        })
+    }
+
+    fn nip44_encrypt<'a>(
+        &'a self,
+        peer: &'a AccountId,
+        plaintext: &'a str,
+    ) -> SignerFuture<'a, Result<String, SignerError>> {
+        self.inner.nip44_encrypt(peer, plaintext)
+    }
+
+    fn nip44_decrypt<'a>(
+        &'a self,
+        peer: &'a AccountId,
+        ciphertext: &'a str,
+    ) -> SignerFuture<'a, Result<String, SignerError>> {
+        self.inner.nip44_decrypt(peer, ciphertext)
+    }
+}
 
 /// The first verdict an armed span observed: which way a `nip44_decrypt`
 /// call ended while the latch was armed.
@@ -403,5 +473,178 @@ impl AccountIdentityProofSigner for RefusingProofSigner {
             }
         }
         Err("proof signer must not be called".to_owned())
+    }
+}
+
+#[cfg(all(test, feature = "testing"))]
+#[allow(
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::tests_outside_test_module,
+    clippy::missing_assert_message,
+    reason = "test code"
+)]
+mod checked_signer_tests {
+    //! `CheckedSigner` reply validation: each tampered reply — every
+    //! mismatch a hostile or buggy signer could produce — fails
+    //! `SignerError::Failed`; the honest reply passes.
+
+    use super::*;
+
+    use crate::testing::LocalSigner;
+
+    /// Answers `sign_event` with a prepared reply regardless of the request.
+    struct FixedReplySigner {
+        account: AccountId,
+        reply: Event,
+    }
+
+    impl fmt::Debug for FixedReplySigner {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.debug_struct("FixedReplySigner").finish_non_exhaustive()
+        }
+    }
+
+    impl AccountSigner for FixedReplySigner {
+        fn account(&self) -> AccountId {
+            self.account
+        }
+
+        fn sign_event(
+            &self,
+            _unsigned: UnsignedEvent,
+        ) -> SignerFuture<'_, Result<Event, SignerError>> {
+            let reply = self.reply.clone();
+            Box::pin(async move { Ok(reply) })
+        }
+
+        fn nip44_encrypt<'a>(
+            &'a self,
+            _peer: &'a AccountId,
+            _plaintext: &'a str,
+        ) -> SignerFuture<'a, Result<String, SignerError>> {
+            Box::pin(async { Err(SignerError::Failed("unused".to_owned())) })
+        }
+
+        fn nip44_decrypt<'a>(
+            &'a self,
+            _peer: &'a AccountId,
+            _ciphertext: &'a str,
+        ) -> SignerFuture<'a, Result<String, SignerError>> {
+            Box::pin(async { Err(SignerError::Failed("unused".to_owned())) })
+        }
+    }
+
+    fn request(account: AccountId) -> UnsignedEvent {
+        UnsignedEvent {
+            pubkey: account,
+            created_at: 1_700_000_000,
+            kind: 445,
+            tags: vec![vec!["h".to_owned(), "cc".repeat(32)]],
+            content: "hi".to_owned(),
+        }
+    }
+
+    /// `request(account)` signed for real — the honest reply.
+    async fn honest_reply(signer: &LocalSigner, account: AccountId) -> Event {
+        signer
+            .sign_event(request(account))
+            .await
+            .expect("honest sign")
+    }
+
+    /// The checked `sign_event` outcome when the signer answers `reply`.
+    async fn outcome(reply: Event, account: AccountId) -> Result<Event, SignerError> {
+        let signer = CheckedSigner::new(Arc::new(FixedReplySigner { account, reply }));
+        signer.sign_event(request(account)).await
+    }
+
+    /// `reply` must be rejected as `Failed("signer reply mismatch")`.
+    async fn expect_mismatch(reply: Event, account: AccountId) {
+        match outcome(reply, account).await {
+            Err(SignerError::Failed(message)) => {
+                assert_eq!(message, SIGNER_REPLY_MISMATCH);
+            }
+            other => panic!("mismatched reply must fail: {other:?}"),
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn honest_reply_passes() {
+        let honest = LocalSigner::new();
+        let account = honest.account();
+        let reply = honest_reply(&honest, account).await;
+        let signed = outcome(reply, account).await.expect("checked");
+        assert_eq!(signed.content, "hi");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn swapped_content_fails() {
+        let honest = LocalSigner::new();
+        let account = honest.account();
+        let mut changed = request(account);
+        changed.content = "swapped".to_owned();
+        let reply = honest.sign_event(changed).await.expect("sign");
+        expect_mismatch(reply, account).await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn swapped_tags_fail() {
+        let honest = LocalSigner::new();
+        let account = honest.account();
+        let mut changed = request(account);
+        changed.tags = vec![vec!["h".to_owned(), "dd".repeat(32)]];
+        let reply = honest.sign_event(changed).await.expect("sign");
+        expect_mismatch(reply, account).await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn swapped_kind_fails() {
+        let honest = LocalSigner::new();
+        let account = honest.account();
+        let mut changed = request(account);
+        changed.kind = 446;
+        let reply = honest.sign_event(changed).await.expect("sign");
+        expect_mismatch(reply, account).await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn swapped_created_at_fails() {
+        let honest = LocalSigner::new();
+        let account = honest.account();
+        let mut changed = request(account);
+        changed.created_at = 1_700_000_001;
+        let reply = honest.sign_event(changed).await.expect("sign");
+        expect_mismatch(reply, account).await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn wrong_pubkey_fails() {
+        let honest = LocalSigner::new();
+        let stranger = LocalSigner::new();
+        let reply = stranger
+            .sign_event(request(stranger.account()))
+            .await
+            .expect("sign");
+        expect_mismatch(reply, honest.account()).await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn wrong_id_fails() {
+        let honest = LocalSigner::new();
+        let account = honest.account();
+        let mut reply = honest_reply(&honest, account).await;
+        reply.id = crate::types::EventId([9u8; 32]);
+        expect_mismatch(reply, account).await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn bad_signature_fails() {
+        let honest = LocalSigner::new();
+        let account = honest.account();
+        let mut reply = honest_reply(&honest, account).await;
+        reply.sig[0] ^= 0xff;
+        expect_mismatch(reply, account).await;
     }
 }

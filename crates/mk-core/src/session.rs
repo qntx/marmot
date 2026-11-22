@@ -105,8 +105,8 @@ use crate::pacing::PacingMap;
 use crate::provider::KvStorageProvider;
 use crate::semantics::{self, MessageIntent};
 use crate::signer::{
-    AccountSigner, DeferringProofSigner, FixedProofSigner, RefusingProofSigner, SignerAdapter,
-    SignerError, SignerLatch, SignerVerdict,
+    AccountSigner, CheckedSigner, DeferringProofSigner, FixedProofSigner, RefusingProofSigner,
+    SignerAdapter, SignerError, SignerLatch, SignerVerdict,
 };
 use crate::types::{AccountId, Event, EventId, GroupId, OutboundId, UnsignedEvent};
 use cgka_traits::storage::StorageError;
@@ -946,13 +946,16 @@ impl Session {
             return Err(OpenError::InvalidConfig("client name"));
         }
         let provider = KvStorageProvider::open(config.rows, config.host)?;
+        // One wrap covers every signing path: sign_checked, the MDK-driven
+        // SignerAdapter (seal/Welcome signing) and the bridge's QueueSigner.
+        let signer: Arc<dyn AccountSigner> = Arc::new(CheckedSigner::new(config.signer));
         let capture = Arc::new(DeferringProofSigner::new());
         let cloned = Arc::clone(&capture);
         let proof_signer: Arc<dyn AccountIdentityProofSigner> = cloned;
         let signer_latch = Arc::new(SignerLatch::new(provider.store().clone()));
         match build_engine(
             &provider,
-            &config.signer,
+            &signer,
             &config.clock,
             proof_signer,
             &signer_latch,
@@ -966,7 +969,7 @@ impl Session {
                     provider,
                     request,
                     unsigned,
-                    signer: config.signer,
+                    signer,
                     clock: config.clock,
                     destination_policy: config.destination_policy,
                     client_name: config.client_name,
@@ -975,7 +978,7 @@ impl Session {
             Ok(engine) => open_session(Self {
                 provider,
                 engine,
-                signer: config.signer,
+                signer,
                 clock: config.clock,
                 destination_policy: config.destination_policy,
                 client_name: config.client_name,
@@ -1650,18 +1653,15 @@ impl Session {
         Ok(OutboundId(signed.id.0))
     }
 
-    /// Sign `unsigned` through the account signer and sanity-check the
-    /// result (right account, right id commitment).
+    /// Sign `unsigned` through the account signer. Reply validation — right
+    /// account, untouched commitment fields, committed id, verifying
+    /// signature — lives in [`CheckedSigner`], installed once at
+    /// [`Session::open`].
     async fn sign_checked(&self, unsigned: UnsignedEvent) -> Result<Event, SessionError> {
-        let signed = self
-            .signer
+        self.signer
             .sign_event(unsigned)
             .await
-            .map_err(SessionError::Signer)?;
-        if signed.pubkey != self.account() || signed.id != signed.compute_id() {
-            return Err(SessionError::Signer(SignerError::Refused));
-        }
-        Ok(signed)
+            .map_err(SessionError::Signer)
     }
 
     fn stage_publication(
