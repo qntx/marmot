@@ -39,6 +39,7 @@ use tracing as _;
 const SESSION_RS: &[&str] = &[
     include_str!("../../mk-core/src/session.rs"),
     include_str!("../../mk-core/src/key_package_lifecycle.rs"),
+    include_str!("../../mk-core/src/self_update.rs"),
 ];
 
 /// How a session method is surfaced over the bridge protocol.
@@ -125,6 +126,7 @@ const TABLE: &[(&str, &str, Mapping)] = &[
     ("Session", "ingest_batch", Request("ingest")),
     ("Session", "tick", Request("tick")),
     ("Session", "history_fetched", Request("history_fetched")),
+    ("Session", "sign_out", Request("sign_out")),
     ("Session", "drain_events", Elsewhere("drain")),
     (
         "Session",
