@@ -141,6 +141,10 @@
     "reason": "unknown_group",
     "type": "queued_intent_refused"
   },
+  "self_updated": {
+    "group": "dead",
+    "type": "self_updated"
+  },
   "unmapped": {
     "type": "unmapped"
   }

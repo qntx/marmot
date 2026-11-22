@@ -1533,6 +1533,12 @@ pub enum SessionEvent {
     },
     /// The account `KeyPackage` slot rotated to a new publication.
     KeyPackageRotated,
+    /// This device's leaf completed a maintenance self-update rotation.
+    SelfUpdated {
+        /// The group, hex.
+        #[serde(with = "hex_bytes")]
+        group: Vec<u8>,
+    },
     /// An `mk-core` session event this wire version does not know.
     Unmapped,
 }
@@ -1676,6 +1682,7 @@ impl SessionEvent {
                 reason: reason.into(),
             },
             core::SessionEvent::KeyPackageRotated => Self::KeyPackageRotated,
+            core::SessionEvent::SelfUpdated { group } => Self::SelfUpdated { group: group.0 },
             // `SessionEvent` is `#[non_exhaustive]`.
             _ => Self::Unmapped,
         }

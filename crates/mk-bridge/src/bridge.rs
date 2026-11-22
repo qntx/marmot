@@ -19,13 +19,13 @@ use crate::protocol::{
     AcknowledgeMessagesRequest, AttachmentData, AwaitingDurabilityResult, CallEnvelope, Config,
     ConfigProbe, CreateGroupRequest, DisbandRequest, DiscardAttachmentRequest, DrainResponse,
     EnableDisbandingRequest, EnsureKeyPackageRequest, ForgetGroupRequest, GroupCreatedResult,
-    GroupResult, GroupsResult, InboxRelaysResult, IngestRequest, IngestedResult, InviteRequest,
-    KeyPackagesResult, LeaveRequest, MAX_REQUEST_BYTES, MediaAttachmentRef, MessageSentResult,
-    OpResult, OpenAttachmentRequest, OpenResponse, OutboundResult, PROTOCOL_VERSION,
-    PublishInboxRelaysRequest, PublishResolutionResult, REQUEST_TYPES, ReadyResult,
-    RemoveMembersRequest, ReportPublishRequest, Request, Response, SealAttachmentRequest,
-    SealedAttachmentResult, SelectKeyPackagesRequest, SelfUpdateRequest, SendIntentRequest,
-    SendMediaRequest, SendMessageRequest, SendOutcomeResult, SetAdminRequest,
+    GroupResult, GroupsResult, HistoryFetchedRequest, InboxRelaysResult, IngestRequest,
+    IngestedResult, InviteRequest, KeyPackagesResult, LeaveRequest, MAX_REQUEST_BYTES,
+    MediaAttachmentRef, MessageSentResult, OpResult, OpenAttachmentRequest, OpenResponse,
+    OutboundResult, PROTOCOL_VERSION, PublishInboxRelaysRequest, PublishResolutionResult,
+    REQUEST_TYPES, ReadyResult, RemoveMembersRequest, ReportPublishRequest, Request, Response,
+    SealAttachmentRequest, SealedAttachmentResult, SelectKeyPackagesRequest, SelfUpdateRequest,
+    SendIntentRequest, SendMediaRequest, SendMessageRequest, SendOutcomeResult, SetAdminRequest,
     SetGroupAvatarRequest, SetRetentionRequest, SignOutRequest, SignerReply, SignerRequest,
     SignerResult, TickedResult, UpdateAppComponentsRequest, UpdateGroupProfileRequest, decode,
     encode, invalid, reason_label,
@@ -356,6 +356,7 @@ impl<H: Host> Bridge<H> {
             Request::RemoveMembers(args) => self.run(op_remove_members(args), Vec::new()),
             Request::Leave(args) => self.run(op_leave(args), Vec::new()),
             Request::SelfUpdate(args) => self.run(op_self_update(args), Vec::new()),
+            Request::HistoryFetched(args) => self.history_fetched(args),
             Request::UpdateGroupProfile(args) => {
                 self.run(op_update_group_profile(args), Vec::new())
             }
@@ -560,6 +561,15 @@ impl<H: Host> Bridge<H> {
             Ok(OpResult::KeyPackageStatus(
                 session.key_package_status()?.into(),
             ))
+        })
+    }
+
+    /// `history_fetched`: close the owed post-join fetch obligation.
+    fn history_fetched(&mut self, args: HistoryFetchedRequest) -> Response {
+        let group = core::GroupId(args.group);
+        self.sync_op(|session| {
+            session.history_fetched(&group)?;
+            Ok(OpResult::Done)
         })
     }
 

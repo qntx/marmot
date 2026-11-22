@@ -124,6 +124,7 @@ const TABLE: &[(&str, &str, Mapping)] = &[
     ("Session", "ingest", Request("ingest")),
     ("Session", "ingest_batch", Request("ingest")),
     ("Session", "tick", Request("tick")),
+    ("Session", "history_fetched", Request("history_fetched")),
     ("Session", "drain_events", Elsewhere("drain")),
     (
         "Session",

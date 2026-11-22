@@ -424,6 +424,14 @@ async fn every_request_variant() {
         }))
         .await
     );
+    // `history_fetched` after `leave` reports the group no longer live.
+    mark!(
+        "history_fetched",
+        &b.call(Request::HistoryFetched(HistoryFetchedRequest {
+            group: group.clone()
+        }))
+        .await,
+    );
     // `sign_out` after `leave` reports the group already left.
     mark!(
         "sign_out",

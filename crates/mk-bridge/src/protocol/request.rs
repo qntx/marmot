@@ -135,6 +135,16 @@ pub struct SelfUpdateRequest {
     pub group: Vec<u8>,
 }
 
+/// Report the group's post-join history fetch completed (EOSE reached on
+/// every subscribed relay).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HistoryFetchedRequest {
+    /// The group, hex.
+    #[serde(with = "hex_bytes")]
+    pub group: Vec<u8>,
+}
+
 /// Update the group profile.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -379,6 +389,8 @@ pub enum Request {
     Leave(LeaveRequest),
     /// Refresh own membership.
     SelfUpdate(SelfUpdateRequest),
+    /// Report the group's post-join history fetch completed.
+    HistoryFetched(HistoryFetchedRequest),
     /// Update the group profile.
     UpdateGroupProfile(UpdateGroupProfileRequest),
     /// Apply app-component updates.

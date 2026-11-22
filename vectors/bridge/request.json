@@ -79,6 +79,10 @@
   "groups": {
     "type": "groups"
   },
+  "history_fetched": {
+    "group": "dead",
+    "type": "history_fetched"
+  },
   "ingest": {
     "events": [
       {
