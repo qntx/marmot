@@ -35,7 +35,7 @@ use cgka_traits::engine_state::EpochState;
 use cgka_traits::error::EngineError;
 use cgka_traits::maintenance::{
     DurableGroupEvolution, GroupEvolutionPhase, GroupEvolutionSemantic, MaintenanceObligation,
-    MaintenancePhase, MaintenanceTrigger, PostJoinHistoryFetch, PostJoinHistoryFetchCompletion,
+    MaintenancePhase, MaintenanceTrigger, PostJoinHistoryFetchCompletion,
     PostJoinHistoryFetchOutcome,
 };
 use cgka_traits::storage::{MaintenanceStorage, StorageError};
@@ -94,7 +94,7 @@ impl Session {
     /// Record that this device's post-join history fetch reached
     /// end-of-stored-events and everything it delivered was processed.
     ///
-    /// When the group's owed [`PostJoinHistoryFetch`] is still open this
+    /// When the group's owed [`PostJoinHistoryFetch`](cgka_traits::maintenance::PostJoinHistoryFetch) is still open this
     /// records a `Fetched` completion and moves the post-join obligation
     /// from `CatchUp` to `Quiet` — both writes in one storage unit. Every
     /// other call is an idempotent no-op (a group with a completed fetch,
