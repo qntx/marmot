@@ -259,13 +259,20 @@ export type _SemanticsComplete = Complete<
 >;
 
 /** Why a received application event was dropped instead of delivered. */
-export type DropReason = "expired" | "unauthorized" | "unverifiable" | "malformed" | "unmapped";
+export type DropReason =
+  | "expired"
+  | "unauthorized"
+  | "unverifiable"
+  | "malformed"
+  | "reserved"
+  | "unmapped";
 
 export const DROP_REASONS = [
   "expired",
   "unauthorized",
   "unverifiable",
   "malformed",
+  "reserved",
   "unmapped",
 ] as const;
 

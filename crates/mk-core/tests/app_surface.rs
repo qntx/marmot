@@ -1903,4 +1903,47 @@ mod app_surface_tests {
             plaintext
         );
     }
+
+    /// Kinds 452–477 are the device-group draft's pairing range: in a
+    /// chat they drop `reserved`, never deliver, and release their
+    /// pending row like every other drop.
+    #[tokio::test(flavor = "current_thread")]
+    async fn reserved_device_kinds_drop() {
+        let relay = FakeRelay::new();
+        let mut a = open_member().await;
+        let mut b = open_member().await;
+        publish_identity(&mut a, &relay, RELAY).await;
+        publish_identity(&mut b, &relay, RELAY).await;
+        let gid = group_with(&mut a, &relay, &[&b], "reserved").await;
+        join_via_welcome(&mut b, &relay).await;
+        sync_member(&mut a, &relay, RELAY, &gid).await;
+        sync_member(&mut b, &relay, RELAY, &gid).await;
+        let route_a = a.route_hex(&gid);
+
+        b.clock.advance(1_000);
+        let sent = b
+            .session
+            .send_raw_app_event(&gid, 460, Vec::new(), "pairing".to_owned())
+            .await
+            .expect("raw app event");
+        flush(&mut b, &relay).await;
+        let transport_id = transport_id_for(&relay, &route_a, sent.message.created_at);
+        let events = collect(&mut a, &relay, &route_a).await;
+        assert!(
+            dropped_reasons(&events).contains(&DropReason::Reserved),
+            "kind 460 drops reserved: {:?}",
+            dropped_reasons(&events)
+        );
+        assert!(
+            !events.iter().any(|event| matches!(
+                event,
+                SessionEvent::MessageReceived { message, .. } if message.kind == 460
+            )),
+            "a reserved kind is never delivered"
+        );
+        assert!(
+            !pending_row_exists(&a, &transport_id),
+            "the drop released the pending row"
+        );
+    }
 }

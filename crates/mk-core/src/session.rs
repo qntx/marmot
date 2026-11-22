@@ -2451,7 +2451,7 @@ impl Session {
     /// validation, before the event is built — and a sent message records
     /// its own delivered-index row so a sibling device can authorize a
     /// modifier against it.
-    async fn send_app_event(
+    pub(crate) async fn send_app_event(
         &mut self,
         group: &GroupId,
         kind: u64,

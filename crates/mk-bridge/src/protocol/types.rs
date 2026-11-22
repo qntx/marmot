@@ -686,6 +686,8 @@ pub enum DropReason {
     Unverifiable,
     /// The event's tags or payload failed validation.
     Malformed,
+    /// A device-group pairing kind (452–477) arrived in a chat.
+    Reserved,
     /// An `mk-core` drop reason this wire version does not know.
     Unmapped,
 }
@@ -697,6 +699,7 @@ impl From<core::DropReason> for DropReason {
             core::DropReason::Unauthorized => Self::Unauthorized,
             core::DropReason::Unverifiable => Self::Unverifiable,
             core::DropReason::Malformed => Self::Malformed,
+            core::DropReason::Reserved => Self::Reserved,
             // `DropReason` is `#[non_exhaustive]`.
             _ => Self::Unmapped,
         }

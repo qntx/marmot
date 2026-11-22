@@ -489,6 +489,23 @@ pub enum FuzzModifier {
     },
 }
 
+impl crate::Session {
+    /// Send a raw inner app event of any kind — the only way a reserved
+    /// device-pairing kind (452–477) can reach the wire in tests.
+    ///
+    /// # Errors
+    /// [`crate::SessionError`] exactly as `send_intent` reports it.
+    pub async fn send_raw_app_event(
+        &mut self,
+        group: &crate::GroupId,
+        kind: u64,
+        tags: Vec<Vec<String>>,
+        content: String,
+    ) -> Result<crate::SentMessage, crate::SessionError> {
+        self.send_app_event(group, kind, tags, content, None).await
+    }
+}
+
 /// `semantics::classify` for fuzzers; opaque shapes only.
 #[must_use]
 pub fn classify(
