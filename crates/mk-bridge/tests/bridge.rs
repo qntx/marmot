@@ -2559,3 +2559,98 @@ async fn sign_out_withdraws_the_slot() {
     };
     assert!(items.is_empty(), "nothing new is staged: {items:?}");
 }
+
+/// D2 stall over the wire: three deferred group events suspect once,
+/// `history_fetched` flags the copy stalled and the snapshot reports
+/// `access: "stalled"`.
+#[tokio::test(flavor = "current_thread")]
+async fn group_stall_over_the_wire() {
+    let mut relay = FakeRelay::new();
+    let mut a = Member::new();
+    let mut b = Member::new();
+    a.open().await;
+    b.open().await;
+    a.publish_identity(&mut relay).await;
+    b.publish_identity(&mut relay).await;
+
+    let response = b
+        .call(Request::CreateGroup(CreateGroupRequest {
+            name: "stall".to_owned(),
+            description: String::new(),
+            relays: vec![RELAY.to_owned()],
+            invitees: vec![Invitee {
+                key_package: key_package_of(&relay, &a.account_hex()),
+                inbox_relays: vec![RELAY.to_owned()],
+            }],
+            admins: Vec::new(),
+            components: Vec::new(),
+        }))
+        .await;
+    let OpResult::GroupCreated(created) = ok_result(response) else {
+        panic!("create_group")
+    };
+    let group = created.group.id.clone();
+    b.publish(&mut relay).await;
+    a.call(Request::Ingest(IngestRequest {
+        events: welcomes_for(&relay, &a.account_hex()),
+    }))
+    .await;
+    a.sync(&mut relay, &group).await;
+    b.sync(&mut relay, &group).await;
+    assert_eq!(
+        group_snapshot(&mut a, &group).await["access"],
+        "active",
+        "a healthy copy is active"
+    );
+
+    // B self-updates (the commit is withheld from A) and sends three
+    // chats at the new epoch. The traffic must postdate the copy's
+    // post-Welcome skew window to count as stall evidence.
+    b.advance(400_000);
+    let route = b.route_hex(&group).await;
+    let seen: BTreeSet<[u8; 32]> = group_events(&relay, &route)
+        .into_iter()
+        .map(|event| event.id)
+        .collect();
+    b.call(Request::SelfUpdate(SelfUpdateRequest {
+        group: group.clone(),
+    }))
+    .await;
+    b.publish(&mut relay).await;
+    let c1 = group_events(&relay, &route)
+        .into_iter()
+        .find(|event| event.kind == 445 && !seen.contains(&event.id))
+        .expect("the self-update commit");
+    for i in 0..3 {
+        b.send_chat(&mut relay, &group, &format!("m{i}")).await;
+    }
+    let deferred: Vec<Event> = group_events(&relay, &route)
+        .into_iter()
+        .filter(|event| event.id != c1.id && !seen.contains(&event.id))
+        .collect();
+
+    let events = a.ingest_and_drain(deferred).await;
+    let suspected = events
+        .iter()
+        .filter(|event| matches!(event, SessionEvent::GroupStallSuspected { .. }))
+        .count();
+    assert_eq!(suspected, 1, "three deferred events suspect once");
+
+    // The completed refetch leaves the counter full at the same epoch:
+    // `group_stalled` fires and the snapshot reports it.
+    a.call(Request::HistoryFetched(HistoryFetchedRequest {
+        group: group.clone(),
+    }))
+    .await;
+    let events = a.drained_events();
+    let stalled = events
+        .iter()
+        .filter(|event| matches!(event, SessionEvent::GroupStalled { .. }))
+        .count();
+    assert_eq!(stalled, 1, "one stalled event");
+    assert_eq!(
+        group_snapshot(&mut a, &group).await["access"],
+        "stalled",
+        "the wire snapshot carries the flag"
+    );
+}

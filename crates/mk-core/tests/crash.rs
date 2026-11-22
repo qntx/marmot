@@ -1742,4 +1742,119 @@ mod crash {
             eprintln!("b8 table {table}: {outcome}");
         }
     }
+
+    /// C19: the stall detector's row is durable. A cut after the
+    /// threshold write — before the suspicion drains — re-asks for the
+    /// refetch once at reopen; a cut after `history_fetched` keeps the
+    /// `stalled` flag and re-asks nothing. Neither lifetime emits a
+    /// second `GroupStallSuspected`.
+    #[tokio::test(flavor = "current_thread")]
+    async fn restart_boundaries_stall() {
+        async fn behind() -> (FakeRelay, Member, Member, GroupId) {
+            let relay = FakeRelay::new();
+            let mut b = open_member().await;
+            let mut a = open_member().await;
+            publish_identity(&mut b, &relay, RELAY).await;
+            publish_identity(&mut a, &relay, RELAY).await;
+            let invitees = vec![Invitee {
+                key_package: key_package_of(&relay, RELAY, &a.account_hex()),
+                inbox_relays: inbox_relays_of(&relay, RELAY, &a.account_hex()),
+            }];
+            let gid = b
+                .session
+                .create_group(CreateGroup {
+                    name: "crash-stall".to_owned(),
+                    description: String::new(),
+                    relays: vec![RELAY.to_owned()],
+                    invitees,
+                    admins: Vec::new(),
+                    components: Vec::new(),
+                })
+                .await
+                .expect("create_group");
+            flush(&mut b, &relay).await;
+            join_via_welcome(&mut a, &relay, RELAY).await;
+            sync_member(&mut b, &relay, RELAY, &gid).await;
+            sync_member(&mut a, &relay, RELAY, &gid).await;
+
+            // Evidence counts only past `PRE_WELCOME_CLOCK_SKEW_SECS`
+            // after the copy's Welcome; stamp the withheld-epoch
+            // traffic outside that window.
+            b.clock.advance(400_000);
+
+            let route = b.route_hex(&gid);
+            let seen: BTreeSet<EventId> = group_events(&relay, RELAY, &route)
+                .into_iter()
+                .map(|event| event.id)
+                .collect();
+            b.session.self_update(&gid).await.expect("self_update");
+            flush(&mut b, &relay).await;
+            let c1 = group_events(&relay, RELAY, &route)
+                .into_iter()
+                .find(|event| event.kind == 445 && !seen.contains(&event.id))
+                .expect("the self-update commit");
+            for i in 0..3 {
+                send_chat(&mut b, &relay, &gid, &format!("m{i}")).await;
+            }
+            let deferred: Vec<mk_core::Event> = group_events(&relay, RELAY, &route)
+                .into_iter()
+                .filter(|event| event.id != c1.id && !seen.contains(&event.id))
+                .collect();
+            a.session
+                .ingest_batch(deferred)
+                .await
+                .expect("ingest deferred");
+            (relay, b, a, gid)
+        }
+
+        // Cut 1: the threshold write is durable but the suspicion never
+        // drained. Reopen re-asks for the refetch exactly once.
+        let (_relay, _b, a, gid) = Box::pin(behind()).await;
+        let mut a = reopen_member(&a).await;
+        let drained = a.session.drain_events().expect("drain after reopen");
+        let suspected = drained
+            .iter()
+            .filter(|event| matches!(event, SessionEvent::GroupStallSuspected { .. }))
+            .count();
+        assert_eq!(suspected, 1, "one re-issued suspicion, no more");
+        assert_eq!(
+            a.session
+                .group(&gid)
+                .expect("snapshot")
+                .expect("the group")
+                .access,
+            mk_core::GroupAccess::Active,
+            "suspicion alone does not flag the copy"
+        );
+        let drained = a.session.drain_events().expect("second drain");
+        assert!(
+            drained
+                .iter()
+                .all(|event| !matches!(event, SessionEvent::GroupStallSuspected { .. })),
+            "the re-issue fires once per open"
+        );
+
+        // Cut 2: `history_fetched` flags the row stalled; the event
+        // itself was never drained. Reopen keeps the flag and re-asks
+        // nothing.
+        a.session.history_fetched(&gid).expect("history_fetched");
+        let mut a = reopen_member(&a).await;
+        let drained = a.session.drain_events().expect("drain after reopen");
+        assert!(
+            drained.iter().all(|event| !matches!(
+                event,
+                SessionEvent::GroupStallSuspected { .. } | SessionEvent::GroupStalled { .. }
+            )),
+            "a done refetch re-asks nothing"
+        );
+        assert_eq!(
+            a.session
+                .group(&gid)
+                .expect("snapshot")
+                .expect("the group")
+                .access,
+            mk_core::GroupAccess::Stalled,
+            "the stalled flag survives the restart"
+        );
+    }
 }

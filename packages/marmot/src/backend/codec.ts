@@ -1034,6 +1034,8 @@ export function decodeSessionEvent(value: unknown, path = "event"): SessionEvent
     case "local_copy_restored":
     case "hydration_quarantined":
     case "group_unrecoverable":
+    case "group_stall_suspected":
+    case "group_stalled":
     case "self_updated":
       return { type, group: group(path) };
     case "epoch_changed":
@@ -1131,6 +1133,8 @@ export function encodeSessionEvent(event: SessionEvent): Json {
     local_copy_restored: (event) => ({ type: event.type, group: event.group }),
     hydration_quarantined: (event) => ({ type: event.type, group: event.group }),
     group_unrecoverable: (event) => ({ type: event.type, group: event.group }),
+    group_stall_suspected: (event) => ({ type: event.type, group: event.group }),
+    group_stalled: (event) => ({ type: event.type, group: event.group }),
     self_updated: (event) => ({ type: event.type, group: event.group }),
     epoch_changed: (event) => ({
       type: "epoch_changed",

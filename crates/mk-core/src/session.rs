@@ -465,6 +465,7 @@ fn open_session(mut session: Session) -> Result<Session, &'static str> {
             .transact(|| session.provider.put_key_package_lifecycle(&seeded))
             .map_err(|_| "lifecycle write")?;
     }
+    session.reissue_stall_requests().map_err(|_| "stall rows")?;
     Ok(session)
 }
 
@@ -827,10 +828,12 @@ pub enum GroupState {
     Disbanded,
 }
 
-/// How this device's local copy of a group stands: the one host
-/// vocabulary for "this device can't read this group". Each variant has
-/// exactly one source of truth in [`Session::group`]; `Active` also marks
-/// a disbanded copy because `state` already reports that ending.
+/// How this device's local copy of a group stands.
+///
+/// The one host vocabulary for "this device can't read this group". Each
+/// variant has exactly one source of truth in [`Session::group`];
+/// `Active` also marks a disbanded copy because `state` already reports
+/// that ending.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum GroupAccess {
@@ -844,6 +847,71 @@ pub enum GroupAccess {
     Unrecoverable,
     /// The stall detector flagged the copy as behind.
     Stalled,
+}
+
+/// Which removal a `removed` record represents, read against the roster.
+#[derive(Clone, Copy)]
+enum RemovedScope {
+    /// The copy is live.
+    Live,
+    /// This device's leaf is gone; the account still holds one.
+    DeviceOnly,
+    /// No leaf of this account remains.
+    Account,
+}
+
+/// The access mapping's precedence: a removed copy splits by whether
+/// the account still holds a roster leaf, an engine-flagged
+/// unrecoverable copy outranks a stall flag, and everything else reads
+/// normally.
+const fn group_access(removed: RemovedScope, unrecoverable: bool, stalled: bool) -> GroupAccess {
+    match removed {
+        RemovedScope::DeviceOnly => GroupAccess::RemovedDevice,
+        RemovedScope::Account => GroupAccess::Removed,
+        RemovedScope::Live => {
+            if unrecoverable {
+                GroupAccess::Unrecoverable
+            } else if stalled {
+                GroupAccess::Stalled
+            } else {
+                GroupAccess::Active
+            }
+        }
+    }
+}
+
+/// The snapshot a disbanded copy can still answer: the durable record
+/// keeps name, epoch, and the former roster, but the engine deleted the
+/// live MLS state the member/component reads need.
+fn disbanded_snapshot(id: &GroupId, record: &cgka_traits::group::Group) -> GroupSnapshot {
+    GroupSnapshot {
+        id: id.clone(),
+        name: record.name.clone(),
+        description: record.description.clone(),
+        epoch: record.epoch.0,
+        state: GroupState::Disbanded,
+        access: GroupAccess::Active,
+        members: record
+            .members
+            .iter()
+            .filter_map(|member| {
+                let bytes: [u8; 32] = member.id.as_slice().try_into().ok()?;
+                Some(MemberSnapshot {
+                    account: AccountId(bytes),
+                    admin: false,
+                })
+            })
+            .collect(),
+        relays: Vec::new(),
+        nostr_group_id: [0; 32],
+        own_account_admin: false,
+        encrypted_media: None,
+        agent_text_stream: None,
+        avatar: None,
+        retention_seconds: 0,
+        disband_enabled: false,
+        disbanding: false,
+    }
 }
 
 /// One member in a [`GroupSnapshot`].
@@ -2202,7 +2270,8 @@ impl Session {
                 for id in &stale {
                     self.provider.delete_outbound_retry(id)?;
                 }
-                Ok(())
+                self.provider
+                    .del_row(crate::keys::Table::GroupStall, &[&group.0])
             })
             .map_err(SessionError::Storage)
     }
@@ -3019,12 +3088,28 @@ impl Session {
             let outcome = result.map_err(session_engine_error)?;
             return Ok(input_outcome(&outcome));
         }
+        let transport_group_id = match &message.envelope {
+            TransportEnvelope::GroupMessage { transport_group_id } => {
+                Some(transport_group_id.clone())
+            }
+            TransportEnvelope::Welcome { .. } => None,
+        };
         let outcome = self
             .engine
             .ingest(message)
             .await
             .map_err(session_engine_error)?;
-        Ok(input_outcome(&outcome))
+        let input = input_outcome(&outcome);
+        if let Some(transport_group_id) = transport_group_id
+            && event.kind == 445
+            && input
+                == (InputOutcome::Unavailable {
+                    category: crate::events::Availability::TransportDeferred,
+                })
+        {
+            self.stall_note_deferred(&transport_group_id, &event.id, event.created_at)?;
+        }
+        Ok(input)
     }
 
     /// Whether a live group owes convergence work beyond what the engine
@@ -3232,6 +3317,7 @@ impl Session {
             if let SessionEvent::EpochChanged { group, .. } = &item.event {
                 epoch_groups.push(group.clone());
             }
+            self.stall_clear_for_event(&item.event)?;
             self.process_mapped(item, now_ms, &mut out)
                 .map_err(SessionError::Storage)?;
         }
@@ -3348,6 +3434,37 @@ impl Session {
         Ok(out)
     }
 
+    /// `access` for [`Self::group`]: the roster read splits `removed`
+    /// into device- vs account-scoped, and the stall row flags `stalled`
+    /// only while it still names this copy's epoch and Welcome stamp.
+    fn access_of(
+        &self,
+        id: &GroupId,
+        record: &cgka_traits::group::Group,
+        members: &[cgka_traits::group::Member],
+        unrecoverable: bool,
+    ) -> Result<GroupAccess, SessionError> {
+        let removed = if !record.removed {
+            RemovedScope::Live
+        } else if members
+            .iter()
+            .any(|member| member.id.as_slice() == self.account().0)
+        {
+            RemovedScope::DeviceOnly
+        } else {
+            RemovedScope::Account
+        };
+        let stalled = self
+            .stall_row(id)
+            .map_err(SessionError::Storage)?
+            .is_some_and(|row| {
+                row.stalled
+                    && row.epoch == record.epoch.0
+                    && row.welcome == record.local_copy_welcome_created_at.map(|stamp| stamp.0)
+            });
+        Ok(group_access(removed, unrecoverable, stalled))
+    }
+
     /// Snapshot of one group. `Ok(None)` when the group is not live.
     ///
     /// # Errors
@@ -3364,34 +3481,7 @@ impl Session {
         // member/component reads below would fail — the tombstone answers
         // everything the snapshot can still say.
         if record.disbanded.is_some() {
-            return Ok(Some(GroupSnapshot {
-                id: id.clone(),
-                name: record.name,
-                description: record.description,
-                epoch: record.epoch.0,
-                state: GroupState::Disbanded,
-                access: GroupAccess::Active,
-                members: record
-                    .members
-                    .iter()
-                    .filter_map(|member| {
-                        let bytes: [u8; 32] = member.id.as_slice().try_into().ok()?;
-                        Some(MemberSnapshot {
-                            account: AccountId(bytes),
-                            admin: false,
-                        })
-                    })
-                    .collect(),
-                relays: Vec::new(),
-                nostr_group_id: [0; 32],
-                own_account_admin: false,
-                encrypted_media: None,
-                agent_text_stream: None,
-                avatar: None,
-                retention_seconds: 0,
-                disband_enabled: false,
-                disbanding: false,
-            }));
+            return Ok(Some(disbanded_snapshot(id, &record)));
         }
         let members = self.engine.members(&gid).map_err(session_engine_error)?;
         let admins = self.admin_set(&gid)?;
@@ -3411,24 +3501,14 @@ impl Session {
         } else {
             state
         };
-        let access = if record.removed {
-            // A removed copy keeps its roster: an account that still
-            // holds another leaf lost this device, not its membership.
-            if members
-                .iter()
-                .any(|member| member.id.as_slice() == self.account().0)
-            {
-                GroupAccess::RemovedDevice
-            } else {
-                GroupAccess::Removed
-            }
-        } else if record.unrecoverable
-            || matches!(state, GroupState::Unrecoverable)
-        {
-            GroupAccess::Unrecoverable
-        } else {
-            GroupAccess::Active
-        };
+        // A removed copy keeps its roster: an account that still holds
+        // another leaf lost this device, not its membership.
+        let access = self.access_of(
+            id,
+            &record,
+            &members,
+            record.unrecoverable || matches!(state, GroupState::Unrecoverable),
+        )?;
         let routing = self.routing_of(&gid).ok();
         let relays = routing
             .as_ref()
@@ -3906,5 +3986,36 @@ mod proof_tests {
             .pending
             .provide_account_proof(&signed)
             .expect("retry with the right proof succeeds");
+    }
+}
+
+#[cfg(test)]
+mod access_tests {
+    //! The `access` projection's precedence without a live engine: the
+    //! `unrecoverable` variant has no cheap real flow, so the pure
+    //! mapping is pinned here while `tests/stall.rs` proves the
+    //! removed-device/removed and stalled halves end to end.
+
+    use super::{GroupAccess, RemovedScope, group_access};
+
+    #[test]
+    fn precedence() {
+        use RemovedScope::{Account, DeviceOnly, Live};
+
+        assert_eq!(
+            group_access(DeviceOnly, false, false),
+            GroupAccess::RemovedDevice
+        );
+        assert_eq!(group_access(Account, false, false), GroupAccess::Removed);
+        assert_eq!(group_access(Live, true, false), GroupAccess::Unrecoverable);
+        assert_eq!(group_access(Live, false, true), GroupAccess::Stalled);
+        assert_eq!(group_access(Live, false, false), GroupAccess::Active);
+        // A removed copy outranks every other flag; `unrecoverable`
+        // outranks `stalled`.
+        assert_eq!(
+            group_access(DeviceOnly, true, true),
+            GroupAccess::RemovedDevice
+        );
+        assert_eq!(group_access(Live, true, true), GroupAccess::Unrecoverable);
     }
 }

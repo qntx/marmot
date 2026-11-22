@@ -52,6 +52,10 @@ openmls   = { workspace = true, features = ["js"] }
 getrandom = { workspace = true, features = ["wasm_js"] }
 
 [[test]]
+name              = "stall"
+required-features = ["testing"]
+
+[[test]]
 name              = "model"
 required-features = ["testing"]
 

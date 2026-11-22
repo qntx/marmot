@@ -604,6 +604,8 @@ export type SessionEvent =
   | { type: "hydration_recovered"; group: string; epoch: bigint }
   | { type: "pending_commit_recovered"; group: string; epoch: bigint }
   | { type: "group_unrecoverable"; group: string }
+  | { type: "group_stall_suspected"; group: string }
+  | { type: "group_stalled"; group: string }
   | { type: "publish_resolved"; outbound: string; resolution: PublishResolution }
   | { type: "app_event_dropped"; group: string; reason: DropReason }
   | { type: "key_package_rotated" }
@@ -628,6 +630,8 @@ export const SESSION_EVENT_TYPES = [
   "hydration_recovered",
   "pending_commit_recovered",
   "group_unrecoverable",
+  "group_stall_suspected",
+  "group_stalled",
   "publish_resolved",
   "app_event_dropped",
   "key_package_rotated",

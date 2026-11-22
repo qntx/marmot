@@ -1547,6 +1547,20 @@ pub enum SessionEvent {
         #[serde(with = "hex_bytes")]
         group: Vec<u8>,
     },
+    /// The stall detector suspects the group is behind; the host should
+    /// refetch it once.
+    GroupStallSuspected {
+        /// The group, hex.
+        #[serde(with = "hex_bytes")]
+        group: Vec<u8>,
+    },
+    /// The group's refetch left the deferred count full — the copy is
+    /// flagged stalled.
+    GroupStalled {
+        /// The group, hex.
+        #[serde(with = "hex_bytes")]
+        group: Vec<u8>,
+    },
     /// An outbound obligation reached a resolution checkpoint.
     PublishResolved {
         /// The outbound item, hex.
@@ -1702,6 +1716,10 @@ impl SessionEvent {
             core::SessionEvent::GroupUnrecoverable { group } => {
                 Self::GroupUnrecoverable { group: group.0 }
             }
+            core::SessionEvent::GroupStallSuspected { group } => {
+                Self::GroupStallSuspected { group: group.0 }
+            }
+            core::SessionEvent::GroupStalled { group } => Self::GroupStalled { group: group.0 },
             core::SessionEvent::PublishResolved {
                 outbound,
                 resolution,

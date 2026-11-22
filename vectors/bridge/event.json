@@ -32,6 +32,14 @@
     "group": "dead",
     "type": "group_joined"
   },
+  "group_stall_suspected": {
+    "group": "dead",
+    "type": "group_stall_suspected"
+  },
+  "group_stalled": {
+    "group": "dead",
+    "type": "group_stalled"
+  },
   "group_state_changed": {
     "actor": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
     "change": {
