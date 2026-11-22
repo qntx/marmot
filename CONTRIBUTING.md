@@ -119,12 +119,13 @@ cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo deny che
 
 ## White Noise interop (`crates/interop`)
 
-Six scenario tests (`tests/wn.rs`) drive the public `Session` API against a
-real White Noise `wn`/`wnd` pair built from the pinned MDK rev, over a real
-in-process NIP-01 WebSocket relay (`nostr-sdk`'s `LocalRelay` from the
-`erskingardner/rust-nostr` fork MDK itself pins). `wnd` is spawned and
-reaped by the test; a missing or wrong-version binary under `--ignored` is
-a hard failure, never a silent skip.
+Fifteen scenario tests (`tests/wn.rs`, S1–S6 and S14–S22) drive the
+public `Session` API against a real White Noise `wn`/`wnd` pair built
+from the pinned MDK rev, over a real in-process NIP-01 WebSocket relay
+(`nostr-sdk`'s `LocalRelay` from the `erskingardner/rust-nostr` fork MDK
+itself pins). `wnd` is spawned and reaped by the test; a missing or
+wrong-version binary under `--ignored` is a hard failure, never a
+silent skip.
 
 Build `wn`/`wnd` from the pinned MDK rev (`upstream.json` → `wn.rev`;
 `marmot-markdown` needs the pinned Odin above):
@@ -143,8 +144,8 @@ scenarios on every PR with the binaries cached per pin; the advisory
 `interop-nightly.yml` workflow repins to MDK master
 (`scripts/repin-mdk.ts`) and runs them there too.
 
-The TypeScript side of the same scenarios runs from `packages/marmot-wasm`
-(after `build:wasm`):
+The TypeScript side covers all twenty-two scenarios (S1–S22) from
+`packages/marmot-wasm` (after `build:wasm`):
 
 ```sh
 WN_BIN=<path>/wn WND_BIN=<path>/wnd \
@@ -174,7 +175,7 @@ Each run uses a fresh temporary `WN_HOME` (`WN_SECRET_STORE=file`,
 Blossom server binds loopback), removed when the `Wnd` guard drops; `wnd`
 logs land under `crates/interop/target/wn-logs/`. Per-scenario
 `SCENARIO-N PASS|REFUSED <evidence> <seconds>` lines print to stderr.
-Scenarios 1–6 drive the public `Session` API; scenario 7
+Scenarios 1–6 and 14–22 drive the public `Session` API; scenario 7
 (`tests/bridge.rs`) replays the wn-invites-us flow with every local
 action driven through `mk-bridge` request/response bytes — the same
 surface wasm and C hosts use.
