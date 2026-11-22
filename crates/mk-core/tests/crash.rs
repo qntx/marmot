@@ -84,6 +84,12 @@
 //!   durable but before the next `Tick` staged the replacement — the
 //!   reopened session re-reads the `last_consumed_key_package_ref`
 //!   marker and the resumed `Tick` stages the same-slot replacement.
+//! - 18 sign-out withdrawal: cuts inside the `sign_out` batch — the
+//!   kind-5 staging, the deletion of every `KeyPackage` bundle and the
+//!   `slot_withdrawn_at` write commit in one `transact`, so a reopen
+//!   either keeps the whole live slot or the fully withdrawn one; a cut
+//!   after the batch still owes the same signed kind-5 from the durable
+//!   outbound row.
 //!
 //! mdk#3524 (fixed by mdk#3531, v0.18.0): at the leaving-flow cuts where
 //! the step-down's staging is durable but its fanout is not, the reopened
@@ -173,6 +179,9 @@ mod crash {
         Remove(usize, usize),
         /// `leave()`.
         Leave(usize),
+        /// `sign_out(write_relays)` — one atomic withdrawal; `Flush`
+        /// publishes the kind-5.
+        SignOut(usize),
         /// `self_update()`.
         SelfUpdate(usize),
         /// `update_group_profile(name, description)`.
@@ -575,6 +584,7 @@ mod crash {
                 | Step::Invite(m, ..)
                 | Step::Remove(m, ..)
                 | Step::Leave(m)
+                | Step::SignOut(m)
                 | Step::SelfUpdate(m)
                 | Step::UpdateProfile(m, ..)
                 | Step::Send(m, ..)
@@ -697,6 +707,15 @@ mod crash {
                         .leave(&gid)
                         .await
                         .expect("leave");
+                    self.drain(m);
+                    self.probe(m);
+                }
+                Step::SignOut(m) => {
+                    self.world.members[m]
+                        .session
+                        .sign_out(&[RELAY.to_owned()])
+                        .await
+                        .expect("sign_out");
                     self.drain(m);
                     self.probe(m);
                 }
@@ -1220,6 +1239,22 @@ mod crash {
             Step::Tick(1),
         ];
         matrix(FLOW, 2, 0, "key-package-lifecycle").await;
+    }
+
+    /// Sign-out withdrawal: cuts inside the atomic `sign_out` batch
+    /// (C18) — a reopen either keeps the whole live slot or the fully
+    /// withdrawn one, and a cut after the batch still owes the same
+    /// signed kind-5. The `key_package` projection `(current, pending,
+    /// retained)` and the bundle count pin both sides.
+    #[tokio::test(flavor = "current_thread")]
+    async fn restart_boundaries_sign_out() {
+        const FLOW: &[Step] = &[
+            Step::KeyPackage(0),
+            Step::Flush(0),
+            Step::SignOut(0),
+            Step::Flush(0),
+        ];
+        matrix(FLOW, 1, 0, "sign-out").await;
     }
 
     /// Joiner-side cuts over the same flow — the multi-part apply of an
