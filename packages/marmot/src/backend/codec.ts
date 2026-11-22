@@ -1887,11 +1887,11 @@ export function decodeOpResult(value: unknown, path = "result"): OpResult {
     case "sign_out":
       return {
         type,
-        left: arr(field(o, "left", path), `${path}.left`, (item, p) => hex32(item, p)),
+        left: arr(field(o, "left", path), `${path}.left`, (item, p) => hexEncode(hex(item, p))),
         keptAdminLeaves: arr(
           field(o, "kept_admin_leaves", path),
           `${path}.kept_admin_leaves`,
-          (item, p) => hex32(item, p),
+          (item, p) => hexEncode(hex(item, p)),
         ),
       };
     case "inbox_relays":
