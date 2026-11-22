@@ -33,12 +33,18 @@ function fakeNative(script: BridgeScript): { native: MarmotNative; created: Crea
     dispose: () => undefined,
     create: (rows, commit) => {
       created.push({ rows, commit });
+      // Mirrors `HybridMarmotBridge::_opened`: at most one open may reach the ABI.
+      let opened = false;
       const bridge: MarmotBridge = {
         name: "MarmotBridge",
         equals: () => false,
         dispose: () => undefined,
         open: async (config) => {
           await Promise.resolve();
+          if (opened) {
+            throw new Error("marmot: open may run once per bridge");
+          }
+          opened = true;
           const out = script.open?.(config) ?? config;
           if (out instanceof Error) {
             throw out;
@@ -176,6 +182,13 @@ describe("bindMarmotNative", () => {
     const big = Uint8Array.of(9, 5, 6, 9);
     await handle.call(big.subarray(1, 3));
     expect(seen).toStrictEqual([5, 6]);
+  });
+
+  test("a second open rejects — the native side allows one open per bridge", async () => {
+    const { native } = fakeNative({});
+    const handle = bindMarmotNative(native).create(fakeHost(Uint8Array.of(0)).host);
+    expect([...(await handle.open(Uint8Array.of(1)))]).toStrictEqual([1]);
+    await expect(handle.open(Uint8Array.of(2))).resolves.toStrictEqual(POISONED);
   });
 
   test("a native rejection poisons the backend: every later call resolves poisoned", async () => {
