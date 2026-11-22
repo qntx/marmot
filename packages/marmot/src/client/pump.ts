@@ -32,6 +32,7 @@ import {
   safeRelayUrl,
   wireEventBytes,
 } from "../transport/index.ts";
+import { verifyInbound } from "../transport/verify.ts";
 import { MarmotError, toMarmotError } from "./errors.ts";
 import type { ClientState } from "./state.ts";
 import { encodeClientState } from "./state.ts";
@@ -530,6 +531,11 @@ export class Pump {
       event.content.length > MAX_INBOUND_EVENT_BYTES ||
       wireEventBytes(event) > MAX_INBOUND_EVENT_BYTES
     ) {
+      return;
+    }
+    // The port is not obliged to verify: a forged copy must never enter the dedupe buffer or
+    // credit a cursor key, or a same-id forgery could shadow the genuine event.
+    if (!verifyInbound(event)) {
       return;
     }
     let key: string;

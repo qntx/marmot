@@ -4,23 +4,13 @@
  * insecure-origin policy live there, not here.
  */
 
+import { verifyEvent } from "@qntx/nostr";
 import type { Event, Filter, Pool } from "@qntx/nostr";
 
 import type { NostrEvent } from "../backend/protocol.ts";
 import { utf8Encode } from "../backend/utf8.ts";
 import type { PublishStatus, RelayFilter, RelayPort, SubscriptionHandlers } from "./port.ts";
-
-function toWire(event: NostrEvent): Event {
-  return {
-    id: event.id,
-    pubkey: event.pubkey,
-    created_at: Number(event.createdAt),
-    kind: event.kind,
-    tags: event.tags,
-    content: event.content,
-    sig: event.sig,
-  };
-}
+import { markVerified, toWire } from "./verify.ts";
 
 function fromWire(event: Event): NostrEvent {
   return {
@@ -86,7 +76,14 @@ export function nostrRelayPort(pool: Pool): RelayPort {
       let closedByUs = false;
       const closer = pool.subscribe([relay], filters.map(toFilter), {
         onEvent: (event) => {
-          handlers.event(fromWire(event));
+          // The pool's verifier is host-configured and may be absent: verify the wire object
+          // here (a WeakSet hit when the pool already did) so the pump can trust the mark.
+          if (!verifyEvent(event)) {
+            return;
+          }
+          const converted = fromWire(event);
+          markVerified(converted);
+          handlers.event(converted);
         },
         onEose: () => {
           handlers.eose();

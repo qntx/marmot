@@ -7,6 +7,8 @@
 
 import { describe, expect, test } from "vite-plus/test";
 
+import { finalizeEvent, Keys } from "@qntx/nostr";
+
 import {
   decodeCallValue,
   encodeDrainResponse,
@@ -31,7 +33,7 @@ import type {
 } from "../src/backend/protocol.ts";
 import { utf8Decode, utf8Encode } from "../src/backend/utf8.ts";
 import { MarmotClient } from "../src/client/client.ts";
-import { INGEST_BATCH_MAX, RESUBSCRIBE_DELAY_MS } from "../src/client/pump.ts";
+import { INGEST_BATCH_MAX, MAX_PENDING_INBOUND, RESUBSCRIBE_DELAY_MS } from "../src/client/pump.ts";
 import { decodeClientState, encodeClientState } from "../src/client/state.ts";
 import { manualClock } from "../src/testing/clock.ts";
 import { memoryCursorStore } from "../src/testing/cursors.ts";
@@ -53,23 +55,44 @@ const GROUP = "cc".repeat(32);
 const ROUTE = "dd".repeat(32);
 const DONE: BridgeResponse = { type: "ok", result: { type: "done" } };
 
-function event(partial: Partial<NostrEvent> & { id: string }): NostrEvent {
+const KEYS = Keys.fromSecretKey(new Uint8Array(32).fill(7));
+
+/**
+ * A genuinely signed inbound event — the pump verifies id + signature before dedupe, so fixtures
+ * cannot fake them. Set `kind`/`createdAt`/`tags`/`content` here, before signing; the id, pubkey
+ * and sig come out of `finalizeEvent`.
+ */
+function event(partial: {
+  kind?: number;
+  createdAt?: bigint;
+  tags?: string[][];
+  content?: string;
+}): NostrEvent {
+  const wire = finalizeEvent(
+    {
+      kind: partial.kind ?? 445,
+      tags: partial.tags ?? [],
+      content: partial.content ?? "",
+      created_at: Number(partial.createdAt ?? 1000n),
+    },
+    KEYS,
+  );
   return {
-    pubkey: "bb".repeat(32),
-    createdAt: 1000n,
-    kind: 445,
-    tags: [],
-    content: "",
-    sig: "00".repeat(64),
-    ...partial,
+    id: wire.id,
+    pubkey: wire.pubkey,
+    createdAt: BigInt(wire.created_at),
+    kind: wire.kind,
+    tags: wire.tags.map((tag) => [...tag]),
+    content: wire.content,
+    sig: wire.sig,
   };
 }
 
-const groupEvent = (id: string, createdAt = 1000n): NostrEvent =>
-  event({ id, kind: 445, createdAt, tags: [["h", ROUTE]] });
+const groupEvent = (createdAt = 1000n, content = ""): NostrEvent =>
+  event({ kind: 445, createdAt, tags: [["h", ROUTE]], content });
 
-const wrapEvent = (id: string, createdAt = 1000n): NostrEvent =>
-  event({ id, kind: 1059, createdAt, tags: [["p", ACCOUNT]] });
+const wrapEvent = (createdAt = 1000n, content = ""): NostrEvent =>
+  event({ kind: 1059, createdAt, tags: [["p", ACCOUNT]], content });
 
 function snapshot(relays: string[] = [RELAY]): GroupSnapshot {
   return {
@@ -381,6 +404,14 @@ const mustSub = (subs: ScriptedSub[]): ScriptedSub => {
   return sub;
 };
 
+const mustSubOn = (subs: ScriptedSub[], relay: string): ScriptedSub => {
+  const sub = subs.find((candidate) => candidate.relay === relay);
+  if (sub === undefined) {
+    throw new Error("expected an open subscription on the relay");
+  }
+  return sub;
+};
+
 const inboxSubs = (network: ReturnType<typeof scriptedRelays>): ScriptedSub[] =>
   network.subs.filter((sub) => sub.filters.some((filter) => filter.kinds?.includes(1059) === true));
 
@@ -412,10 +443,10 @@ describe("malicious relay", () => {
     await settle(fixture.timer, 5000);
     const sub = mustSub(groupSubs(fixture.network));
 
-    // 100 000 distinct valid-looking kind-445 events while ingest never answers.
+    // Distinct valid kind-445 events past the pending cap while ingest never answers.
     // Their createdAts stay below the seeded cursor so the durable cursor never moves.
-    for (let i = 0; i < 100_000; i += 1) {
-      push(sub, groupEvent(i.toString(16).padStart(64, "0"), BigInt(i % 8000)));
+    for (let i = 0; i < MAX_PENDING_INBOUND + INGEST_BATCH_MAX; i += 1) {
+      push(sub, groupEvent(BigInt(i % 8000), i.toString()));
     }
     await macrotask();
     // The delivering subscription was closed by the pump, so later pushes land nowhere.
@@ -440,11 +471,11 @@ describe("malicious relay", () => {
     const fixture = await open(script, encodeClientState({ cursors: {}, inbox: [RELAY] }));
     await settle(fixture.timer, 5000);
     const sub = mustSub(groupSubs(fixture.network));
-    push(sub, groupEvent("77".repeat(32), 2000n));
+    const small = groupEvent(2000n);
+    push(sub, small);
     push(
       sub,
       event({
-        id: "78".repeat(32),
         kind: 445,
         createdAt: 3000n,
         tags: [["h", ROUTE]],
@@ -453,7 +484,7 @@ describe("malicious relay", () => {
     );
     await settle(fixture.timer, 25);
     // Only the small event ingested; the oversized one was dropped before buffering.
-    expect(ingested(script).map((e) => e.id)).toStrictEqual(["77".repeat(32)]);
+    expect(ingested(script).map((e) => e.id)).toStrictEqual([small.id]);
     expect(sub.open).toBe(true);
     await fixture.client.close();
   });
@@ -468,8 +499,8 @@ describe("malicious relay", () => {
     expect(sub.filters[0]?.since).toBe(Math.max(0, 500 - GROUP_OVERLAP_SECS));
 
     // Stored events replay newest-first; the relay dies before EOSE.
-    for (const [i, at] of [2000n, 1999n, 1998n, 1997n].entries()) {
-      push(sub, groupEvent((i + 1).toString(16).padStart(64, "0"), at));
+    for (const at of [2000n, 1999n, 1998n, 1997n]) {
+      push(sub, groupEvent(at));
     }
     await settle(fixture.timer, 25);
     expect(ingested(script)).toHaveLength(4);
@@ -495,8 +526,8 @@ describe("malicious relay", () => {
     const sub = mustSub(inboxSubs(fixture.network));
     expect(sub.filters[0]?.since).toBe(200_000 - GIFT_WRAP_OVERLAP_SECS);
 
-    for (const [i, at] of [300_000n, 290_000n, 280_000n].entries()) {
-      push(sub, wrapEvent((i + 1).toString(16).padStart(64, "0"), at));
+    for (const at of [300_000n, 290_000n, 280_000n]) {
+      push(sub, wrapEvent(at));
     }
     await settle(fixture.timer, 25);
     expect(ingested(script)).toHaveLength(3);
@@ -521,8 +552,8 @@ describe("malicious relay", () => {
 
     // Backlog events ingest but the durable ack is held: no cursor move yet.
     fixture.kv.hold();
-    for (const [i, at] of [2000n, 1999n, 1998n].entries()) {
-      push(sub, groupEvent((i + 1).toString(16).padStart(64, "0"), at));
+    for (const at of [2000n, 1999n, 1998n]) {
+      push(sub, groupEvent(at));
     }
     await settle(fixture.timer, 25);
     expect(ingested(script)).toHaveLength(3);
@@ -559,7 +590,7 @@ describe("malicious relay", () => {
     };
     const total = 3 * INGEST_BATCH_MAX;
     for (let i = 0; i < total; i += 1) {
-      push(sub, groupEvent(i.toString(16).padStart(64, "0"), BigInt(total - i)));
+      push(sub, groupEvent(BigInt(total - i)));
     }
     await settle(fixture.timer, 0);
     // EOSE lands while every pre-EOSE batch is still parked in the queue.
@@ -601,7 +632,7 @@ describe("malicious relay", () => {
       });
     };
     for (let i = 0; i < 2 * INGEST_BATCH_MAX; i += 1) {
-      push(sub, groupEvent(i.toString(16).padStart(64, "0"), BigInt(1000 + i)));
+      push(sub, groupEvent(BigInt(1000 + i)));
     }
     await settle(fixture.timer, 0);
     pushEose(sub);
@@ -640,7 +671,7 @@ describe("malicious relay", () => {
     await settle(fixture.timer, 5000);
     const sub = mustSub(groupSubs(fixture.network));
 
-    push(sub, groupEvent("01".repeat(32), 2000n));
+    push(sub, groupEvent(2000n));
     pushEose(sub);
     pushEose(sub);
     await settle(fixture.timer, 25);
@@ -658,7 +689,7 @@ describe("malicious relay", () => {
     const sub = mustSub(groupSubs(fixture.network));
 
     pushEose(sub);
-    push(sub, groupEvent("01".repeat(32), 3000n));
+    push(sub, groupEvent(3000n));
     await settle(fixture.timer, 25);
     expect(decodeClientState(fixture.cursors.bytes()).cursors[key]).toBe(3000);
     await fixture.client.close();
@@ -679,7 +710,7 @@ describe("malicious relay", () => {
     });
     script.ingestGate = async () => hold;
     for (let i = 0; i < 10 * INGEST_BATCH_MAX; i += 1) {
-      push(sub, groupEvent(i.toString(16).padStart(64, "0"), BigInt(i % 4000)));
+      push(sub, groupEvent(BigInt(i % 4000)));
     }
     await macrotask();
     expect(sub.open).toBe(false);
@@ -701,7 +732,7 @@ describe("malicious relay", () => {
     const sub = mustSub(groupSubs(fixture.network));
 
     pushEose(sub);
-    push(sub, groupEvent("01".repeat(32), 4000n));
+    push(sub, groupEvent(4000n));
     await settle(fixture.timer, 25);
     expect(decodeClientState(fixture.cursors.bytes()).cursors[key]).toBe(5000);
     await fixture.client.close();
@@ -721,12 +752,12 @@ describe("malicious relay", () => {
     expect(subs).toHaveLength(2);
 
     // The same id arrives pre-EOSE through both relays: one ingest, both keys credited.
-    const shared = groupEvent("02".repeat(32), 3000n);
+    const shared = groupEvent(3000n);
     for (const sub of subs) {
       push(sub, shared);
     }
     await settle(fixture.timer, 25);
-    expect(ingested(script).map((e) => e.id)).toStrictEqual(["02".repeat(32)]);
+    expect(ingested(script).map((e) => e.id)).toStrictEqual([shared.id]);
     for (const sub of subs) {
       pushEose(sub);
     }
@@ -745,11 +776,8 @@ describe("malicious relay", () => {
     await settle(fixture.timer, 5000);
     const sub = mustSub(groupSubs(fixture.network));
 
-    push(
-      sub,
-      event({ id: "03".repeat(32), kind: 445, createdAt: 3000n, tags: [["h", "z".repeat(64)]] }),
-    );
-    push(sub, event({ id: "04".repeat(32), kind: 1059, createdAt: 3000n, tags: [["h", ROUTE]] }));
+    push(sub, event({ kind: 445, createdAt: 3000n, tags: [["h", "z".repeat(64)]] }));
+    push(sub, event({ kind: 1059, createdAt: 3000n, tags: [["h", ROUTE]] }));
     await settle(fixture.timer, 25);
     expect(ingested(script)).toHaveLength(0);
     expect(decodeClientState(fixture.cursors.bytes()).cursors[key]).toBe(500);
@@ -765,7 +793,7 @@ describe("malicious relay", () => {
     const sub = mustSub(groupSubs(fixture.network));
 
     pushEose(sub);
-    push(sub, groupEvent("05".repeat(32), 1_800_000_000n));
+    push(sub, groupEvent(1_800_000_000n));
     await settle(fixture.timer, 25);
     expect(decodeClientState(fixture.cursors.bytes()).cursors[key]).toBe(1_700_000_000);
     await fixture.client.close();
@@ -774,10 +802,12 @@ describe("malicious relay", () => {
   test("an unavailable outcome in the backlog caps the key at earliest createdAt − 1", async () => {
     const script = freshScript();
     script.groups = [snapshot()];
+    const accepted = groupEvent(6000n);
+    const deferred = groupEvent(2000n);
     script.reports = [
-      { event: "06".repeat(32), outcome: { type: "accepted" } },
+      { event: accepted.id, outcome: { type: "accepted" } },
       {
-        event: "07".repeat(32),
+        event: deferred.id,
         outcome: { type: "unavailable", category: "transport_deferred" },
       },
     ];
@@ -786,8 +816,8 @@ describe("malicious relay", () => {
     await settle(fixture.timer, 5000);
     const sub = mustSub(groupSubs(fixture.network));
 
-    push(sub, groupEvent("06".repeat(32), 6000n));
-    push(sub, groupEvent("07".repeat(32), 2000n));
+    push(sub, accepted);
+    push(sub, deferred);
     await settle(fixture.timer, 25);
     // The backlog folds only at EOSE.
     expect(decodeClientState(fixture.cursors.bytes()).cursors[key]).toBe(5000);
@@ -801,14 +831,14 @@ describe("malicious relay", () => {
   test("a SignerInvalidPayloadError wrap is rejected permanently — invalid_payload reply, no pending invite, cursor folds past it", async () => {
     const script = freshScript();
     script.groups = [snapshot()];
-    const wrapId = "08".repeat(32);
+    const wrap = wrapEvent(300_000n);
     // The backend suspends the wrap ingest on a nip44_decrypt…
     script.signerRequests = [
       { id: 0, op: { type: "nip44_decrypt", peer: ACCOUNT, ciphertext: "garbage" } },
     ];
     // …and reports it permanently rejected once the signer answer lands.
     script.reports = [
-      { event: wrapId, outcome: { type: "rejected", category: "invalid_encoding" } },
+      { event: wrap.id, outcome: { type: "rejected", category: "invalid_encoding" } },
     ];
     const key = inboxCursorKey(RELAY);
     const fixture = await open(
@@ -823,7 +853,7 @@ describe("malicious relay", () => {
     await settle(fixture.timer, 5000);
     const sub = mustSub(inboxSubs(fixture.network));
 
-    push(sub, wrapEvent(wrapId, 300_000n));
+    push(sub, wrap);
     pushEose(sub);
     await settle(fixture.timer, 25);
 
@@ -838,6 +868,73 @@ describe("malicious relay", () => {
     // A permanent rejection folds into the cursor normally (an unavailable
     // outcome would cap it at createdAt − 1 instead).
     expect(decodeClientState(fixture.cursors.bytes()).cursors[key]).toBe(300_000);
+    await fixture.client.close();
+  });
+
+  test("a forged same-id copy cannot shadow the genuine event or credit its relay", async () => {
+    const script = freshScript();
+    script.groups = [snapshot([RELAY, RELAY2])];
+    const honestKey = groupCursorKey(ROUTE, RELAY);
+    const hostileKey = groupCursorKey(ROUTE, RELAY2);
+    const fixture = await open(
+      script,
+      encodeClientState({ cursors: { [honestKey]: 400, [hostileKey]: 400 }, inbox: [] }),
+    );
+    await settle(fixture.timer, 5000);
+    const subs = groupSubs(fixture.network);
+    const subHonest = mustSubOn(subs, RELAY);
+    const subHostile = mustSubOn(subs, RELAY2);
+
+    const genuine = groupEvent(500n, "genuine");
+    // A same-id copy: the committed fields carry the genuine id, but the tampered sig and
+    // createdAt no longer verify.
+    const forged: NostrEvent = {
+      ...genuine,
+      createdAt: 1_700_000_000n,
+      sig: "ff".repeat(64),
+    };
+
+    // The hostile relay delivers the forgery first; the genuine copy follows inside the same
+    // flush window — the order a first-object-wins dedupe would prefer for the attack.
+    push(subHostile, forged);
+    push(subHonest, genuine);
+    for (const sub of subs) {
+      pushEose(sub);
+    }
+    await settle(fixture.timer, 25);
+
+    // The forgery never entered the buffer: the genuine event is what ingested.
+    expect(ingested(script).map((e) => e.id)).toStrictEqual([genuine.id]);
+    expect(ingested(script)[0]?.sig).toBe(genuine.sig);
+    expect(ingested(script)[0]?.createdAt).toBe(500n);
+    const { cursors } = decodeClientState(fixture.cursors.bytes());
+    // The honest relay is credited the genuine createdAt; the hostile relay's forgery
+    // credited nothing.
+    expect(cursors[honestKey]).toBe(500);
+    expect(cursors[hostileKey]).toBe(400);
+    await fixture.client.close();
+  });
+
+  test("an event whose id or signature does not verify is dropped before dedupe", async () => {
+    const script = freshScript();
+    script.groups = [snapshot()];
+    const key = groupCursorKey(ROUTE, RELAY);
+    const fixture = await open(script, encodeClientState({ cursors: { [key]: 500 }, inbox: [] }));
+    await settle(fixture.timer, 5000);
+    const sub = mustSub(groupSubs(fixture.network));
+
+    // A bad id commitment and a bad signature, pushed inside one flush window.
+    const badId: NostrEvent = { ...groupEvent(3000n), id: "ab".repeat(32) };
+    const badSig: NostrEvent = { ...groupEvent(4000n), sig: "00".repeat(64) };
+    push(sub, badId);
+    push(sub, badSig);
+    pushEose(sub);
+    await settle(fixture.timer, 25);
+
+    // Neither entered the buffer: no ingest, no cursor credit, the sub stays open.
+    expect(ingested(script)).toHaveLength(0);
+    expect(decodeClientState(fixture.cursors.bytes()).cursors[key]).toBe(500);
+    expect(sub.open).toBe(true);
     await fixture.client.close();
   });
 });

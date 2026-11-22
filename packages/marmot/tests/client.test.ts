@@ -1,5 +1,7 @@
 import { describe, expect, test } from "vite-plus/test";
 
+import { finalizeEvent, Keys } from "@qntx/nostr";
+
 import {
   decodeCallValue,
   encodeDrainResponse,
@@ -46,19 +48,41 @@ const GROUP = "cc".repeat(32);
 const ROUTE = "dd".repeat(32);
 const DONE: BridgeResponse = { type: "ok", result: { type: "done" } };
 
-function event(partial: Partial<NostrEvent> & { id: string }): NostrEvent {
+const KEYS = Keys.fromSecretKey(new Uint8Array(32).fill(5));
+
+/**
+ * A genuinely signed wire event — the pump verifies id + signature before dedupe, so fixtures
+ * cannot fake them. Set `kind`/`createdAt`/`tags`/`content` here, before signing; the id, pubkey
+ * and sig come out of `finalizeEvent`.
+ */
+function event(partial: {
+  kind?: number;
+  createdAt?: bigint;
+  tags?: string[][];
+  content?: string;
+}): NostrEvent {
+  const wire = finalizeEvent(
+    {
+      kind: partial.kind ?? 445,
+      tags: partial.tags ?? [],
+      content: partial.content ?? "",
+      created_at: Number(partial.createdAt ?? 1000n),
+    },
+    KEYS,
+  );
   return {
-    pubkey: "bb".repeat(32),
-    createdAt: 1000n,
-    kind: 445,
-    tags: [],
-    content: "",
-    sig: "00".repeat(64),
-    ...partial,
+    id: wire.id,
+    pubkey: wire.pubkey,
+    createdAt: BigInt(wire.created_at),
+    kind: wire.kind,
+    tags: wire.tags.map((tag) => [...tag]),
+    content: wire.content,
+    sig: wire.sig,
   };
 }
 
-const wrap = (id: string): NostrEvent => event({ id, kind: 1059, tags: [["p", ACCOUNT]] });
+const wrap = (createdAt = 1000n): NostrEvent =>
+  event({ kind: 1059, createdAt, tags: [["p", ACCOUNT]] });
 
 const msg = (id: string) => ({
   id,
@@ -75,8 +99,8 @@ const msg = (id: string) => ({
   expiresAt: undefined,
 });
 
-const groupEvent = (id: string, createdAt = 1000n): NostrEvent =>
-  event({ id, kind: 445, createdAt, tags: [["h", ROUTE]] });
+const groupEvent = (createdAt = 1000n, content = ""): NostrEvent =>
+  event({ kind: 445, createdAt, tags: [["h", ROUTE]], content });
 
 function snapshot(): GroupSnapshot {
   return {
@@ -442,7 +466,7 @@ describe("MarmotClient", () => {
       groupChanges.push(e.type);
     });
     // A wrap addressed to the account arrives over the inbox subscription.
-    await fixture.network.port("peer").publish(RELAY, wrap("aa".repeat(32)));
+    await fixture.network.port("peer").publish(RELAY, wrap());
     await settle(fixture.timer, 5000);
 
     expect(callsOf(script, "ingest").length).toBeGreaterThan(0);
@@ -485,7 +509,7 @@ describe("MarmotClient", () => {
       batches.push(batch.map((m) => m.message.content));
       return Promise.resolve();
     });
-    await fixture.network.port("peer").publish(RELAY, groupEvent("11".repeat(32)));
+    await fixture.network.port("peer").publish(RELAY, groupEvent());
     await settle(fixture.timer, 5000);
 
     expect(batches).toStrictEqual([["hi"]]);
@@ -522,7 +546,7 @@ describe("MarmotClient", () => {
     const errors: MarmotError[] = [];
     fixture.client.onError((error) => errors.push(error));
     fixture.client.onMessages(async () => Promise.reject(new Error("handler boom")));
-    await fixture.network.port("peer").publish(RELAY, groupEvent("22".repeat(32)));
+    await fixture.network.port("peer").publish(RELAY, groupEvent());
     await settle(fixture.timer, 5000);
 
     expect(errors.map((e) => e.kind)).toContain("handler_failed");
@@ -534,7 +558,7 @@ describe("MarmotClient", () => {
     const script = freshScript();
     const outbound: Outbound = {
       id: `0b${"0".repeat(62)}`,
-      event: event({ id: "33".repeat(32), kind: 445, tags: [["h", ROUTE]] }),
+      event: event({ kind: 445, tags: [["h", ROUTE]] }),
       relays: [RELAY],
       purpose: "application_message",
     };
@@ -557,7 +581,7 @@ describe("MarmotClient", () => {
     script.resolutions.push("pending", "complete");
     const outbound: Outbound = {
       id: `0e${"0".repeat(62)}`,
-      event: event({ id: "88".repeat(32), kind: 445, tags: [["h", ROUTE]] }),
+      event: event({ kind: 445, tags: [["h", ROUTE]] }),
       relays: [RELAY],
       purpose: "application_message",
     };
@@ -694,7 +718,7 @@ describe("MarmotClient", () => {
     script.resolutions.push("pending", "complete");
     const outbound: Outbound = {
       id: `0d${"0".repeat(62)}`,
-      event: event({ id: "66".repeat(32), kind: 445, tags: [["h", ROUTE]] }),
+      event: event({ kind: 445, tags: [["h", ROUTE]] }),
       relays: [RELAY],
       purpose: "application_message",
     };
@@ -721,7 +745,7 @@ describe("MarmotClient", () => {
     script.resolutions.push("pending");
     const outbound: Outbound = {
       id: `0c${"0".repeat(62)}`,
-      event: event({ id: "55".repeat(32), kind: 445, tags: [["h", ROUTE]] }),
+      event: event({ kind: 445, tags: [["h", ROUTE]] }),
       relays: [RELAY],
       purpose: "application_message",
     };
@@ -743,7 +767,6 @@ describe("MarmotClient", () => {
     const outbound: Outbound = {
       id: `0f${"0".repeat(62)}`,
       event: event({
-        id: "99".repeat(32),
         kind: 445,
         tags: [["h", ROUTE]],
         content: "x".repeat(COMMIT_SIZE_FLOOR_BYTES),
@@ -776,7 +799,6 @@ describe("MarmotClient", () => {
     const outbound: Outbound = {
       id: `10${"0".repeat(62)}`,
       event: event({
-        id: "98".repeat(32),
         kind: 445,
         tags: [["h", ROUTE]],
         content: "x".repeat(COMMIT_SIZE_FLOOR_BYTES),
@@ -804,11 +826,11 @@ describe("MarmotClient", () => {
 
   test("a commit at exactly the size floor publishes normally", async () => {
     const script = freshScript();
-    const base = event({ id: "97".repeat(32), kind: 445, tags: [["h", ROUTE]] });
+    const base = event({ kind: 445, tags: [["h", ROUTE]] });
     const pad = COMMIT_SIZE_FLOOR_BYTES - wireEventBytes(base);
     const outbound: Outbound = {
       id: `11${"0".repeat(62)}`,
-      event: { ...base, content: "x".repeat(pad) },
+      event: event({ kind: 445, tags: [["h", ROUTE]], content: "x".repeat(pad) }),
       relays: [RELAY],
       purpose: "commit",
     };
@@ -832,7 +854,7 @@ describe("MarmotClient", () => {
     script.resolutions.push("confirmed", "pending");
     const outbound: Outbound = {
       id: `12${"0".repeat(62)}`,
-      event: event({ id: "96".repeat(32), kind: 445, tags: [["h", ROUTE]] }),
+      event: event({ kind: 445, tags: [["h", ROUTE]] }),
       relays: [RELAY],
       purpose: "commit",
     };
@@ -859,7 +881,7 @@ describe("MarmotClient", () => {
     script.resolutions.push("pending", "confirmed");
     const outbound: Outbound = {
       id: `13${"0".repeat(62)}`,
-      event: event({ id: "95".repeat(32), kind: 445, tags: [["h", ROUTE]] }),
+      event: event({ kind: 445, tags: [["h", ROUTE]] }),
       relays: [RELAY],
       purpose: "commit",
     };
@@ -887,7 +909,7 @@ describe("MarmotClient", () => {
     script.resolutions.push("rolled_back");
     const outbound: Outbound = {
       id: `14${"0".repeat(62)}`,
-      event: event({ id: "94".repeat(32), kind: 445, tags: [["h", ROUTE]] }),
+      event: event({ kind: 445, tags: [["h", ROUTE]] }),
       relays: [RELAY],
       purpose: "commit",
     };
@@ -927,7 +949,7 @@ describe("MarmotClient", () => {
       await gate;
       batches.push(batch.map((m) => m.message.content));
     });
-    await fixture.network.port("peer").publish(RELAY, groupEvent("77".repeat(32)));
+    await fixture.network.port("peer").publish(RELAY, groupEvent());
     await settle(fixture.timer, 5000);
     expect(callsOf(script, "acknowledge_messages")).toHaveLength(0);
     release();
@@ -945,7 +967,7 @@ describe("MarmotClient", () => {
     const peer = fixture.network.port("peer");
     for (let i = 0; i < 260; i += 1) {
       // oxlint-disable-next-line no-await-in-loop -- delivery order matters for the cursor set
-      await peer.publish(RELAY, groupEvent(`e${i.toString(16).padStart(63, "0")}`));
+      await peer.publish(RELAY, groupEvent(1000n, i.toString()));
     }
     // The 256-event cap flushes inline — no timer needed.
     await macrotask();
@@ -958,7 +980,7 @@ describe("MarmotClient", () => {
     expect(all).toHaveLength(2);
     expect(all[1]).toHaveLength(4);
     await fixture.client.close();
-  });
+  }, 30_000);
 
   test("two events inside the delay window ride one ingest batch", async () => {
     const script = freshScript();
@@ -966,8 +988,8 @@ describe("MarmotClient", () => {
     const fixture = await open(script, encodeClientState({ cursors: {}, inbox: [RELAY] }));
     await settle(fixture.timer, 5000);
     const peer = fixture.network.port("peer");
-    await peer.publish(RELAY, groupEvent("71".repeat(32)));
-    await peer.publish(RELAY, groupEvent("72".repeat(32)));
+    await peer.publish(RELAY, groupEvent(1000n, "71"));
+    await peer.publish(RELAY, groupEvent(1000n, "72"));
     await settle(fixture.timer, 0);
     expect(ingests(script)).toHaveLength(0);
     await settle(fixture.timer, 25);
@@ -1014,13 +1036,14 @@ describe("MarmotClient", () => {
     await settle(fixture.timer, 5000);
     const key = groupCursorKey(ROUTE, RELAY);
     const peer = fixture.network.port("peer");
-    await peer.publish(RELAY, groupEvent("08".repeat(32), 2000n));
+    await peer.publish(RELAY, groupEvent(2000n));
     await settle(fixture.timer, 25);
     expect(decodeClientState(fixture.cursors.bytes()).cursors[key]).toBe(2000);
+    const deferred = groupEvent(1500n);
     script.reports = [
-      { event: "09".repeat(32), outcome: { type: "unavailable", category: "transport_deferred" } },
+      { event: deferred.id, outcome: { type: "unavailable", category: "transport_deferred" } },
     ];
-    await peer.publish(RELAY, groupEvent("09".repeat(32), 1500n));
+    await peer.publish(RELAY, deferred);
     await settle(fixture.timer, 25);
     expect(decodeClientState(fixture.cursors.bytes()).cursors[key]).toBe(1499);
     await fixture.client.close();
@@ -1033,9 +1056,7 @@ describe("MarmotClient", () => {
     await settle(fixture.timer, 5000);
     const key = groupCursorKey(ROUTE, RELAY);
     const nowSecs = Number(fixture.clock.now().unixMs / 1000n);
-    await fixture.network
-      .port("peer")
-      .publish(RELAY, groupEvent("0a".repeat(32), BigInt(nowSecs) + 1_000_000_000n));
+    await fixture.network.port("peer").publish(RELAY, groupEvent(BigInt(nowSecs) + 1_000_000_000n));
     await settle(fixture.timer, 25);
     expect(decodeClientState(fixture.cursors.bytes()).cursors[key]).toBe(nowSecs);
     await fixture.client.close();
@@ -1119,7 +1140,7 @@ describe("MarmotClient", () => {
     const fixture = await open(script, encodeClientState({ cursors: {}, inbox: [RELAY] }));
     await settle(fixture.timer, 5000);
     // An inbound wrap arms the 25 ms flush timer.
-    await fixture.network.port("peer").publish(RELAY, wrap("aa".repeat(32)));
+    await fixture.network.port("peer").publish(RELAY, wrap());
     await macrotask();
     expect(fixture.timer.pending()).toBeGreaterThan(0);
     await fixture.client.close();
@@ -1132,14 +1153,16 @@ describe("MarmotClient", () => {
     "a $reason wrap ingest emits a retryable pending invite",
     async ({ reason }) => {
       const script = freshScript();
-      const wrapId = "9a".repeat(32);
-      script.reports = [{ event: wrapId, outcome: { type: "unavailable", category: reason } }];
+      const wrapEvent = wrap();
+      script.reports = [
+        { event: wrapEvent.id, outcome: { type: "unavailable", category: reason } },
+      ];
       const fixture = await open(script, encodeClientState({ cursors: {}, inbox: [RELAY] }));
       const invites: unknown[] = [];
       fixture.client.onInvite((invite) => {
         invites.push(invite);
       });
-      await fixture.network.port("peer").publish(RELAY, wrap(wrapId));
+      await fixture.network.port("peer").publish(RELAY, wrapEvent);
       await settle(fixture.timer, 25);
       // Pending carries no wrap id — the client stores no wraps; redelivery is a replay.
       expect(invites).toStrictEqual([{ type: "pending", reason }]);
@@ -1149,7 +1172,7 @@ describe("MarmotClient", () => {
 
   test("retryInvites closes and reopens the inbox subscription at the capped cursor", async () => {
     const script = freshScript();
-    const wrapId = "9b".repeat(32);
+    const wrapEvent = wrap(190_000n);
     const fixture = await open(
       script,
       encodeClientState({ cursors: { [inboxCursorKey(RELAY)]: 200_000 }, inbox: [RELAY] }),
@@ -1158,14 +1181,9 @@ describe("MarmotClient", () => {
     expect(fixture.network.openSubscriptions("c")).toBe(1);
     // The unavailable report caps the inbox cursor at the wrap's createdAt − 1.
     script.reports = [
-      { event: wrapId, outcome: { type: "unavailable", category: "signer_refused" } },
+      { event: wrapEvent.id, outcome: { type: "unavailable", category: "signer_refused" } },
     ];
-    await fixture.network
-      .port("peer")
-      .publish(
-        RELAY,
-        event({ id: wrapId, kind: 1059, createdAt: 190_000n, tags: [["p", ACCOUNT]] }),
-      );
+    await fixture.network.port("peer").publish(RELAY, wrapEvent);
     await settle(fixture.timer, 5000);
     expect(decodeClientState(fixture.cursors.bytes()).cursors[inboxCursorKey(RELAY)]).toBe(189_999);
     await fixture.client.retryInvites();
@@ -1217,7 +1235,7 @@ describe("MarmotClient", () => {
     script.outbound = [
       {
         id: `0c${"0".repeat(62)}`,
-        event: event({ id: "55".repeat(32), kind: 445, tags: [["h", ROUTE]] }),
+        event: event({ kind: 445, tags: [["h", ROUTE]] }),
         relays: ["wss://10.0.0.1:8443"],
         purpose: "application_message",
       },
@@ -1389,7 +1407,7 @@ describe("MarmotClient", () => {
       batches.push(batch.map((entry) => entry.message));
       return Promise.resolve();
     });
-    await fixture.network.port("peer").publish(RELAY, groupEvent("34".repeat(32)));
+    await fixture.network.port("peer").publish(RELAY, groupEvent());
     await settle(fixture.timer, 5000);
     expect(batches[0]?.[0]?.semantics).toStrictEqual({ type: "reaction", target, emoji: "🔥" });
     expect(batches[0]?.[0]?.expiresAt).toBe(3600n);
@@ -1438,7 +1456,7 @@ describe("MarmotClient", () => {
       batches.push(batch.map((entry) => entry.message));
       return Promise.resolve();
     });
-    await fixture.network.port("peer").publish(RELAY, groupEvent("34".repeat(32)));
+    await fixture.network.port("peer").publish(RELAY, groupEvent());
     await settle(fixture.timer, 5000);
     expect(batches[0]?.map((entry) => entry.semantics)).toStrictEqual(cases);
     await fixture.client.close();

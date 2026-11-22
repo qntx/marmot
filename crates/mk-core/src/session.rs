@@ -2815,10 +2815,13 @@ impl Session {
         })
     }
 
-    /// Admit a batch of inbound events: sorted ascending by `(created_at,
-    /// id)`, deduplicated by id within the batch, ingested one by one. The
-    /// convergence drive runs once after the last event — batch ingest then
-    /// tick reaches the same state as per-event drives.
+    /// Admit a batch of inbound events: every event is verified (id +
+    /// schnorr signature) BEFORE dedupe — a same-id forgery is reported
+    /// `InvalidSignature` and can never shadow the genuine event — then the
+    /// valid ones are sorted ascending by `(created_at, id)`, deduplicated
+    /// by id and ingested one by one. The convergence drive runs once after
+    /// the last event — batch ingest then tick reaches the same state as
+    /// per-event drives.
     ///
     /// # Errors
     /// [`SessionError`] for engine/storage failures.
@@ -2827,10 +2830,22 @@ impl Session {
         mut events: Vec<Event>,
     ) -> Result<Vec<InputReport>, SessionError> {
         events.sort_by_key(|a| (a.created_at, a.id));
-        events.dedup_by_key(|event| event.id);
+        let mut seen = HashSet::with_capacity(events.len());
         let mut reports = Vec::with_capacity(events.len());
-        for event in &events {
-            let outcome = self.ingest_verified(event).await?;
+        for event in events {
+            if event.verify().is_err() {
+                reports.push(InputReport {
+                    event: event.id,
+                    outcome: InputOutcome::Rejected {
+                        category: crate::events::InputCategory::InvalidSignature,
+                    },
+                });
+                continue;
+            }
+            if !seen.insert(event.id) {
+                continue;
+            }
+            let outcome = self.ingest_verified(&event).await?;
             reports.push(InputReport {
                 event: event.id,
                 outcome,
