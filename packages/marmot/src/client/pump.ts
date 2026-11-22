@@ -444,12 +444,24 @@ export class Pump {
     if (floorRefused) {
       this.emitError(new MarmotError("commit_too_large"));
     }
-    const resolution = await this.run(async () =>
-      this.engine.reportPublish(
-        item.id,
-        verdicts.map((verdict) => verdict.result),
-      ),
-    );
+    let resolution: PublishResolution;
+    try {
+      resolution = await this.run(async () =>
+        this.engine.reportPublish(
+          item.id,
+          verdicts.map((verdict) => verdict.result),
+        ),
+      );
+    } catch (error) {
+      // A row deleted mid-publish — sign-out retires every live KeyPackage
+      // row in one transaction — answers `unknown_outbound`: nothing is left
+      // to resolve, the queue is unwedged and no verdict is reportable.
+      const mapped = toMarmotError(error);
+      if (mapped.kind === "engine" && mapped.code === "unknown_outbound") {
+        return;
+      }
+      throw mapped;
+    }
     this.trackCommitRefusal(item, verdicts, resolution);
     // `pending` re-offers immediately; a `confirmed` commit merge can arm a new
     // convergence/lifecycle deadline that only a tick can observe — without the

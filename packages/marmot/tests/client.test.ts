@@ -756,6 +756,32 @@ describe("MarmotClient", () => {
     await fixture.client.close();
   });
 
+  test("a publish in flight during signOut does not wedge the pump", async () => {
+    const script = freshScript();
+    // The KeyPackage row this item reports for is deleted inside the
+    // sign-out transaction before the verdicts land; `unknown_outbound`
+    // is the session's answer for the late report.
+    script.errors = { report_publish: "unknown_outbound" };
+    script.outbound = [
+      {
+        id: `0e${"0".repeat(62)}`,
+        event: event({ id: "77".repeat(32), kind: 30443, content: "" }),
+        relays: [RELAY],
+        purpose: "key_package",
+      },
+    ];
+    const fixture = await open(script, encodeClientState({ cursors: {}, inbox: [RELAY] }));
+    const errors: MarmotError[] = [];
+    fixture.client.onError((error) => errors.push(error));
+    await settle(fixture.timer, 5000);
+    expect(callsOf(script, "report_publish")).toHaveLength(1);
+    expect(errors).toHaveLength(0);
+    // The serialized queue still serves later ops.
+    await fixture.client.publishInboxRelays([RELAY]);
+    await settle(fixture.timer, 5000);
+    await fixture.client.close();
+  });
+
   test("signOut maps a missing relay list to no_relay_list", async () => {
     const fixture = await open(freshScript());
     await expect(fixture.client.signOut()).rejects.toMatchObject({ kind: "no_relay_list" });

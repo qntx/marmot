@@ -493,7 +493,29 @@ mod lifecycle_tests {
         let relay = FakeRelay::new();
         let mut a = open_member().await;
         publish_identity(&mut a, &relay, RELAY).await;
-        let current = key_package_of(&relay, RELAY, &a.account_hex());
+
+        // Consume the current package so the replacement leaves a retained
+        // bundle still inside its grace — the union retirement must catch
+        // it too, not just the engine's judged ownership list.
+        let mut b = open_member().await;
+        publish_identity(&mut b, &relay, RELAY).await;
+        let group = group_with(&mut b, &relay, RELAY, &[&a], "slot").await;
+        let welcomes = welcomes_for(&relay, RELAY, &a.account_hex());
+        ingest_backlog(&mut a, &welcomes).await;
+        a.session.tick().await.expect("tick");
+        let outbound = take(&mut a);
+        let replacement = outbound
+            .iter()
+            .find(|item| item.purpose == OutboundPurpose::KeyPackage)
+            .cloned()
+            .expect("a replacement outbound");
+        accept(&mut a, &relay, &replacement).await;
+        assert_eq!(
+            a.session.key_package_status().expect("status").retained,
+            1,
+            "the consumed bundle is retained in grace"
+        );
+        let current = replacement.event.clone();
 
         // Grow the write set and leave the republish outstanding.
         a.session
@@ -510,12 +532,19 @@ mod lifecycle_tests {
             .sign_out(&[RELAY.to_owned()])
             .await
             .expect("sign_out");
-        assert_eq!(report.left, []);
+        assert_eq!(report.left, [group], "the member group stages a leave");
         assert_eq!(report.kept_admin_leaves, []);
 
         let outbounds = take(&mut a);
-        assert_eq!(outbounds.len(), 1, "only the kind-5 is owed");
-        let deletion = &outbounds[0];
+        let deletion = outbounds
+            .iter()
+            .find(|item| item.purpose == OutboundPurpose::KeyPackageDeletion)
+            .expect("the kind-5 deletion");
+        assert_eq!(
+            outbounds.len(),
+            2,
+            "the kind-5 and the leave commit are owed"
+        );
         assert_eq!(deletion.purpose, OutboundPurpose::KeyPackageDeletion);
         assert_eq!(deletion.event.kind, 5);
         assert_eq!(deletion.event.pubkey, a.signer.account());

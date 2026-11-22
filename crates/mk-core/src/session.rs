@@ -903,7 +903,7 @@ pub struct Session {
     /// Outbound id -> seq of the batch that made it releasable.
     pub(crate) gate: BTreeMap<OutboundId, CommitSeq>,
     /// Items handed out this incarnation and not yet reported.
-    handed: HashSet<OutboundId>,
+    pub(crate) handed: HashSet<OutboundId>,
     /// The in-memory fanout that marked each in-flight fanout's current
     /// attempts (mdk#2332). Only it can report those attempts as unexposed:
     /// a fanout value loaded from storage holds no attempt marks, so results
@@ -912,7 +912,7 @@ pub struct Session {
     /// when the fanout leaves storage or the stored record moves ahead of it
     /// (for example after a restart, where every interrupted attempt counts
     /// as exposed — the intended semantics).
-    held: HashMap<OutboundId, OutboundFanout>,
+    pub(crate) held: HashMap<OutboundId, OutboundFanout>,
     /// Publish resolutions produced since the last `drain_events`.
     pub(crate) resolutions: Vec<SessionEvent>,
     /// In-memory retry arm after a swallowed signer failure on the

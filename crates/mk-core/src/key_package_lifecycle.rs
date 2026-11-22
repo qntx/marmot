@@ -28,7 +28,7 @@ use cgka_traits::maintenance::{
 };
 use cgka_traits::storage::{MaintenanceStorage, StorageError};
 use cgka_traits::transport_adapter::TransportEndpoint;
-use cgka_traits::{MaintenanceRandom, MessageId, Timestamp};
+use cgka_traits::{KeyPackage, MaintenanceRandom, MessageId, Timestamp};
 
 use crate::clock::EngineMaintenanceRandom;
 use crate::events::SessionEvent;
@@ -275,6 +275,21 @@ impl Session {
             relays,
             purpose: SessionPubPurpose::KeyPackageDeletion,
         };
+        // Retire the union of the bundles the record names and whatever the
+        // engine still owns — `durably_owned_key_packages` judges against the
+        // system clock, so a bundle it skipped (expired there, not yet swept
+        // here) would otherwise survive sign-out.
+        let mut owned: Vec<KeyPackage> = Vec::new();
+        owned.extend(lifecycle.current_key_package.iter().cloned());
+        if let Some(pending) = &lifecycle.pending_replacement {
+            owned.push(pending.key_package.clone());
+        }
+        owned.extend(
+            lifecycle
+                .retained_private_material
+                .iter()
+                .map(|material| material.key_package.clone()),
+        );
         lifecycle.current_key_package = None;
         lifecycle.current_key_package_ref = None;
         lifecycle.current_not_before = None;
@@ -290,9 +305,17 @@ impl Session {
         lifecycle.phase = MaintenancePhase::Complete;
         let provider = &self.provider;
         let engine = &mut self.engine;
-        provider
-            .store()
-            .transact(|| Self::retire_slot_material(provider, engine, &lifecycle, &deletion))?;
+        let dropped = provider.store().transact(|| {
+            Self::retire_slot_material(provider, engine, &lifecycle, &owned, &deletion)
+        })?;
+        // The rows are gone, so a late report for one resolves as
+        // `UnknownOutbound` — but only after the in-memory bookkeeping has
+        // stopped treating the id as a handed-out live item.
+        for id in &dropped {
+            self.handed.remove(id);
+            self.gate.remove(id);
+            self.held.remove(id);
+        }
         if let Some(seq) = self.provider.last_seq() {
             self.gate.insert(OutboundId(signed.id.0), seq);
         }
@@ -307,8 +330,10 @@ impl Session {
         provider: &KvStorageProvider,
         engine: &mut cgka_engine::Engine<KvStorageProvider>,
         lifecycle: &KeyPackageLifecycleState,
+        owned: &[KeyPackage],
         deletion: &SessionPublication,
-    ) -> Result<(), SessionError> {
+    ) -> Result<Vec<OutboundId>, SessionError> {
+        let mut dropped = Vec::new();
         for publication in provider
             .session_publications()
             .map_err(SessionError::Storage)?
@@ -327,13 +352,15 @@ impl Session {
             provider
                 .delete_outbound_retry(&id)
                 .map_err(SessionError::Storage)?;
+            dropped.push(id);
         }
         let mut retired = Vec::new();
         let mut seen = BTreeSet::new();
-        for package in engine
-            .durably_owned_key_packages()
-            .map_err(session_engine_error)?
-        {
+        for package in owned.iter().cloned().chain(
+            engine
+                .durably_owned_key_packages()
+                .map_err(session_engine_error)?,
+        ) {
             if seen.insert(package.bytes().to_vec()) {
                 retired.push(package);
             }
@@ -344,7 +371,7 @@ impl Session {
         provider
             .put_session_publication(deletion)
             .map_err(SessionError::Storage)?;
-        Ok(())
+        Ok(dropped)
     }
 
     /// One lifecycle pass; returns the earliest deadline as absolute Unix
