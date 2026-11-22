@@ -416,6 +416,8 @@ impl Session {
     /// (f) A pending publication whose row finished with no acceptance
     /// is re-offered after `min(60 s << attempt_count, 1 h)` from the
     /// last attempt — the same signed bytes, a fresh row.
+    /// `attempt_count` counts staged re-offers and is incremented here
+    /// only: the report that closed the row must not also count it.
     fn retry_pending(
         &mut self,
         lifecycle: &mut KeyPackageLifecycleState,
@@ -628,14 +630,20 @@ impl Session {
         let now_ms = self.now_ms();
         let now_secs = now_ms / 1_000;
         let mut due: Option<u64> = None;
+        // Only deadlines ahead of `now`: the driver already ran, so
+        // anything due now has been acted on or cannot be this pass —
+        // folding it would arm an immediate wake every tick.
         let fold_secs = |earliest: &mut Option<u64>, secs: Option<u64>| {
-            if let Some(secs) = secs {
-                let ms = secs.saturating_mul(1_000);
+            if let Some(ms) = secs.map(|secs| secs.saturating_mul(1_000))
+                && ms > now_ms
+            {
                 *earliest = Some(earliest.map_or(ms, |current| current.min(ms)));
             }
         };
         let fold_ms = |earliest: &mut Option<u64>, ms: u64| {
-            *earliest = Some(earliest.map_or(ms, |current| current.min(ms)));
+            if ms > now_ms {
+                *earliest = Some(earliest.map_or(ms, |current| current.min(ms)));
+            }
         };
         // `not_after` bounds and near-expiry are sweep deadlines.
         fold_secs(&mut due, lifecycle.current_not_after.map(|t| t.0));
@@ -656,17 +664,14 @@ impl Session {
             fold_secs(&mut due, Some(material.delete_at().0));
         }
         fold_secs(&mut due, refresh_next_due(lifecycle));
-        if let Some(pending) = &lifecycle.pending_replacement {
-            if pending.signed_event.is_none() {
-                fold_ms(&mut due, now_ms);
-            } else {
-                // A finished row with no acceptance re-offers at its
-                // backoff.
-                fold_secs(&mut due, self.pending_retry_due(pending)?);
-            }
+        if let Some(pending) = &lifecycle.pending_replacement
+            && pending.signed_event.is_some()
+        {
+            // A finished row with no acceptance re-offers at its
+            // backoff.
+            fold_secs(&mut due, self.pending_retry_due(pending)?);
         }
         if self.replacement_due(lifecycle, now_secs) {
-            fold_ms(&mut due, now_ms);
             // A `created_at` beyond the skew bound retried when the
             // clock catches up.
             let base = [
@@ -846,13 +851,6 @@ pub(crate) fn note_report(
         touch(&mut pending.targets);
         if accepted {
             return Ok(ReportFold::Promote);
-        }
-        if publication
-            .statuses
-            .iter()
-            .all(|status| !status.is_outstanding())
-        {
-            pending.attempt_count = pending.attempt_count.saturating_add(1);
         }
         return Ok(ReportFold::Updated);
     }

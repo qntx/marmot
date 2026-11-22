@@ -47,11 +47,12 @@ mod support;
 #[cfg(feature = "testing")]
 mod lifecycle_tests {
 
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
 
     use mk_core::{
-        Availability, InputOutcome, Outbound, OutboundPurpose, SessionEvent,
-        testing::key_package_bundle_count,
+        AccountId, AccountSigner, Availability, Clock, Event, InputOutcome, Outbound,
+        OutboundPurpose, SessionEvent, SignerError, SignerFuture, UnsignedEvent,
+        testing::{LocalSigner, key_package_bundle_count},
     };
 
     use super::support::*;
@@ -59,8 +60,61 @@ mod lifecycle_tests {
     const RELAY: &str = "ws://127.0.0.1:7777";
     const RELAY2: &str = "ws://127.0.0.1:7778";
 
+    /// A `LocalSigner` whose `sign_event` can be switched to refuse —
+    /// for the tick-driven `KeyPackage` sign retry.
+    #[derive(Debug)]
+    struct SignGateSigner {
+        inner: LocalSigner,
+        refused: Mutex<bool>,
+    }
+
+    impl SignGateSigner {
+        fn new() -> Self {
+            Self {
+                inner: LocalSigner::new(),
+                refused: Mutex::new(false),
+            }
+        }
+
+        fn set_refused(&self) {
+            *self.refused.lock().unwrap() = true;
+        }
+    }
+
+    impl AccountSigner for SignGateSigner {
+        fn account(&self) -> AccountId {
+            self.inner.account()
+        }
+
+        fn sign_event(
+            &self,
+            unsigned: UnsignedEvent,
+        ) -> SignerFuture<'_, Result<Event, SignerError>> {
+            if *self.refused.lock().unwrap() {
+                return Box::pin(async { Err(SignerError::Refused) });
+            }
+            self.inner.sign_event(unsigned)
+        }
+
+        fn nip44_encrypt<'a>(
+            &'a self,
+            peer: &'a AccountId,
+            plaintext: &'a str,
+        ) -> SignerFuture<'a, Result<String, SignerError>> {
+            self.inner.nip44_encrypt(peer, plaintext)
+        }
+
+        fn nip44_decrypt<'a>(
+            &'a self,
+            peer: &'a AccountId,
+            ciphertext: &'a str,
+        ) -> SignerFuture<'a, Result<String, SignerError>> {
+            self.inner.nip44_decrypt(peer, ciphertext)
+        }
+    }
+
     /// The `d` tag value of a KeyPackage event.
-    fn d_tag(event: &mk_core::Event) -> String {
+    fn d_tag(event: &Event) -> String {
         event
             .tags
             .iter()
@@ -341,6 +395,92 @@ mod lifecycle_tests {
             first.id,
             "the publication still stands"
         );
+        assert_bundle_invariant(&a);
+    }
+
+    /// A fresh session with nothing published wakes for nothing: a due
+    /// replacement that cannot be acted on (no write set known) must
+    /// not arm an immediate `tick` retry.
+    #[tokio::test(flavor = "current_thread")]
+    async fn fresh_session_tick_wakes_for_nothing() {
+        let mut a = open_member().await;
+        let first = a.session.tick().await.expect("tick");
+        assert!(
+            first.next_wake_ms.is_none(),
+            "no lifecycle work yet, no wake: {first:?}"
+        );
+        let second = a.session.tick().await.expect("tick");
+        assert!(
+            second.next_wake_ms.is_none(),
+            "a second pass stages nothing either: {second:?}"
+        );
+        assert!(
+            take(&mut a).is_empty(),
+            "no write set, no replacement staged"
+        );
+    }
+
+    /// A signer refusal on the tick-driven replacement leaves the
+    /// pending unsigned and arms the 5-minute in-memory retry — the
+    /// wake is the retry delay, never an immediate spin.
+    #[tokio::test(flavor = "current_thread")]
+    async fn tick_signer_refusal_arms_five_minute_retry() {
+        let relay = FakeRelay::new();
+        let signer = Arc::new(SignGateSigner::new());
+        let mut a = open_member_with(Arc::<SignGateSigner>::clone(&signer)).await;
+        publish_identity(&mut a, &relay, RELAY).await;
+
+        // Past the weekly refresh the slot wants a replacement.
+        a.clock.advance(8 * 86_400_000);
+        signer.set_refused();
+        let report = a.session.tick().await.expect("tick");
+        assert_eq!(
+            report.next_wake_ms,
+            Some(5 * 60 * 1_000),
+            "the wake is the sign retry, not an immediate re-tick"
+        );
+        let status = a.session.key_package_status().expect("status");
+        assert!(status.pending, "the unsigned replacement stays staged");
+        assert_eq!(
+            status.next_due_ms,
+            Some(a.clock.now().unix_ms + 5 * 60 * 1_000),
+            "status reports the same retry deadline"
+        );
+        assert_bundle_invariant(&a);
+    }
+
+    /// A current inside its last day while a replacement is already in
+    /// flight leaves a strictly future wake — the lapsed near-expiry
+    /// deadline is not re-armed every tick.
+    #[tokio::test(flavor = "current_thread")]
+    async fn pending_in_flight_never_wakes_immediately() {
+        let relay = FakeRelay::new();
+        let mut a = open_member().await;
+        publish_identity(&mut a, &relay, RELAY).await;
+
+        // Stage a replacement through the refresh path and leave it
+        // unacknowledged: pending in flight.
+        a.clock.advance(8 * 86_400_000);
+        a.session.tick().await.expect("tick");
+        assert!(
+            take(&mut a)
+                .iter()
+                .any(|item| item.purpose == OutboundPurpose::KeyPackage),
+            "the refresh staged a replacement"
+        );
+        assert!(a.session.key_package_status().expect("status").pending);
+
+        // Now inside the current's last day (30-day lifetime): the
+        // near-expiry deadline has lapsed but the pending stands in.
+        a.clock.advance(21 * 86_400_000 + 12 * 3_600_000);
+        let report = a.session.tick().await.expect("tick");
+        assert!(
+            matches!(report.next_wake_ms, Some(wake) if wake > 0),
+            "the wake stays future-dated: {report:?}"
+        );
+        let status = a.session.key_package_status().expect("status");
+        assert!(status.pending);
+        assert!(status.current.is_some(), "the current still stands");
         assert_bundle_invariant(&a);
     }
 }
