@@ -123,8 +123,9 @@ pub(crate) enum Table {
     /// group record.
     ChangeNotDelivered = 42,
     /// Session-owned stall evidence (D2): one row per group keyed by the
-    /// group id, carrying `{epoch, events, refetch, stalled}` — bounded to
-    /// `STALL_EVENTS` distinct ids; deleted with the group.
+    /// group id, carrying `{epoch, welcome, events, refetch, stalled}` —
+    /// `events` bounded to `STALL_EVENTS` distinct ids; deleted with the
+    /// group.
     GroupStall = 43,
 }
 
