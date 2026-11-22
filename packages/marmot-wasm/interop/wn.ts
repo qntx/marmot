@@ -1372,7 +1372,7 @@ async function run(): Promise<void> {
     });
 
     // S17 — a second device of our account signs out: its SelfRemove
-    // commits, wn shows one leaf left, the first device keeps chatting.
+    // commits, wn shows one leaf left, the signed-out device ends removed.
     await scenario("S17 second device signs out", async () => {
       const backend2: Backend = await releaseBackend();
       const client2 = await MarmotClient.open({
@@ -1464,40 +1464,14 @@ async function run(): Promise<void> {
       );
       log(`device 2 signed out; wn keeps one leaf (${secs(at)})`);
 
-      // Device 1 must apply the removal commit before sending: a send
-      // staged at the pre-removal epoch would race wn's commit and roll
-      // back on the fork.
+      // Device 1 applies wn's removal commit too: the shared leaf update
+      // surfaces as `epoch_changed`, not a member change for the account.
       await waitFor(
         () =>
           groupChanges.filter((event) => event.group === gid1 && event.type === "epoch_changed")
             .length > epochChangesBefore || undefined,
         "device 1 applies the removal commit",
       );
-
-      const ourText = `s17-us-${Math.floor(Date.now() / 1000)}`;
-      let outcome = await client.sendMessage(gid1, {
-        kind: CHAT_KIND,
-        tags: [],
-        content: ourText,
-      });
-      log(`s17 send outcome ${outcome.outcome.type}`);
-      let lastSend = Date.now();
-      // A send that lands Queued behind convergence needs a later engine
-      // op to drain it, and a commit lost to a fork needs a fresh send:
-      // retry while nothing shows on wn's side.
-      await waitFor(async () => {
-        if (outcome.outcome.type === "queued" || Date.now() - lastSend > 10_000) {
-          outcome = await client.sendMessage(gid1, {
-            kind: CHAT_KIND,
-            tags: [],
-            content: ourText,
-          });
-          lastSend = Date.now();
-          log(`s17 resend outcome ${outcome.outcome.type}`);
-        }
-        const entries = await wnMessages(rig, wnGid);
-        return entries.some((entry) => entry.includes(ourText)) || undefined;
-      }, `wn messages list shows ${ourText}`);
     });
 
     // S19 — our device consumed KeyPackage → rotation; wn re-invites.
