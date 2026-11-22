@@ -33,7 +33,13 @@ import type {
 } from "../src/backend/protocol.ts";
 import { utf8Decode, utf8Encode } from "../src/backend/utf8.ts";
 import { MarmotClient } from "../src/client/client.ts";
-import { INGEST_BATCH_MAX, MAX_PENDING_INBOUND, RESUBSCRIBE_DELAY_MS } from "../src/client/pump.ts";
+import {
+  GIFT_WRAP_BUDGET,
+  GIFT_WRAP_WINDOW_MS,
+  INGEST_BATCH_MAX,
+  MAX_PENDING_INBOUND,
+  RESUBSCRIBE_DELAY_MS,
+} from "../src/client/pump.ts";
 import { decodeClientState, encodeClientState } from "../src/client/state.ts";
 import { manualClock } from "../src/testing/clock.ts";
 import { memoryCursorStore } from "../src/testing/cursors.ts";
@@ -966,6 +972,112 @@ describe("malicious relay", () => {
     expect(ingested(script)).toHaveLength(0);
     expect(decodeClientState(fixture.cursors.bytes()).cursors[key]).toBe(500);
     expect(sub.open).toBe(true);
+    await fixture.client.close();
+  });
+
+  test("a gift-wrap flood budgets ingests to the window", async () => {
+    const script = freshScript();
+    const key = inboxCursorKey(RELAY);
+    const fixture = await open(
+      script,
+      encodeClientState({ cursors: { [key]: 100 }, inbox: [RELAY] }),
+    );
+    await settle(fixture.timer, 5000);
+    const sub = mustSub(inboxSubs(fixture.network));
+
+    for (let i = 0; i < GIFT_WRAP_BUDGET + 8; i += 1) {
+      push(sub, wrapEvent(1_000_000n, `flood${i}`));
+    }
+    await settle(fixture.timer, 25);
+    // Only the window's budget ingested; the eight-wrap tail stays buffered.
+    expect(ingested(script)).toHaveLength(GIFT_WRAP_BUDGET);
+
+    // The deferred tail lands only after the budget window resets — nothing is lost.
+    fixture.clock.advance(GIFT_WRAP_WINDOW_MS);
+    await settle(fixture.timer, GIFT_WRAP_WINDOW_MS);
+    expect(ingested(script)).toHaveLength(GIFT_WRAP_BUDGET + 8);
+    await fixture.client.close();
+  });
+
+  test("a budget-deferred inbox backlog caps the folded cursor below the deferred wraps", async () => {
+    const script = freshScript();
+    const key = inboxCursorKey(RELAY);
+    const fixture = await open(
+      script,
+      encodeClientState({ cursors: { [key]: 100 }, inbox: [RELAY] }),
+    );
+    await settle(fixture.timer, 5000);
+    const sub = mustSub(inboxSubs(fixture.network));
+
+    // 40 wraps newest-first; the eight oldest (createdAt 600–607) defer past the budget.
+    for (let i = 0; i < 40; i += 1) {
+      push(sub, wrapEvent(BigInt(639 - i), `defer${i}`));
+    }
+    pushEose(sub);
+    await settle(fixture.timer, 0);
+    // The fold ran after the 32-wrap batch went durable: the still-buffered tail caps the
+    // cursor at min(deferred createdAt) − 1, not the backlog's 639.
+    expect(decodeClientState(fixture.cursors.bytes()).cursors[key]).toBe(599);
+
+    // Closing before the window resets is safe: the reopened `since` covers the deferred tail.
+    const saved = fixture.cursors.bytes();
+    await fixture.client.close();
+    const reopened = await open(freshScript(), saved);
+    await settle(reopened.timer, 5000);
+    const sub2 = mustSub(inboxSubs(reopened.network));
+    expect(sub2.filters[0]?.since).toBeLessThanOrEqual(599);
+    await reopened.client.close();
+  });
+
+  test("a live wrap deferred beside an older one keeps the cursor capped until it is ingested", async () => {
+    const script = freshScript();
+    const key = inboxCursorKey(RELAY);
+    const fixture = await open(
+      script,
+      encodeClientState({ cursors: { [key]: 100 }, inbox: [RELAY] }),
+    );
+    await settle(fixture.timer, 5000);
+    const sub = mustSub(inboxSubs(fixture.network));
+    pushEose(sub);
+
+    // 40 live wraps: 32 ingest now, the eight oldest (600–607) defer — the live advance caps
+    // the cursor at 599 even though the ingested batch reached 639.
+    for (let i = 0; i < 40; i += 1) {
+      push(sub, wrapEvent(BigInt(639 - i), `live${i}`));
+    }
+    await settle(fixture.timer, 25);
+    expect(decodeClientState(fixture.cursors.bytes()).cursors[key]).toBe(599);
+
+    // A newer live wrap buffers under the same spent budget; the cursor stays capped.
+    push(sub, wrapEvent(700n, "tail"));
+    await settle(fixture.timer, 0);
+    expect(decodeClientState(fixture.cursors.bytes()).cursors[key]).toBe(599);
+
+    fixture.clock.advance(GIFT_WRAP_WINDOW_MS);
+    await settle(fixture.timer, GIFT_WRAP_WINDOW_MS);
+    expect(decodeClientState(fixture.cursors.bytes()).cursors[key]).toBe(700);
+    await fixture.client.close();
+  });
+
+  test("group events in a wrap flood ingest without the wrap budget", async () => {
+    const script = freshScript();
+    script.groups = [snapshot()];
+    const fixture = await open(script, encodeClientState({ cursors: {}, inbox: [RELAY] }));
+    await settle(fixture.timer, 5000);
+    const wrapSub = mustSub(inboxSubs(fixture.network));
+    const groupSub = mustSub(groupSubs(fixture.network));
+
+    for (let i = 0; i < 40; i += 1) {
+      push(wrapSub, wrapEvent(1_000_000n + BigInt(i), `mix${i}`));
+    }
+    for (let i = 0; i < 10; i += 1) {
+      push(groupSub, fill(i));
+    }
+    await settle(fixture.timer, 25);
+
+    const batch = ingested(script);
+    expect(batch.filter((event) => event.kind === 445)).toHaveLength(10);
+    expect(batch.filter((event) => event.kind === 1059)).toHaveLength(GIFT_WRAP_BUDGET);
     await fixture.client.close();
   });
 });

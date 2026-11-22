@@ -74,6 +74,14 @@ export const INGEST_DELAY_MS = 25;
 /** Delay before reconciling after a relay-initiated subscription close. */
 export const RESUBSCRIBE_DELAY_MS = 5000;
 /**
+ * Kind-1059 gift wraps handed to `engine.ingest` per `GIFT_WRAP_WINDOW_MS` — every wrap costs a
+ * signer `nip44_decrypt` (a remote round trip, possibly an extension prompt), so a wrap flood must
+ * not stampede the signer. Kind-445 group events are never budgeted.
+ */
+export const GIFT_WRAP_BUDGET = 32;
+/** The fixed window `GIFT_WRAP_BUDGET` applies to, on the injected clock. */
+export const GIFT_WRAP_WINDOW_MS = 10_000;
+/**
  * The largest commit sent to a relay whose event limit is unknown — MDK `COMMIT_SIZE_FLOOR_BYTES`
  * (mdk#2332). The client knows no relay limits, so every relay counts as unknown-limit.
  */
@@ -146,6 +154,12 @@ export class Pump {
   private readonly earlyRefusals = new Map<string, Set<string>>();
 
   private flushTimer: (() => void) | undefined;
+  /** Re-flush armed for the wrap budget window reset while wraps stay deferred in `buffer`. */
+  private wrapTimer: (() => void) | undefined;
+  /** Start of the current wrap budget window, ms on the injected clock. */
+  private wrapWindowStart: number | undefined;
+  /** Kind-1059 events `flushNow` may still take in the current window. */
+  private wrapBudgetLeft = 0;
   private reconcileTimer: (() => void) | undefined;
   private reconcileFlag = false;
   private saveScheduled = false;
@@ -278,6 +292,8 @@ export class Pump {
     this.wake = undefined;
     this.flushTimer?.();
     this.flushTimer = undefined;
+    this.wrapTimer?.();
+    this.wrapTimer = undefined;
     this.reconcileTimer?.();
     this.reconcileTimer = undefined;
     for (const sub of this.active.values()) {
@@ -524,6 +540,20 @@ export class Pump {
     });
   }
 
+  /**
+   * Arm the wrap-deferral re-flush for the current window's reset; a no-op while one is armed.
+   * `flushNow` re-arms it whenever deferred wraps stay in the buffer.
+   */
+  private scheduleWrapFlush(ms: number): void {
+    if (this.wrapTimer !== undefined) {
+      return;
+    }
+    this.wrapTimer = this.timer.set(ms, () => {
+      this.wrapTimer = undefined;
+      this.flushNow();
+    });
+  }
+
   private onInbound(sub: ActiveSub, event: NostrEvent): void {
     if (this.closed) {
       return;
@@ -590,8 +620,34 @@ export class Pump {
     if (this.buffer.size === 0 || this.closed) {
       return;
     }
-    const batch = [...this.buffer.values()];
-    this.buffer.clear();
+    const nowMs = Number(this.clock.now().unixMs);
+    let windowStart = this.wrapWindowStart;
+    if (windowStart === undefined || nowMs - windowStart >= GIFT_WRAP_WINDOW_MS) {
+      windowStart = nowMs;
+      this.wrapBudgetLeft = GIFT_WRAP_BUDGET;
+    }
+    this.wrapWindowStart = windowStart;
+    // Every group event flushes; kind-1059s flush only within the window's remaining budget —
+    // deferred wraps stay buffered (still counted in `pendingInbound`) until the window resets.
+    const batch: Buffered[] = [];
+    let wraps = 0;
+    for (const [id, entry] of this.buffer) {
+      if (entry.event.kind === GIFT_WRAP_KIND) {
+        if (wraps >= this.wrapBudgetLeft) {
+          continue;
+        }
+        wraps += 1;
+      }
+      batch.push(entry);
+      this.buffer.delete(id);
+    }
+    this.wrapBudgetLeft -= wraps;
+    if (this.buffer.size > 0) {
+      this.scheduleWrapFlush(windowStart + GIFT_WRAP_WINDOW_MS - nowMs);
+    }
+    if (batch.length === 0) {
+      return;
+    }
     const work = this.run(async () => {
       const events = batch.map((entry) => entry.event);
       let reports: InputReport[];
@@ -699,11 +755,34 @@ export class Pump {
           cap = cap === undefined ? at : Math.min(cap, at);
         }
       }
+      const buffered = this.bufferedCap(key);
+      if (buffered !== undefined) {
+        cap = cap === undefined ? buffered : Math.min(cap, buffered);
+      }
       if (cap !== undefined) {
         value = Math.max(0, Math.min(value, cap));
       }
       this.state.cursors[key] = value;
     }
+  }
+
+  /**
+   * `min(createdAt) − 1` over still-buffered (not yet ingested) events carrying `key`, or
+   * `undefined` when none remain. A cursor must never advance past an event still buffered for it:
+   * a budget-deferred wrap sitting on the far side of a persisted `since` would never be refetched
+   * after reconnect. Applies to live keys (`advanceCursors`) and the EOSE fold (`applyBacklog`)
+   * alike — a live wrap deferred beside a folded backlog is just as lost.
+   */
+  private bufferedCap(key: string): number | undefined {
+    let cap: number | undefined;
+    for (const entry of this.buffer.values()) {
+      if (!entry.keys.has(key)) {
+        continue;
+      }
+      const at = Number(entry.event.createdAt) - 1;
+      cap = cap === undefined ? at : Math.min(cap, at);
+    }
+    return cap;
   }
 
   /** Apply a settled backlog aggregate (`sub.backlog` entries) at EOSE; used only by the EOSE job. */
@@ -716,8 +795,13 @@ export class Pump {
       if (aggregate.max !== undefined && aggregate.max > value) {
         value = aggregate.max;
       }
-      if (aggregate.cap !== undefined) {
-        value = Math.max(0, Math.min(value, aggregate.cap));
+      let { cap } = aggregate;
+      const buffered = this.bufferedCap(key);
+      if (buffered !== undefined) {
+        cap = cap === undefined ? buffered : Math.min(cap, buffered);
+      }
+      if (cap !== undefined) {
+        value = Math.max(0, Math.min(value, cap));
       }
       this.state.cursors[key] = value;
     }
