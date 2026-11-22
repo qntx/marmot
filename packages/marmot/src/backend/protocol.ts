@@ -587,6 +587,7 @@ export type SessionEvent =
   | { type: "publish_resolved"; outbound: string; resolution: PublishResolution }
   | { type: "app_event_dropped"; group: string; reason: DropReason }
   | { type: "key_package_rotated" }
+  | { type: "self_updated"; group: string }
   | { type: "unmapped" };
 
 export const SESSION_EVENT_TYPES = [
@@ -610,6 +611,7 @@ export const SESSION_EVENT_TYPES = [
   "publish_resolved",
   "app_event_dropped",
   "key_package_rotated",
+  "self_updated",
   "unmapped",
 ] as const;
 
@@ -730,6 +732,7 @@ export type BridgeRequest =
   | { type: "remove_members"; group: string; members: string[] }
   | { type: "leave"; group: string }
   | { type: "self_update"; group: string }
+  | { type: "history_fetched"; group: string }
   | {
       type: "update_group_profile";
       group: string;
@@ -788,6 +791,7 @@ export const REQUEST_TYPES = [
   "forget_group",
   "group",
   "groups",
+  "history_fetched",
   "ingest",
   "invite",
   "key_package_status",

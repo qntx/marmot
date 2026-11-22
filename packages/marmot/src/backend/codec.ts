@@ -1028,6 +1028,7 @@ export function decodeSessionEvent(value: unknown, path = "event"): SessionEvent
     case "local_copy_restored":
     case "hydration_quarantined":
     case "group_unrecoverable":
+    case "self_updated":
       return { type, group: group(path) };
     case "epoch_changed":
       return {
@@ -1124,6 +1125,7 @@ export function encodeSessionEvent(event: SessionEvent): Json {
     local_copy_restored: (event) => ({ type: event.type, group: event.group }),
     hydration_quarantined: (event) => ({ type: event.type, group: event.group }),
     group_unrecoverable: (event) => ({ type: event.type, group: event.group }),
+    self_updated: (event) => ({ type: event.type, group: event.group }),
     epoch_changed: (event) => ({
       type: "epoch_changed",
       group: event.group,
@@ -1587,6 +1589,7 @@ export function decodeRequest(value: unknown, path = "request"): BridgeRequest {
       };
     case "leave":
     case "self_update":
+    case "history_fetched":
     case "group":
       return { type, group: group(path) };
     case "update_group_profile":
@@ -1741,6 +1744,7 @@ export function encodeRequest(request: BridgeRequest): Json {
     }),
     leave: (request) => ({ type: request.type, group: request.group }),
     self_update: (request) => ({ type: request.type, group: request.group }),
+    history_fetched: (request) => ({ type: request.type, group: request.group }),
     group: (request) => ({ type: request.type, group: request.group }),
     update_group_profile: (request) => ({
       type: "update_group_profile",

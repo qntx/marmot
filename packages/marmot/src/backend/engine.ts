@@ -505,6 +505,13 @@ export class Engine {
     );
   }
 
+  /** Report the group's post-join history fetch completed (EOSE on every subscribed relay). */
+  async historyFetched(group: string): Promise<void> {
+    return this.op({ type: "history_fetched", group }, (r) =>
+      r.type === "done" ? undefined : MISS,
+    );
+  }
+
   /** Update the group profile; `null` leaves a field unchanged. */
   async updateGroupProfile(
     group: string,

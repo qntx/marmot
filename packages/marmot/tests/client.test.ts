@@ -736,18 +736,21 @@ describe("MarmotClient", () => {
     const fixture = await open(freshScript(), undefined, undefined, [LOOKUP]);
     // An authored NIP-65 list on the lookup relay: `read`-marked relays are
     // excluded from the write set the request carries.
-    await fixture.network.port("peer").publish(
-      LOOKUP,
-      event({
-        id: "12".repeat(32),
-        pubkey: ACCOUNT,
-        kind: 10002,
-        tags: [
-          ["r", RELAY],
-          ["r", RELAY2, "read"],
-        ],
-      }),
-    );
+    // The list is fetched by `writeRelaysOf` (an authors-filtered one-shot fetch, no
+    // signature check) — a literal fixture, not a pump-ingested event, so the fake
+    // pubkey is fine here.
+    await fixture.network.port("peer").publish(LOOKUP, {
+      id: "12".repeat(32),
+      pubkey: ACCOUNT,
+      createdAt: 1000n,
+      kind: 10002,
+      tags: [
+        ["r", RELAY],
+        ["r", RELAY2, "read"],
+      ],
+      content: "",
+      sig: "5".repeat(128),
+    });
     const result = await fixture.client.signOut();
     expect(result).toStrictEqual({ left: [], keptAdminLeaves: [] });
     const calls = callsOf(fixture.script, "sign_out");
@@ -765,12 +768,15 @@ describe("MarmotClient", () => {
     script.outbound = [
       {
         id: `0e${"0".repeat(62)}`,
-        event: event({ id: "77".repeat(32), kind: 30443, content: "" }),
+        event: event({ kind: 30443 }),
         relays: [RELAY],
         purpose: "key_package",
       },
     ];
-    const fixture = await open(script, encodeClientState({ cursors: {}, inbox: [RELAY] }));
+    const fixture = await open(
+      script,
+      encodeClientState({ nip44Extended: true, cursors: {}, inbox: [RELAY] }),
+    );
     const errors: MarmotError[] = [];
     fixture.client.onError((error) => errors.push(error));
     await settle(fixture.timer, 5000);
@@ -854,6 +860,24 @@ describe("MarmotClient", () => {
     await fixture.client.publishInboxRelays([RELAY]);
     await settle(fixture.timer, 5000);
     expect(errors.map((e) => e.kind)).toContain("subscription_limit");
+    await fixture.client.close();
+  });
+
+  test("group EOSE on every relay reports history_fetched once", async () => {
+    const script = freshScript();
+    script.groups = [snapshot()];
+    const fixture = await open(
+      script,
+      encodeClientState({ nip44Extended: true, cursors: {}, inbox: [] }),
+    );
+    await settle(fixture.timer, 5000);
+    const calls = callsOf(fixture.script, "history_fetched");
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({ type: "history_fetched", group: GROUP });
+    // A reopened subscription must not re-report in the same Pump lifetime.
+    await fixture.client.publishInboxRelays([RELAY]);
+    await settle(fixture.timer, 5000);
+    expect(callsOf(fixture.script, "history_fetched")).toHaveLength(1);
     await fixture.client.close();
   });
 
@@ -1717,6 +1741,7 @@ describe("MarmotClient", () => {
     script.drains.push(
       { type: "events", events: [] },
       { type: "events", events: [] },
+      { type: "events", events: [] }, // history_fetched post-op drain (group EOSE at open)
       {
         type: "events",
         events: [{ type: "message_received", group: GROUP, message: incoming }],
