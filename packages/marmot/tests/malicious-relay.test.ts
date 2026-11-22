@@ -1080,4 +1080,43 @@ describe("malicious relay", () => {
     expect(batch.filter((event) => event.kind === 1059)).toHaveLength(GIFT_WRAP_BUDGET);
     await fixture.client.close();
   });
+
+  test("a buffered older event stalls advancement but never moves a cursor back", async () => {
+    const script = freshScript();
+    script.groups = [snapshot()];
+    const key = groupCursorKey(ROUTE, RELAY);
+    const fixture = await open(script, encodeClientState({ cursors: { [key]: 1000 }, inbox: [] }));
+    await settle(fixture.timer, 5000);
+    const sub = mustSub(groupSubs(fixture.network));
+    pushEose(sub);
+
+    const gates: IngestGate[] = [];
+    script.ingestGate = async () => {
+      await new Promise<void>((resolve, reject) => {
+        gates.push({
+          ok: resolve,
+          fail: () => {
+            reject(new Error("ingest down"));
+          },
+        });
+      });
+    };
+    const cursor = (): number | undefined =>
+      decodeClientState(fixture.cursors.bytes()).cursors[key];
+
+    // A newer live event ingests while an out-of-order older event is still buffered.
+    push(sub, groupEvent(1500n));
+    await settle(fixture.timer, 25);
+    push(sub, groupEvent(500n));
+    popGate(gates).ok();
+    await settle(fixture.timer, 0);
+    // The buffered createdAt-500 event caps the fold at 499 — but the cursor was 1000,
+    // and the sub's `since` already covers the older event, so nothing moves back.
+    expect(cursor()).toBe(1000);
+    await settle(fixture.timer, 25);
+    popGate(gates).ok();
+    await settle(fixture.timer, 0);
+    expect(cursor()).toBe(1000);
+    await fixture.client.close();
+  });
 });

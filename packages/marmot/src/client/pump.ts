@@ -754,7 +754,8 @@ export class Pump {
       }
     }
     for (const [key, entries] of perKey) {
-      let value = this.state.cursors[key] ?? 0;
+      const old = this.state.cursors[key] ?? 0;
+      let value = old;
       for (const entry of entries) {
         if (entry.unavailable) {
           continue;
@@ -764,16 +765,16 @@ export class Pump {
           value = secs;
         }
       }
+      const buffered = this.bufferedCap(key);
+      if (buffered !== undefined) {
+        value = Math.max(old, Math.min(value, buffered));
+      }
       let cap: number | undefined;
       for (const entry of entries) {
         if (entry.unavailable) {
           const at = Number(entry.createdAt) - 1;
           cap = cap === undefined ? at : Math.min(cap, at);
         }
-      }
-      const buffered = this.bufferedCap(key);
-      if (buffered !== undefined) {
-        cap = cap === undefined ? buffered : Math.min(cap, buffered);
       }
       if (cap !== undefined) {
         value = Math.max(0, Math.min(value, cap));
@@ -786,8 +787,10 @@ export class Pump {
    * `min(createdAt) − 1` over still-buffered (not yet ingested) events carrying `key`, or
    * `undefined` when none remain. A cursor must never advance past an event still buffered for it:
    * a budget-deferred wrap sitting on the far side of a persisted `since` would never be refetched
-   * after reconnect. Applies to live keys (`advanceCursors`) and the EOSE fold (`applyBacklog`)
-   * alike — a live wrap deferred beside a folded backlog is just as lost.
+   * after reconnect. It may only stall advancement, never pull a cursor below its previous value —
+   * every buffered event arrived through a subscription whose `since` already covers it, so the old
+   * cursor still refetches it. Applies to live keys (`advanceCursors`) and the EOSE fold
+   * (`applyBacklog`) alike — a live wrap deferred beside a folded backlog is just as lost.
    */
   private bufferedCap(key: string): number | undefined {
     let cap: number | undefined;
@@ -807,15 +810,16 @@ export class Pump {
       return;
     }
     for (const [key, aggregate] of sub.backlog) {
-      let value = this.state.cursors[key] ?? 0;
+      const old = this.state.cursors[key] ?? 0;
+      let value = old;
       if (aggregate.max !== undefined && aggregate.max > value) {
         value = aggregate.max;
       }
-      let { cap } = aggregate;
       const buffered = this.bufferedCap(key);
       if (buffered !== undefined) {
-        cap = cap === undefined ? buffered : Math.min(cap, buffered);
+        value = Math.max(old, Math.min(value, buffered));
       }
+      const { cap } = aggregate;
       if (cap !== undefined) {
         value = Math.max(0, Math.min(value, cap));
       }
