@@ -35,8 +35,9 @@ import * as groups from "../groups/index.ts";
 import type { UploadPort } from "../groups/index.ts";
 import { observeSigner, probeNip44Extended } from "../invites/index.ts";
 import type { InviteEvent } from "../invites/index.ts";
-import { lookupInvitees, writeRelaysOf } from "../keys/index.ts";
+import { KEY_PACKAGE_KIND, lookupInvitees, writeRelaysOf } from "../keys/index.ts";
 import type { CursorStore, KvDriver } from "../storage/driver.ts";
+import { fetchEvents } from "../transport/fetch.ts";
 import type { RelayPort, Timer } from "../transport/index.ts";
 import { safeMediaUrl, safeRelayUrl } from "../transport/index.ts";
 import { MarmotError, toMarmotError } from "./errors.ts";
@@ -64,6 +65,9 @@ export type MarmotClientOptions = {
 
 type CreateGroupArgs = Parameters<Engine["createGroup"]>[0];
 
+/** The daily `KeyPackage` slot audit cadence. */
+const SLOT_AUDIT_INTERVAL_MS = 24 * 60 * 60 * 1000;
+
 type MediaInput = {
   caption: string;
   attachments: AttachmentInput[];
@@ -78,6 +82,7 @@ export class MarmotClient {
   private readonly allowLoopback: boolean;
   private closing = false;
   private closePromise: Promise<void> | undefined;
+  private slotAuditCancel: (() => void) | undefined;
 
   private constructor(
     options: MarmotClientOptions,
@@ -154,6 +159,8 @@ export class MarmotClient {
           }
         }
       })();
+      void client.runSlotAudit();
+      client.scheduleSlotAudit();
     }
     return client;
   }
@@ -162,6 +169,8 @@ export class MarmotClient {
 
   async close(): Promise<void> {
     this.closing = true;
+    this.slotAuditCancel?.();
+    this.slotAuditCancel = undefined;
     this.closePromise ??= (async () => {
       try {
         await this.pump.close();
@@ -194,6 +203,30 @@ export class MarmotClient {
 
   onError(listener: (error: MarmotError) => void): () => void {
     return this.pump.onError(listener);
+  }
+
+  /**
+   * The daily slot audit: reschedule first so a run's outcome never loses the timer, then audit
+   * with `open`'s error policy.
+   */
+  private scheduleSlotAudit(): void {
+    this.slotAuditCancel = this.options.timer.set(SLOT_AUDIT_INTERVAL_MS, () => {
+      if (!this.closing) {
+        this.scheduleSlotAudit();
+        void this.runSlotAudit();
+      }
+    });
+  }
+
+  /** One slot-audit pass; `no_relay_list` is expected and silent. */
+  private async runSlotAudit(): Promise<void> {
+    try {
+      await this.auditKeyPackageSlot();
+    } catch (error) {
+      if (!(error instanceof MarmotError && error.kind === "no_relay_list")) {
+        this.pump.emitError(toMarmotError(error));
+      }
+    }
   }
 
   private guard(): void {
@@ -241,6 +274,41 @@ export class MarmotClient {
       throw new MarmotError("no_relay_list");
     }
     return this.op(async (engine) => engine.ensureKeyPackage(write));
+  }
+
+  /**
+   * Audit this device's `KeyPackage` slot for publications it did not make: fetches every
+   * kind-30443 for the slot from the account's NIP-65 write set and hands it to the engine, which
+   * outranks any foreign publication inside the skew window. `no_relay_list` when the lookup relays
+   * are missing or the list is empty.
+   */
+  async auditKeyPackageSlot(): Promise<KeyPackageStatusResult> {
+    this.guard();
+    const safe = (this.options.lookupRelays ?? []).filter((relay) =>
+      safeRelayUrl(relay, this.allowLoopback),
+    );
+    let write: string[] | undefined;
+    try {
+      write = await writeRelaysOf(
+        this.options.relays,
+        this.options.timer,
+        this.account,
+        safe,
+        this.allowLoopback,
+      );
+    } catch (error) {
+      throw toMarmotError(error);
+    }
+    if (write === undefined || write.length === 0) {
+      throw new MarmotError("no_relay_list");
+    }
+    const status = await this.keyPackageStatus();
+    const events = await fetchEvents(this.options.relays, this.options.timer, write, {
+      kinds: [KEY_PACKAGE_KIND],
+      authors: [this.account],
+      "#d": [status.slot],
+    });
+    return this.op(async (engine) => engine.auditKeyPackageSlot(events));
   }
 
   /**

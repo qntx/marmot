@@ -15,7 +15,7 @@ import { safeRelayUrl } from "../transport/url.ts";
 
 const RELAY_LIST_KIND = 10002;
 const DM_RELAY_LIST_KIND = 10050;
-const KEY_PACKAGE_KIND = 30443;
+export const KEY_PACKAGE_KIND = 30443;
 const DELETION_KIND = 5;
 
 /** Convert to the `@qntx/nostr` `Event` shape — only what its parsers consume. */

@@ -84,6 +84,11 @@ const TABLE: &[(&str, &str, Mapping)] = &[
     ),
     (
         "Session",
+        "audit_key_package_slot",
+        Request("audit_key_package_slot"),
+    ),
+    (
+        "Session",
         "key_package_status",
         Request("key_package_status"),
     ),

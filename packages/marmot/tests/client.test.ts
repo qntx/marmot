@@ -239,6 +239,7 @@ function scriptedBackend(script: Script): {
                         result: { type: "group", group: script.groups[0] },
                       };
                     case "ensure_key_package":
+                    case "audit_key_package_slot":
                     case "key_package_status":
                       return {
                         type: "ok",
@@ -845,6 +846,59 @@ describe("MarmotClient", () => {
     await expect(fixture.client.signOut()).rejects.toMatchObject({ kind: "no_relay_list" });
     expect(callsOf(fixture.script, "sign_out")).toHaveLength(0);
     await fixture.client.close();
+  });
+
+  /** The write-set NIP-65 list plus one slot publication for the audit. */
+  const seedSlot = async (network: ReturnType<typeof fakeRelay>): Promise<void> => {
+    const peer = network.port("peer");
+    const list = {
+      id: "12".repeat(32),
+      pubkey: ACCOUNT,
+      createdAt: 1000n,
+      kind: 10002,
+      tags: [["r", RELAY]],
+      content: "",
+      sig: "5".repeat(128),
+    };
+    const package_ = {
+      id: "13".repeat(32),
+      pubkey: ACCOUNT,
+      createdAt: 1000n,
+      kind: 30443,
+      tags: [["d", "11".repeat(32)]],
+      content: "",
+      sig: "5".repeat(128),
+    };
+    markVerified(list);
+    markVerified(package_);
+    await peer.publish(LOOKUP, list);
+    // The write set is normalized — `wss://r1.example/` is its store key.
+    await peer.publish(`${RELAY}/`, package_);
+  };
+
+  test("open runs the slot audit in the background", async () => {
+    const fixture = await open(freshScript(), undefined, undefined, [LOOKUP], seedSlot);
+    await settle(fixture.timer, 5000);
+    const calls = callsOf(fixture.script, "audit_key_package_slot");
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({
+      type: "audit_key_package_slot",
+      events: [{ id: "13".repeat(32) }],
+    });
+    await fixture.client.close();
+  });
+
+  test("the daily timer re-runs the slot audit; close clears it", async () => {
+    const fixture = await open(freshScript(), undefined, undefined, [LOOKUP], seedSlot);
+    await settle(fixture.timer, 5000);
+    expect(callsOf(fixture.script, "audit_key_package_slot")).toHaveLength(1);
+    await fixture.timer.advance(24 * 60 * 60 * 1000);
+    await settle(fixture.timer, 5000);
+    expect(callsOf(fixture.script, "audit_key_package_slot")).toHaveLength(2);
+    await fixture.client.close();
+    await fixture.timer.advance(48 * 60 * 60 * 1000);
+    await settle(fixture.timer, 5000);
+    expect(callsOf(fixture.script, "audit_key_package_slot")).toHaveLength(2);
   });
 
   test("lookupInvitees maps non-found answers to typed errors", async () => {

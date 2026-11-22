@@ -14,15 +14,16 @@ pub(crate) mod ser;
 mod types;
 
 pub use request::{
-    AckDurableRequest, AcknowledgeMessagesRequest, ConfirmRejoinRequest, CreateGroupRequest,
-    DeclineRejoinRequest, DisbandRequest, DiscardAttachmentRequest, EnableDisbandingRequest,
-    EnsureKeyPackageRequest, ForgetGroupRequest, GroupRequest, HistoryFetchedRequest,
-    IngestRequest, InviteRequest, LeaveRequest, NoArgs, OpenAttachmentRequest,
-    PublishInboxRelaysRequest, ReaddMemberRequest, RejoinOffersRequest, RemoveMembersRequest,
-    ReportPublishRequest, Request, SealAttachmentRequest, SelectKeyPackagesRequest,
-    SelfUpdateRequest, SendIntentRequest, SendMediaRequest, SendMessageRequest, SetAdminRequest,
-    SetGroupAvatarRequest, SetRetentionRequest, SignOutRequest, SignerReplyRequest,
-    SubmitProofRequest, UpdateAppComponentsRequest, UpdateGroupProfileRequest,
+    AckDurableRequest, AcknowledgeMessagesRequest, AuditKeyPackageSlotRequest,
+    ConfirmRejoinRequest, CreateGroupRequest, DeclineRejoinRequest, DisbandRequest,
+    DiscardAttachmentRequest, EnableDisbandingRequest, EnsureKeyPackageRequest, ForgetGroupRequest,
+    GroupRequest, HistoryFetchedRequest, IngestRequest, InviteRequest, LeaveRequest, NoArgs,
+    OpenAttachmentRequest, PublishInboxRelaysRequest, ReaddMemberRequest, RejoinOffersRequest,
+    RemoveMembersRequest, ReportPublishRequest, Request, SealAttachmentRequest,
+    SelectKeyPackagesRequest, SelfUpdateRequest, SendIntentRequest, SendMediaRequest,
+    SendMessageRequest, SetAdminRequest, SetGroupAvatarRequest, SetRetentionRequest,
+    SignOutRequest, SignerReplyRequest, SubmitProofRequest, UpdateAppComponentsRequest,
+    UpdateGroupProfileRequest,
 };
 pub use result::{
     AttachmentData, AwaitingDurabilityResult, GroupCreatedResult, GroupResult, GroupsResult,
@@ -48,6 +49,7 @@ pub const MAX_REQUEST_BYTES: usize = 64 * 1024 * 1024;
 pub const REQUEST_TYPES: &[&str] = &[
     "ack_durable",
     "acknowledge_messages",
+    "audit_key_package_slot",
     "awaiting_durability",
     "confirm_rejoin",
     "create_group",

@@ -87,7 +87,7 @@ function matchFilter(filter: RelayFilter, event: NostrEvent): boolean {
   if (filter.authors !== undefined && !filter.authors.includes(event.pubkey)) {
     return false;
   }
-  for (const name of ["#p", "#h", "#k"] as const) {
+  for (const name of ["#p", "#h", "#k", "#d"] as const) {
     const wanted = filter[name];
     if (wanted !== undefined) {
       const values = new Set(event.tags.filter((t) => t[0] === name.slice(1)).map((t) => t[1]));

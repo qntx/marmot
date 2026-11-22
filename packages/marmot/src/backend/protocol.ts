@@ -773,6 +773,7 @@ export type BridgeRequest =
   | { type: "take_outbound" }
   | { type: "report_publish"; id: string; results: RelayResult[] }
   | { type: "ensure_key_package"; writeRelays: string[] }
+  | { type: "audit_key_package_slot"; events: NostrEvent[] }
   | { type: "key_package_status" }
   | { type: "sign_out"; writeRelays: string[] }
   | { type: "publish_inbox_relays"; relays: string[] }
@@ -844,6 +845,7 @@ export type BridgeRequest =
 export const REQUEST_TYPES = [
   "ack_durable",
   "acknowledge_messages",
+  "audit_key_package_slot",
   "awaiting_durability",
   "confirm_rejoin",
   "create_group",

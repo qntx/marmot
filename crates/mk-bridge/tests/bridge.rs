@@ -132,6 +132,13 @@ async fn every_request_variant() {
         &a.call(Request::KeyPackageStatus(NoArgs {})).await,
     );
     mark!(
+        "audit_key_package_slot",
+        &a.call(Request::AuditKeyPackageSlot(AuditKeyPackageSlotRequest {
+            events: Vec::new(),
+        }))
+        .await,
+    );
+    mark!(
         "publish_inbox_relays",
         &a.call(Request::PublishInboxRelays(PublishInboxRelaysRequest {
             relays: vec![RELAY.to_owned()],

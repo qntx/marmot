@@ -16,20 +16,21 @@ use crate::clock::CellClock;
 use crate::error::{BridgeError, open_error, proof_error, session_error};
 use crate::host::{Host, QueueHost, lock};
 use crate::protocol::{
-    AcknowledgeMessagesRequest, AttachmentData, AwaitingDurabilityResult, CallEnvelope, Config,
-    ConfigProbe, ConfirmRejoinRequest, CreateGroupRequest, DeclineRejoinRequest, DisbandRequest,
-    DiscardAttachmentRequest, DrainResponse, EnableDisbandingRequest, EnsureKeyPackageRequest,
-    ForgetGroupRequest, GroupCreatedResult, GroupResult, GroupsResult, HistoryFetchedRequest,
-    InboxRelaysResult, IngestRequest, IngestedResult, InviteRequest, KeyPackagesResult,
-    LeaveRequest, MAX_REQUEST_BYTES, MediaAttachmentRef, MessageSentResult, OpResult,
-    OpenAttachmentRequest, OpenResponse, OutboundResult, PROTOCOL_VERSION,
-    PublishInboxRelaysRequest, PublishResolutionResult, REQUEST_TYPES, ReaddMemberRequest,
-    ReaddResult, ReadyResult, RejoinOffersRequest, RejoinOffersResult, RemoveMembersRequest,
-    ReportPublishRequest, Request, Response, SealAttachmentRequest, SealedAttachmentResult,
-    SelectKeyPackagesRequest, SelfUpdateRequest, SendIntentRequest, SendMediaRequest,
-    SendMessageRequest, SendOutcomeResult, SetAdminRequest, SetGroupAvatarRequest,
-    SetRetentionRequest, SignOutRequest, SignerReply, SignerRequest, SignerResult, TickedResult,
-    UpdateAppComponentsRequest, UpdateGroupProfileRequest, decode, encode, invalid, reason_label,
+    AcknowledgeMessagesRequest, AttachmentData, AuditKeyPackageSlotRequest,
+    AwaitingDurabilityResult, CallEnvelope, Config, ConfigProbe, ConfirmRejoinRequest,
+    CreateGroupRequest, DeclineRejoinRequest, DisbandRequest, DiscardAttachmentRequest,
+    DrainResponse, EnableDisbandingRequest, EnsureKeyPackageRequest, ForgetGroupRequest,
+    GroupCreatedResult, GroupResult, GroupsResult, HistoryFetchedRequest, InboxRelaysResult,
+    IngestRequest, IngestedResult, InviteRequest, KeyPackagesResult, LeaveRequest,
+    MAX_REQUEST_BYTES, MediaAttachmentRef, MessageSentResult, OpResult, OpenAttachmentRequest,
+    OpenResponse, OutboundResult, PROTOCOL_VERSION, PublishInboxRelaysRequest,
+    PublishResolutionResult, REQUEST_TYPES, ReaddMemberRequest, ReaddResult, ReadyResult,
+    RejoinOffersRequest, RejoinOffersResult, RemoveMembersRequest, ReportPublishRequest, Request,
+    Response, SealAttachmentRequest, SealedAttachmentResult, SelectKeyPackagesRequest,
+    SelfUpdateRequest, SendIntentRequest, SendMediaRequest, SendMessageRequest, SendOutcomeResult,
+    SetAdminRequest, SetGroupAvatarRequest, SetRetentionRequest, SignOutRequest, SignerReply,
+    SignerRequest, SignerResult, TickedResult, UpdateAppComponentsRequest,
+    UpdateGroupProfileRequest, decode, encode, invalid, reason_label,
 };
 use crate::rows::decode_rows;
 use crate::signer::{QueueSigner, SignerState};
@@ -347,6 +348,9 @@ impl<H: Host> Bridge<H> {
             Request::SignerReply(_) => Self::error_response(BridgeError::NoPendingSigner),
             Request::ReportPublish(args) => self.run(op_report_publish(args), Vec::new()),
             Request::EnsureKeyPackage(args) => self.run(op_ensure_key_package(args), Vec::new()),
+            Request::AuditKeyPackageSlot(args) => {
+                self.run(op_audit_key_package_slot(args), Vec::new())
+            }
             Request::KeyPackageStatus(_) => self.key_package_status(),
             Request::SignOut(args) => self.run(op_sign_out(args), Vec::new()),
             Request::PublishInboxRelays(args) => {
@@ -863,6 +867,23 @@ fn op_report_publish(args: ReportPublishRequest) -> impl FnOnce(Box<Session>) ->
                         resolution: resolution.into(),
                     })
                 }),
+            )
+        })
+    }
+}
+
+/// `audit_key_package_slot` as an operation future: the read-back slot
+/// scan, answered with the slot's standing.
+fn op_audit_key_package_slot(
+    args: AuditKeyPackageSlotRequest,
+) -> impl FnOnce(Box<Session>) -> OpFuture {
+    move |mut session| {
+        Box::pin(async move {
+            let events: Vec<core::Event> = args.events.into_iter().map(Into::into).collect();
+            let status = session.audit_key_package_slot(&events).await;
+            (
+                session,
+                status.map(|status| OpResult::KeyPackageStatus(status.into())),
             )
         })
     }

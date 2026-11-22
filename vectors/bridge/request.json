@@ -9,6 +9,25 @@
   ],
   "type": "acknowledge_messages"
  },
+ "audit_key_package_slot": {
+  "events": [
+   {
+    "content": "hello",
+    "created_at": "1700000000",
+    "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "kind": 30443,
+    "pubkey": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "sig": "55555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555",
+    "tags": [
+     [
+      "d",
+      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+     ]
+    ]
+   }
+  ],
+  "type": "audit_key_package_slot"
+ },
  "awaiting_durability": {
   "type": "awaiting_durability"
  },

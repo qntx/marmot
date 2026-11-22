@@ -1606,6 +1606,11 @@ export function decodeRequest(value: unknown, path = "request"): BridgeRequest {
         type,
         writeRelays: strList(field(o, "write_relays", path), `${path}.write_relays`),
       };
+    case "audit_key_package_slot":
+      return {
+        type,
+        events: arr(field(o, "events", path), `${path}.events`, decodeEvent),
+      };
     case "key_package_status":
       return { type };
     case "sign_out":
@@ -1787,6 +1792,10 @@ export function encodeRequest(request: BridgeRequest): Json {
     ensure_key_package: (request) => ({
       type: "ensure_key_package",
       write_relays: request.writeRelays,
+    }),
+    audit_key_package_slot: (request) => ({
+      type: "audit_key_package_slot",
+      events: request.events.map(encodeEvent),
     }),
     key_package_status: () => ({ type: "key_package_status" }),
     sign_out: (request) => ({ type: "sign_out", write_relays: request.writeRelays }),

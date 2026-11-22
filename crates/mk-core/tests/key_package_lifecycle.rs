@@ -742,4 +742,121 @@ mod lifecycle_tests {
             .expect("select");
         assert!(selected.is_empty(), "the slot is deleted");
     }
+
+    /// A kind-30443 event signed by `signer` — a publication of this
+    /// account's slot the device did not make.
+    async fn slot_event(
+        signer: &Arc<dyn AccountSigner>,
+        created_at: u64,
+        slot: &str,
+        kind: u16,
+    ) -> Event {
+        signer
+            .sign_event(UnsignedEvent {
+                pubkey: signer.account(),
+                created_at,
+                kind,
+                tags: vec![vec!["d".to_owned(), slot.to_owned()]],
+                content: String::new(),
+            })
+            .await
+            .expect("sign")
+    }
+
+    /// The slot audit restages an outranking replacement only for
+    /// foreign publications inside the skew window.
+    #[tokio::test(flavor = "current_thread")]
+    async fn audit_outranks_only_foreign_in_window() {
+        let relay = FakeRelay::new();
+        let mut a = open_member().await;
+        let own = publish_promoted(&mut a, &relay).await;
+        let slot = hex::encode(a.session.key_package_status().expect("status").slot);
+        let now = a.clock.now().unix_ms / 1_000;
+        let signer = Arc::clone(&a.signer);
+
+        // A foreign publication inside the window is outranked: the
+        // staged replacement's `created_at` is strictly newer.
+        let foreign = slot_event(&signer, now + 10, &slot, 30_443).await;
+        a.session
+            .audit_key_package_slot(&[own.event.clone(), foreign.clone()])
+            .await
+            .expect("audit");
+        let outbound = take(&mut a);
+        assert_eq!(outbound.len(), 1, "the audit stages one replacement");
+        assert!(
+            outbound[0].event.created_at > foreign.created_at,
+            "replacement postdates the foreign publication"
+        );
+        assert_eq!(d_tag(&outbound[0].event), slot);
+        let current = outbound[0].event.clone();
+        accept(&mut a, &relay, &outbound[0]).await;
+
+        // Own current publication alone is a no-op. (`own` is the
+        // superseded publication now — foreign by id — so it stays out.)
+        a.session
+            .audit_key_package_slot(&[current])
+            .await
+            .expect("audit own");
+        assert!(take(&mut a).is_empty(), "own publication is ignored");
+
+        // Wrong `d`, wrong author, bad signature, wrong kind: all ignored.
+        let other_signer: Arc<dyn AccountSigner> = Arc::new(LocalSigner::new());
+        let wrong_d = slot_event(&signer, now + 20, &"ff".repeat(32), 30_443).await;
+        let wrong_author = slot_event(&other_signer, now + 20, &slot, 30_443).await;
+        let mut bad_sig = slot_event(&signer, now + 20, &slot, 30_443).await;
+        bad_sig.sig[0] ^= 0xff;
+        let wrong_kind = slot_event(&signer, now + 20, &slot, 1).await;
+        a.session
+            .audit_key_package_slot(&[wrong_d, wrong_author, bad_sig, wrong_kind])
+            .await
+            .expect("audit ignored");
+        assert!(take(&mut a).is_empty(), "non-slot events are ignored");
+
+        // Beyond the skew window the foreign publication is ignored too.
+        let far = slot_event(&signer, now + 301, &slot, 30_443).await;
+        a.session
+            .audit_key_package_slot(&[far])
+            .await
+            .expect("audit far");
+        assert!(take(&mut a).is_empty(), "beyond-skew is ignored");
+
+        // A pending replacement already newer needs no second stage —
+        // a fresh member whose ensure-staged pending postdates the find.
+        let mut b = open_member().await;
+        b.session
+            .ensure_key_package(&[RELAY.to_owned()])
+            .await
+            .expect("ensure b");
+        let _ = take(&mut b);
+        assert!(b.session.key_package_status().expect("status").pending);
+        let b_slot = hex::encode(b.session.key_package_status().expect("status").slot);
+        let older = slot_event(&Arc::clone(&b.signer), now - 100, &b_slot, 30_443).await;
+        b.session
+            .audit_key_package_slot(&[older])
+            .await
+            .expect("audit pending");
+        assert!(
+            take(&mut b).is_empty(),
+            "a newer pending already outranks the finding"
+        );
+        assert_bundle_invariant(&b);
+    }
+
+    /// The audit refuses after the slot is withdrawn.
+    #[tokio::test(flavor = "current_thread")]
+    async fn audit_signed_out_slot_is_signed_out() {
+        let relay = FakeRelay::new();
+        let mut a = open_member().await;
+        publish_promoted(&mut a, &relay).await;
+        a.session
+            .sign_out(&[RELAY.to_owned()])
+            .await
+            .expect("sign_out");
+        let error = a
+            .session
+            .audit_key_package_slot(&[])
+            .await
+            .expect_err("audit after withdrawal");
+        assert!(matches!(error, SessionError::SignedOut));
+    }
 }

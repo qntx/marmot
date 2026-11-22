@@ -125,6 +125,76 @@ impl Session {
         self.key_package_status()
     }
 
+    /// Audit this account's `KeyPackage` slot against every kind-30443
+    /// publication the host found on its write relays (spec
+    /// "a publication the device did not make", SHOULD).
+    ///
+    /// Events that fail signature verification, are not kind 30443, come
+    /// from another account, address another `d` slot, or are this
+    /// device's own current/pending publications are ignored. Of the
+    /// rest, publications within the future-skew window are outrankable:
+    /// a replacement stages with a `created_at` strictly newer than the
+    /// newest outrankable one and every prior publication — unless a
+    /// pending replacement already postdates it. Publications beyond
+    /// the skew window are ignored; the spec's delete-by-id is a MAY
+    /// this build does not implement. The finding stays in memory — the
+    /// host re-reads the slot at open.
+    ///
+    /// # Errors
+    /// [`SessionError::SignedOut`] when the slot was withdrawn;
+    /// [`SessionError::Storage`] or engine failures otherwise.
+    pub async fn audit_key_package_slot(
+        &mut self,
+        found: &[crate::Event],
+    ) -> Result<KeyPackageStatus, SessionError> {
+        let mut lifecycle = self.lifecycle_or_seed()?;
+        if lifecycle.slot_withdrawn_at.is_some() {
+            return Err(SessionError::SignedOut);
+        }
+        let account = self.account();
+        let own_ids: HashSet<[u8; 32]> = lifecycle
+            .authored_event_id
+            .iter()
+            .chain(
+                lifecycle
+                    .pending_replacement
+                    .iter()
+                    .filter_map(|pending| pending.signed_event.as_ref())
+                    .map(|artifact| &artifact.id),
+            )
+            .filter_map(|id| <[u8; 32]>::try_from(id.as_slice()).ok())
+            .collect();
+        let now_secs = self.now_ms() / 1_000;
+        let newest_foreign = found
+            .iter()
+            .filter(|event| {
+                event.kind == key_package::KIND_KEY_PACKAGE
+                    && event.pubkey == account
+                    && event.verify().is_ok()
+                    && !own_ids.contains(&event.id.0)
+                    && event
+                        .tags
+                        .iter()
+                        .find(|tag| tag.first().map(String::as_str) == Some(key_package::D_TAG))
+                        .and_then(|tag| tag.get(1))
+                        .is_some_and(|slot| *slot == lifecycle.stable_slot_id)
+            })
+            .map(|event| event.created_at)
+            .filter(|created| *created < now_secs + KEY_PACKAGE_MAX_FUTURE_SKEW_SECS)
+            .max();
+        if let Some(newest) = newest_foreign {
+            let floor = newest.saturating_add(1);
+            let pending_newer = lifecycle
+                .pending_replacement
+                .as_ref()
+                .is_some_and(|pending| pending.authored_created_at.0 >= floor);
+            if !pending_newer && self.stage_replacement(&mut lifecycle, None, now_secs, floor)? {
+                self.sign_pending(&mut lifecycle, SignMode::Strict).await?;
+            }
+        }
+        self.key_package_status()
+    }
+
     /// This device's `KeyPackage` slot standing, re-read from the durable
     /// record on every call.
     ///
@@ -407,7 +477,7 @@ impl Session {
         self.retry_pending(&mut lifecycle, now_secs)?;
         // (g) Stage a due replacement, then sign it as at (e).
         if self.replacement_due(&lifecycle, now_secs)
-            && self.stage_replacement(&mut lifecycle, write_relays, now_secs)?
+            && self.stage_replacement(&mut lifecycle, write_relays, now_secs, 0)?
         {
             self.sign_pending(&mut lifecycle, signing).await?;
         }
@@ -767,13 +837,15 @@ impl Session {
 
     /// (g) Stage the due replacement through the engine's atomic
     /// stage+record op — the C10 boundary — with a `created_at` newer
-    /// than every publication the slot has seen. Returns `false` when
-    /// nothing should be staged this pass.
+    /// than every publication the slot has seen and `floor_secs` (the
+    /// slot audit's newest foreign publication + 1). Returns `false`
+    /// when nothing should be staged this pass.
     fn stage_replacement(
         &mut self,
         lifecycle: &mut KeyPackageLifecycleState,
         write_relays: Option<&[String]>,
         now_secs: u64,
+        floor_secs: u64,
     ) -> Result<bool, SessionError> {
         // The remembered write set first, else the given relays; when
         // neither is known, `tick` waits for the host's first
@@ -808,7 +880,7 @@ impl Session {
         .map(|previous| previous.0.saturating_add(1))
         .max()
         .unwrap_or(0);
-        let created_at = now_secs.max(base);
+        let created_at = now_secs.max(base).max(floor_secs);
         if created_at > now_secs.saturating_add(KEY_PACKAGE_MAX_FUTURE_SKEW_SECS) {
             lifecycle.phase = MaintenancePhase::ClockSkewBlocked;
             let provider = &self.provider;

@@ -46,6 +46,18 @@ pub struct ReportPublishRequest {
     pub results: Vec<RelayResult>,
 }
 
+/// Audit the account's `KeyPackage` slot for foreign publications.
+///
+/// `events` is every kind-30443 event the host read for this account's
+/// slot from its write relays; the session outranks any foreign
+/// publication inside the future-skew window.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuditKeyPackageSlotRequest {
+    /// The read-back slot publications, own and foreign alike.
+    pub events: Vec<Event>,
+}
+
 /// Ensure the account's `KeyPackage` slot carries a live publication.
 ///
 /// Stage/sign/queue a replacement when due, republish the remembered
@@ -423,6 +435,8 @@ pub enum Request {
     ReportPublish(ReportPublishRequest),
     /// Ensure the account `KeyPackage` slot's publication lifecycle.
     EnsureKeyPackage(EnsureKeyPackageRequest),
+    /// Audit the account `KeyPackage` slot for foreign publications.
+    AuditKeyPackageSlot(AuditKeyPackageSlotRequest),
     /// Read the account `KeyPackage` slot's lifecycle standing.
     KeyPackageStatus(NoArgs),
     /// Withdraw the `KeyPackage` slot and leave member groups.
