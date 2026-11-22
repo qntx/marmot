@@ -69,6 +69,8 @@ export const INGEST_BATCH_MAX = 256;
 export const MAX_PENDING_INBOUND: number = 4 * INGEST_BATCH_MAX;
 /** Inbound events whose wire encoding exceeds this are dropped before buffering. */
 export const MAX_INBOUND_EVENT_BYTES: number = 1024 * 1024;
+/** Commit ids tracked for post-confirmation refusal warnings before the oldest entry is evicted. */
+export const MAX_TRACKED_COMMITS = 256;
 /** Delay after the first buffered inbound event before a flush runs. */
 export const INGEST_DELAY_MS = 25;
 /** Delay before reconciling after a relay-initiated subscription close. */
@@ -115,6 +117,17 @@ type ActiveSub = {
 /** An event plus, per cursor key, the sub that delivered it pre-EOSE (`undefined` when live). */
 type Buffered = { event: NostrEvent; keys: Map<string, ActiveSub | undefined> };
 
+/** Drop the oldest insertion once a commit-bookkeeping collection exceeds `MAX_TRACKED_COMMITS`. */
+function capTracked<K, V>(entries: Map<K, V> | Set<K>): void {
+  if (entries.size <= MAX_TRACKED_COMMITS) {
+    return;
+  }
+  const oldest = entries.keys().next().value;
+  if (oldest !== undefined) {
+    entries.delete(oldest);
+  }
+}
+
 export class Pump {
   private readonly engine: Engine;
   private readonly relays: RelayPort;
@@ -148,7 +161,8 @@ export class Pump {
    * resolved `confirmed`; `earlyRefusals` holds the relays that reported `rejected` while the
    * commit was still `pending` — an `accepted` from the same relay on a later attempt reverses that
    * refusal. Kept in memory only: a restart between the confirmation and a later refusal loses the
-   * warning (MDK persists refusals until acknowledged; we surface them per occurrence).
+   * warning (MDK persists refusals until acknowledged; we surface them per occurrence). Each
+   * collection evicts its oldest entry past `MAX_TRACKED_COMMITS`; eviction loses only a warning.
    */
   private readonly confirmedCommits = new Set<string>();
   private readonly earlyRefusals = new Map<string, Set<string>>();
@@ -478,9 +492,11 @@ export class Pump {
         set.add(relay);
       }
       this.earlyRefusals.set(item.id, set);
+      capTracked(this.earlyRefusals);
     }
     if (resolution === "confirmed") {
       this.confirmedCommits.add(item.id);
+      capTracked(this.confirmedCommits);
       this.earlyRefusals.delete(item.id);
     }
     if (resolution === "rolled_back" || resolution === "complete") {

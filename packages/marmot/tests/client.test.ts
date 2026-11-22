@@ -28,7 +28,7 @@ import type {
 import { utf8Decode, utf8Encode } from "../src/backend/utf8.ts";
 import { MarmotClient } from "../src/client/client.ts";
 import type { MarmotError } from "../src/client/errors.ts";
-import { COMMIT_SIZE_FLOOR_BYTES } from "../src/client/pump.ts";
+import { COMMIT_SIZE_FLOOR_BYTES, MAX_TRACKED_COMMITS } from "../src/client/pump.ts";
 import { decodeClientState, encodeClientState } from "../src/client/state.ts";
 import { manualClock } from "../src/testing/clock.ts";
 import { memoryCursorStore } from "../src/testing/cursors.ts";
@@ -923,6 +923,51 @@ describe("MarmotClient", () => {
     await settle(fixture.timer, 0);
     expect(callsOf(script, "report_publish")).toHaveLength(1);
     expect(errors.map((e) => e.kind)).not.toContain("commit_refused");
+    await fixture.client.close();
+  });
+
+  test("commit bookkeeping evicts the oldest entry past MAX_TRACKED_COMMITS", async () => {
+    const script = freshScript();
+    const commitEvent = event({ kind: 445, tags: [["h", ROUTE]] });
+    const evicted: Outbound = {
+      id: `01${"0".repeat(62)}`,
+      event: commitEvent,
+      relays: [RELAY],
+      purpose: "commit",
+    };
+    const tracked: Outbound = {
+      id: `02${"0".repeat(62)}`,
+      event: commitEvent,
+      relays: [RELAY],
+      purpose: "commit",
+    };
+    const fillers: Outbound[] = Array.from({ length: MAX_TRACKED_COMMITS - 1 }, (_, i) => ({
+      id: `f0${i.toString(16).padStart(62, "0")}`,
+      event: commitEvent,
+      relays: [RELAY],
+      purpose: "commit",
+    }));
+    // 257 commits confirm in order: the first falls out of the 256-entry window.
+    script.outbound = [evicted, ...fillers, tracked];
+    script.resolutions.push(...script.outbound.map((): PublishResolution => "confirmed"));
+    const fixture = await open(script, encodeClientState({ cursors: {}, inbox: [RELAY] }));
+    const errors: MarmotError[] = [];
+    fixture.client.onError((error) => {
+      errors.push(error);
+    });
+    await settle(fixture.timer, 0);
+    expect(callsOf(script, "report_publish")).toHaveLength(MAX_TRACKED_COMMITS + 1);
+
+    // A refusal against the evicted commit warns nothing; against a tracked one it warns.
+    fixture.network.mode(RELAY, "reject");
+    script.outbound.push(evicted);
+    await fixture.client.groups();
+    await settle(fixture.timer, 0);
+    expect(errors.map((e) => e.kind)).not.toContain("commit_refused");
+    script.outbound.push(tracked);
+    await fixture.client.groups();
+    await settle(fixture.timer, 0);
+    expect(errors.map((e) => e.kind)).toContain("commit_refused");
     await fixture.client.close();
   });
 
