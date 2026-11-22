@@ -90,6 +90,15 @@
 //!   either keeps the whole live slot or the fully withdrawn one; a cut
 //!   after the batch still owes the same signed kind-5 from the durable
 //!   outbound row.
+//! - 15 self-update jitter: the `Tick` entering `Jitter` persists
+//!   `not_before` — a cut either side of that batch reopens to the same
+//!   deadline; the sampled jitter is never resampled.
+//! - 16 self-update published-not-confirmed: cuts after the self-update
+//!   fanout's publish batches but before the confirm is observed reopen
+//!   to the open `PendingPublication` obligation; the identical durable
+//!   commit confirms and the obligation completes exactly once —
+//!   authored-event equality pins that no second self-update Commit was
+//!   authored.
 //!
 //! mdk#3524 (fixed by mdk#3531, v0.18.0): at the leaving-flow cuts where
 //! the step-down's staging is durable but its fanout is not, the reopened
@@ -182,6 +191,11 @@ mod crash {
         /// `sign_out(write_relays)` — one atomic withdrawal; `Flush`
         /// publishes the kind-5.
         SignOut(usize),
+        /// `history_fetched(group)` — records the post-join fetch's EOSE.
+        HistoryFetched(usize),
+        /// Advance the injected clock by `ms` — no session call, so it
+        /// emits no cuttable batch.
+        Advance(usize, u64),
         /// `self_update()`.
         SelfUpdate(usize),
         /// `update_group_profile(name, description)`.
@@ -585,6 +599,8 @@ mod crash {
                 | Step::Remove(m, ..)
                 | Step::Leave(m)
                 | Step::SignOut(m)
+                | Step::HistoryFetched(m)
+                | Step::Advance(m, _)
                 | Step::SelfUpdate(m)
                 | Step::UpdateProfile(m, ..)
                 | Step::Send(m, ..)
@@ -718,6 +734,20 @@ mod crash {
                         .expect("sign_out");
                     self.drain(m);
                     self.probe(m);
+                }
+                Step::HistoryFetched(m) => {
+                    let Some(gid) = self.gid_for(m) else {
+                        return;
+                    };
+                    self.world.members[m]
+                        .session
+                        .history_fetched(&gid)
+                        .expect("history_fetched");
+                    self.drain(m);
+                    self.probe(m);
+                }
+                Step::Advance(m, ms) => {
+                    self.world.members[m].clock.advance(ms);
                 }
                 Step::SelfUpdate(m) => {
                     let Some(gid) = self.gid_for(m) else {
@@ -1246,6 +1276,13 @@ mod crash {
     /// withdrawn one, and a cut after the batch still owes the same
     /// signed kind-5. The `key_package` projection `(current, pending,
     /// retained)` and the bundle count pin both sides.
+    /// Self-update obligation cuts (C15/C16): the `Tick` entering `Jitter`
+    /// persists `not_before` — a cut either side of that batch reopens to
+    /// the same deadline (never resampled). Cuts after the self-update's
+    /// fanout publish but before its confirm reopen to the open
+    /// `PendingPublication` obligation; the identical durable commit
+    /// confirms and the obligation completes exactly once — authored-event
+    /// equality pins that no second self-update Commit was authored.
     #[tokio::test(flavor = "current_thread")]
     async fn restart_boundaries_sign_out() {
         const FLOW: &[Step] = &[
@@ -1255,6 +1292,39 @@ mod crash {
             Step::Flush(0),
         ];
         matrix(FLOW, 1, 0, "sign-out").await;
+    }
+
+    /// Post-join self-update cuts (C15/C16): the joiner's obligation
+    /// walks `CatchUp` → `Quiet` → `Jitter` (`Advance` past the quiet
+    /// window; the post-join sampled jitter is bounded by 30 s, so
+    /// `Advance(31_000)` always reaches `not_before`) → gate →
+    /// `PendingPublication` → publish → confirm → `Complete`. Both cut
+    /// variants at every batch.
+    #[tokio::test(flavor = "current_thread")]
+    async fn restart_boundaries_self_update() {
+        const FLOW: &[Step] = &[
+            Step::KeyPackage(0),
+            Step::Flush(0),
+            Step::InboxRelays(0),
+            Step::Flush(0),
+            Step::KeyPackage(1),
+            Step::Flush(1),
+            Step::InboxRelays(1),
+            Step::Flush(1),
+            Step::Create(0, "crash-self-update", &[1], &[]),
+            Step::Flush(0),
+            Step::Deliver(1),
+            Step::HistoryFetched(1),
+            Step::Advance(1, 61_000),
+            Step::Tick(1),
+            Step::Advance(1, 31_000),
+            Step::Tick(1),
+            Step::Flush(1),
+            Step::Deliver(1),
+            Step::Tick(1),
+            Step::Flush(1),
+        ];
+        matrix(FLOW, 2, 0, "self-update").await;
     }
 
     /// Joiner-side cuts over the same flow — the multi-part apply of an

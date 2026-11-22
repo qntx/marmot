@@ -59,6 +59,7 @@ mod mls;
 mod outbox;
 mod pacing;
 mod provider;
+mod self_update;
 mod semantics;
 mod ser;
 mod session;

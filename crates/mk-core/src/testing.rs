@@ -566,6 +566,57 @@ pub fn resolve_modifier<S: std::hash::BuildHasher>(
     }
 }
 
+/// The group's `cgka_maintenance` singleton rows in `rows`:
+/// `GroupMaintenanceState` plus every `MaintenanceObligation` and
+/// `DurableGroupEvolution`, whatever the driver persisted.
+///
+/// Returns `(group_maintenance, obligations, evolutions)`;
+/// `group_maintenance` is `None` when the row is absent.
+#[must_use]
+pub fn maintenance_rows(
+    rows: &[(Vec<u8>, Vec<u8>)],
+) -> (
+    Vec<cgka_traits::maintenance::GroupMaintenanceState>,
+    Vec<cgka_traits::maintenance::MaintenanceObligation>,
+    Vec<cgka_traits::maintenance::DurableGroupEvolution>,
+) {
+    let mut maintenance = Vec::new();
+    let mut obligations = Vec::new();
+    let mut evolutions = Vec::new();
+    for (key, value) in rows {
+        if key.first().copied() != Some(Table::Maintenance as u8) {
+            continue;
+        }
+        match keys::segments(key).and_then(|segments| segments.first().copied()) {
+            Some(b"gm") => {
+                if let Ok(record) =
+                    ser::de::<cgka_traits::maintenance::GroupMaintenanceState>(value)
+                {
+                    maintenance.push(record);
+                }
+            }
+            Some(b"obl") => {
+                if let Ok((_, record)) = KvStorageProvider::read_ordered::<
+                    cgka_traits::maintenance::MaintenanceObligation,
+                >(value)
+                {
+                    obligations.push(record);
+                }
+            }
+            Some(b"evo") => {
+                if let Ok((_, record)) = KvStorageProvider::read_ordered::<
+                    cgka_traits::maintenance::DurableGroupEvolution,
+                >(value)
+                {
+                    evolutions.push(record);
+                }
+            }
+            _ => {}
+        }
+    }
+    (maintenance, obligations, evolutions)
+}
+
 /// Stored `KeyPackage` private-material bundles in `rows` — the set the
 /// lifecycle's bundle-count invariant covers (`current` + `pending` +
 /// `retained`).

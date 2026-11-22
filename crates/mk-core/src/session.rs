@@ -82,7 +82,8 @@ use cgka_traits::transport_adapter::{
     TransportEndpointFailureKind, TransportPublishRequest, TransportPublishTarget,
 };
 use cgka_traits::{
-    CgkaEngine, GroupId as EngineGroupId, MemberId, MessageId, TransportEnvelope, TransportMessage,
+    CgkaEngine, GroupId as EngineGroupId, MemberId, MessageId, Timestamp, TransportEnvelope,
+    TransportMessage,
 };
 use sha2::Digest as _;
 use thiserror::Error;
@@ -2893,6 +2894,7 @@ impl Session {
     pub async fn ingest(&mut self, event: &Event) -> Result<InputReport, SessionError> {
         let outcome = self.ingest_verified(event).await?;
         self.drive().await?;
+        self.note_valid_state_bearing_inputs()?;
         Ok(InputReport {
             event: event.id,
             outcome,
@@ -2936,6 +2938,7 @@ impl Session {
             });
         }
         self.drive().await?;
+        self.note_valid_state_bearing_inputs()?;
         Ok(reports)
     }
 
@@ -3128,6 +3131,11 @@ impl Session {
         if let Some(due_ms) = self.drive_key_package(None, SignMode::Swallow).await? {
             fold(Some(due_ms.saturating_sub(self.now_ms())), &mut next);
         }
+        // D4: post-join and periodic self-update obligations; its answer
+        // is absolute like the lifecycle's.
+        if let Some(due_ms) = self.drive_self_update().await? {
+            fold(Some(due_ms.saturating_sub(self.now_ms())), &mut next);
+        }
         // Held modifiers past their window resolve finally and expired
         // index rows sweep (bounded), before `drive`: the produced events
         // surface on the next `drain_events` and the earliest hold/sweep
@@ -3175,19 +3183,39 @@ impl Session {
             .filter_map(|item| item.drop_pending.clone())
             .collect();
         let store = self.provider.store().clone();
-        let mut out = store
-            .transact(|| -> Result<Vec<SessionEvent>, StorageError> {
-                self.persist_media_secret_effects(&mapped)?;
-                self.provider.delete_pending_application_events(&dropped)?;
-                let mut out = Vec::new();
-                for item in mapped {
-                    self.process_mapped(item, now_ms, &mut out)?;
-                }
-                Ok(out)
-            })
-            .map_err(SessionError::Storage)?;
+        let mut out = store.transact(|| -> Result<Vec<SessionEvent>, SessionError> {
+            self.persist_media_secret_effects(&mapped)
+                .map_err(SessionError::Storage)?;
+            self.provider
+                .delete_pending_application_events(&dropped)
+                .map_err(SessionError::Storage)?;
+            self.process_mapped_events(mapped, now_ms)
+        })?;
         out.extend(std::mem::take(&mut self.tick_events));
         out.extend(std::mem::take(&mut self.resolutions));
+        Ok(out)
+    }
+
+    /// Apply every mapped engine event inside the caller's storage unit,
+    /// then reset or complete open self-update obligations for each
+    /// `EpochChanged` (D4).
+    fn process_mapped_events(
+        &mut self,
+        mapped: Vec<crate::events::MappedEvent>,
+        now_ms: u64,
+    ) -> Result<Vec<SessionEvent>, SessionError> {
+        let mut out = Vec::new();
+        let mut epoch_groups = Vec::new();
+        for item in mapped {
+            if let SessionEvent::EpochChanged { group, .. } = &item.event {
+                epoch_groups.push(group.clone());
+            }
+            self.process_mapped(item, now_ms, &mut out)
+                .map_err(SessionError::Storage)?;
+        }
+        for group in epoch_groups {
+            self.note_epoch_changed(&engine_gid(&group), Timestamp(now_ms / 1_000), &mut out)?;
+        }
         Ok(out)
     }
 
