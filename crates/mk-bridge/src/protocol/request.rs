@@ -46,12 +46,16 @@ pub struct ReportPublishRequest {
     pub results: Vec<RelayResult>,
 }
 
-/// Build, sign and stage the account's kind-30443 `KeyPackage`.
+/// Ensure the account's `KeyPackage` slot carries a live publication.
+///
+/// Stage/sign/queue a replacement when due, republish the remembered
+/// signed event to relays the write set gained, promote an acknowledged
+/// pending.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct PublishKeyPackageRequest {
-    /// The relays to publish to.
-    pub relays: Vec<String>,
+pub struct EnsureKeyPackageRequest {
+    /// The account's NIP-65 write relay set.
+    pub write_relays: Vec<String>,
 }
 
 /// Build, sign and stage the account's kind-10050 inbox relay list.
@@ -348,8 +352,10 @@ pub enum Request {
     TakeOutbound(NoArgs),
     /// Report publish verdicts for one outbound item.
     ReportPublish(ReportPublishRequest),
-    /// Stage the account `KeyPackage`.
-    PublishKeyPackage(PublishKeyPackageRequest),
+    /// Ensure the account `KeyPackage` slot's publication lifecycle.
+    EnsureKeyPackage(EnsureKeyPackageRequest),
+    /// Read the account `KeyPackage` slot's lifecycle standing.
+    KeyPackageStatus(NoArgs),
     /// Stage the account inbox relay list.
     PublishInboxRelays(PublishInboxRelaysRequest),
     /// Create a group.

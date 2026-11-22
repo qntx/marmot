@@ -565,3 +565,17 @@ pub fn resolve_modifier<S: std::hash::BuildHasher>(
         Resolution::Drop(_) => FuzzResolution::Drop,
     }
 }
+
+/// Stored `KeyPackage` private-material bundles in `rows` — the set the
+/// lifecycle's bundle-count invariant covers (`current` + `pending` +
+/// `retained`).
+#[must_use]
+pub fn key_package_bundle_count(rows: &[(Vec<u8>, Vec<u8>)]) -> usize {
+    rows.iter()
+        .filter(|(key, _)| {
+            key.first().copied() == Some(Table::OpenMlsValue as u8)
+                && keys::segments(key).and_then(|segments| segments.first().copied())
+                    == Some(crate::mls::KEY_PACKAGE_LABEL_BYTES)
+        })
+        .count()
+}

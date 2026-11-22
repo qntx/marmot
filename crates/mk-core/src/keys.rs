@@ -142,7 +142,10 @@ pub(crate) const META_PENDING_HIGH_WATER: &[u8] = b"pending-ref-high-water";
 /// also adds stored-payload variants 14/15 (Welcomes carrying
 /// `key_package_event_id`) an older build could not decode — another reason
 /// a store it writes must refuse to open.
-pub(crate) const SCHEMA_VERSION: u32 = 6;
+/// v7: the `key-package-slot` meta row is dropped — the slot lives in the
+/// `KeyPackageLifecycleState` record — and `SessionPublication.purpose`
+/// gains `key_package_republish`.
+pub(crate) const SCHEMA_VERSION: u32 = 7;
 
 /// Whether `key` names a row the `OpenMLS` store owns — the write set the
 /// engine's write generation counts (provider.rs `mls_write_generation`).

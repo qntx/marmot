@@ -665,6 +665,10 @@ pub enum SessionEvent {
         /// The group.
         group: GroupId,
     },
+    /// A pending `KeyPackage` replacement was promoted after a relay
+    /// acknowledgement (D3); the previous current is retained for its
+    /// grace period.
+    KeyPackageRotated,
     /// An outbound obligation reached a resolution checkpoint.
     PublishResolved {
         /// The outbound item.

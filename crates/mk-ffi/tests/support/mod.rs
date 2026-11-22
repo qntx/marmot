@@ -446,8 +446,8 @@ pub trait SessionDriver {
 
     /// Publish the account's `KeyPackage` and inbox relay list.
     fn publish_identity(&mut self, relay: &mut FakeRelay) {
-        let response = self.call(Request::PublishKeyPackage(PublishKeyPackageRequest {
-            relays: vec![RELAY.to_owned()],
+        let response = self.call(Request::EnsureKeyPackage(EnsureKeyPackageRequest {
+            write_relays: vec![RELAY.to_owned()],
         }));
         assert!(matches!(response, Response::Ok { .. }), "key_package");
         self.publish(relay);

@@ -45,7 +45,9 @@ use mk_core::key_package::{
     MAX_KEY_PACKAGES_PER_ACCOUNT, select_key_packages,
 };
 use mk_core::testing::LocalSigner;
-use mk_core::{AccountSigner, CreateGroup, Event, UnsignedEvent};
+use mk_core::{
+    AccountSigner, CreateGroup, Event, OutboundId, RelayResult, RelayStatus, UnsignedEvent,
+};
 use support::*;
 
 const RELAY: &str = "wss://r.example";
@@ -75,9 +77,9 @@ async fn device_package(signer: &Arc<LocalSigner>) -> (Member, Event) {
     let mut member = open_member_with(Arc::<LocalSigner>::clone(signer)).await;
     member
         .session
-        .publish_key_package(&[RELAY.to_owned()])
+        .ensure_key_package(&[RELAY.to_owned()])
         .await
-        .expect("publish_key_package");
+        .expect("ensure_key_package");
     if let Some(seq) = member.session.awaiting_durability() {
         member.session.acknowledge_durable(seq);
     }
@@ -273,15 +275,27 @@ async fn deletion_by_event_id() {
 #[tokio::test]
 async fn same_leaf_key_collapses() {
     let signer = Arc::new(LocalSigner::new());
-    let (member, first) = device_package(&signer).await;
+    let (mut member, first) = device_package(&signer).await;
     // A second publication of the same device: same slot, same leaf
-    // signature key, new `KeyPackageRef`.
-    let mut member = member;
+    // signature key, new `KeyPackageRef`. The first promotes on its
+    // relay ack; a refresh window later `ensure` stages the replacement.
     member
         .session
-        .publish_key_package(&[RELAY.to_owned()])
+        .report_publish(
+            &OutboundId(first.id.0),
+            &[RelayResult {
+                relay: RELAY.to_owned(),
+                status: RelayStatus::Accepted,
+            }],
+        )
         .await
-        .expect("publish_key_package");
+        .expect("report_publish");
+    member.clock.advance((7 * DAY + 1) * 1_000);
+    member
+        .session
+        .ensure_key_package(&[RELAY.to_owned()])
+        .await
+        .expect("ensure_key_package");
     if let Some(seq) = member.session.awaiting_durability() {
         member.session.acknowledge_durable(seq);
     }

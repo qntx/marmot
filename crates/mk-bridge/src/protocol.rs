@@ -15,19 +15,19 @@ mod types;
 
 pub use request::{
     AckDurableRequest, AcknowledgeMessagesRequest, CreateGroupRequest, DisbandRequest,
-    DiscardAttachmentRequest, EnableDisbandingRequest, ForgetGroupRequest, GroupRequest,
-    IngestRequest, InviteRequest, LeaveRequest, NoArgs, OpenAttachmentRequest,
-    PublishInboxRelaysRequest, PublishKeyPackageRequest, RemoveMembersRequest,
-    ReportPublishRequest, Request, SealAttachmentRequest, SelectKeyPackagesRequest,
-    SelfUpdateRequest, SendIntentRequest, SendMediaRequest, SendMessageRequest, SetAdminRequest,
-    SetGroupAvatarRequest, SetRetentionRequest, SignerReplyRequest, SubmitProofRequest,
-    UpdateAppComponentsRequest, UpdateGroupProfileRequest,
+    DiscardAttachmentRequest, EnableDisbandingRequest, EnsureKeyPackageRequest, ForgetGroupRequest,
+    GroupRequest, IngestRequest, InviteRequest, LeaveRequest, NoArgs, OpenAttachmentRequest,
+    PublishInboxRelaysRequest, RemoveMembersRequest, ReportPublishRequest, Request,
+    SealAttachmentRequest, SelectKeyPackagesRequest, SelfUpdateRequest, SendIntentRequest,
+    SendMediaRequest, SendMessageRequest, SetAdminRequest, SetGroupAvatarRequest,
+    SetRetentionRequest, SignerReplyRequest, SubmitProofRequest, UpdateAppComponentsRequest,
+    UpdateGroupProfileRequest,
 };
 pub use result::{
     AttachmentData, AwaitingDurabilityResult, GroupCreatedResult, GroupResult, GroupsResult,
-    InboxRelaysResult, IngestedResult, KeyPackageResult, KeyPackagesResult, MessageSentResult,
-    OpResult, OutboundResult, PublishResolutionResult, ReadyResult, SealedAttachmentResult,
-    SendOutcomeResult, TickedResult,
+    InboxRelaysResult, IngestedResult, KeyPackageStatusResult, KeyPackagesResult,
+    MessageSentResult, OpResult, OutboundResult, PublishResolutionResult, ReadyResult,
+    SealedAttachmentResult, SendOutcomeResult, TickedResult,
 };
 pub use types::*;
 
@@ -52,15 +52,16 @@ pub const REQUEST_TYPES: &[&str] = &[
     "disband",
     "discard_attachment",
     "enable_disbanding",
+    "ensure_key_package",
     "forget_group",
     "group",
     "groups",
     "ingest",
     "invite",
+    "key_package_status",
     "leave",
     "open_attachment",
     "publish_inbox_relays",
-    "publish_key_package",
     "remove_members",
     "report_publish",
     "seal_attachment",

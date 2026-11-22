@@ -1524,6 +1524,8 @@ pub enum SessionEvent {
         /// Why it was dropped.
         reason: DropReason,
     },
+    /// The account `KeyPackage` slot rotated to a new publication.
+    KeyPackageRotated,
     /// An `mk-core` session event this wire version does not know.
     Unmapped,
 }
@@ -1666,13 +1668,14 @@ impl SessionEvent {
                 group: group.0,
                 reason: reason.into(),
             },
+            core::SessionEvent::KeyPackageRotated => Self::KeyPackageRotated,
             // `SessionEvent` is `#[non_exhaustive]`.
             _ => Self::Unmapped,
         }
     }
 }
 
-/// What `publish_key_package` returns.
+/// A published `KeyPackage`'s identity, as reported by `key_package_status`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct KeyPackageInfo {

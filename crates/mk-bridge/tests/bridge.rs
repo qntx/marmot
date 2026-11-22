@@ -121,11 +121,15 @@ async fn every_request_variant() {
     );
     b.open().await;
     mark!(
-        "publish_key_package",
-        &a.call(Request::PublishKeyPackage(PublishKeyPackageRequest {
-            relays: vec![RELAY.to_owned()],
+        "ensure_key_package",
+        &a.call(Request::EnsureKeyPackage(EnsureKeyPackageRequest {
+            write_relays: vec![RELAY.to_owned()],
         }))
         .await,
+    );
+    mark!(
+        "key_package_status",
+        &a.call(Request::KeyPackageStatus(NoArgs {})).await,
     );
     mark!(
         "publish_inbox_relays",
@@ -785,8 +789,11 @@ async fn durability_gate() {
         .last()
         .map(|b| b.seq.get())
         .unwrap_or(0);
-    let response = a.call_once(Request::PublishKeyPackage(PublishKeyPackageRequest {
-        relays: vec![RELAY.to_owned()],
+    // Past the weekly refresh the slot wants a replacement: the ensure
+    // suspends on the signer like the publish request it replaced.
+    a.advance(8 * 86_400_000);
+    let response = a.call_once(Request::EnsureKeyPackage(EnsureKeyPackageRequest {
+        write_relays: vec![RELAY.to_owned()],
     }));
     let Response::SignerPending { requests } = &response else {
         panic!("key package signs: {response:?}");
@@ -867,11 +874,11 @@ async fn signer_refusal() {
     ] {
         let mut a = Member::new();
         a.open().await;
-        let response = a.call_once(Request::PublishKeyPackage(PublishKeyPackageRequest {
-            relays: vec![RELAY.to_owned()],
+        let response = a.call_once(Request::EnsureKeyPackage(EnsureKeyPackageRequest {
+            write_relays: vec![RELAY.to_owned()],
         }));
         let Response::SignerPending { requests } = response else {
-            panic!("publish_key_package suspends: {response:?}")
+            panic!("ensure_key_package suspends: {response:?}")
         };
         let replies = requests
             .iter()
@@ -1327,12 +1334,12 @@ async fn protocol_errors() {
     assert_eq!(error_kind(&response), "invalid_request");
 
     // Busy: suspend on a signer op, then any other request answers busy.
-    let response = busy.call_once(Request::PublishKeyPackage(PublishKeyPackageRequest {
-        relays: vec![RELAY.to_owned()],
+    let response = busy.call_once(Request::EnsureKeyPackage(EnsureKeyPackageRequest {
+        write_relays: vec![RELAY.to_owned()],
     }));
     assert!(
         matches!(response, Response::SignerPending { .. }),
-        "publish_key_package suspends"
+        "ensure_key_package suspends"
     );
     let response = busy.call_once(Request::Groups(NoArgs {}));
     assert_eq!(error_kind(&response), "busy");

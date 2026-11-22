@@ -18,14 +18,14 @@ use crate::host::{Host, QueueHost, lock};
 use crate::protocol::{
     AcknowledgeMessagesRequest, AttachmentData, AwaitingDurabilityResult, CallEnvelope, Config,
     ConfigProbe, CreateGroupRequest, DisbandRequest, DiscardAttachmentRequest, DrainResponse,
-    EnableDisbandingRequest, ForgetGroupRequest, GroupCreatedResult, GroupResult, GroupsResult,
-    InboxRelaysResult, IngestRequest, IngestedResult, InviteRequest, KeyPackageResult,
+    EnableDisbandingRequest, EnsureKeyPackageRequest, ForgetGroupRequest, GroupCreatedResult,
+    GroupResult, GroupsResult, InboxRelaysResult, IngestRequest, IngestedResult, InviteRequest,
     KeyPackagesResult, LeaveRequest, MAX_REQUEST_BYTES, MediaAttachmentRef, MessageSentResult,
     OpResult, OpenAttachmentRequest, OpenResponse, OutboundResult, PROTOCOL_VERSION,
-    PublishInboxRelaysRequest, PublishKeyPackageRequest, PublishResolutionResult, REQUEST_TYPES,
-    ReadyResult, RemoveMembersRequest, ReportPublishRequest, Request, Response,
-    SealAttachmentRequest, SealedAttachmentResult, SelectKeyPackagesRequest, SelfUpdateRequest,
-    SendIntentRequest, SendMediaRequest, SendMessageRequest, SendOutcomeResult, SetAdminRequest,
+    PublishInboxRelaysRequest, PublishResolutionResult, REQUEST_TYPES, ReadyResult,
+    RemoveMembersRequest, ReportPublishRequest, Request, Response, SealAttachmentRequest,
+    SealedAttachmentResult, SelectKeyPackagesRequest, SelfUpdateRequest, SendIntentRequest,
+    SendMediaRequest, SendMessageRequest, SendOutcomeResult, SetAdminRequest,
     SetGroupAvatarRequest, SetRetentionRequest, SignerReply, SignerRequest, SignerResult,
     TickedResult, UpdateAppComponentsRequest, UpdateGroupProfileRequest, decode, encode, invalid,
     reason_label,
@@ -345,7 +345,8 @@ impl<H: Host> Bridge<H> {
             Request::OpenAttachment(args) => self.open_attachment(args),
             Request::SignerReply(_) => Self::error_response(BridgeError::NoPendingSigner),
             Request::ReportPublish(args) => self.run(op_report_publish(args), Vec::new()),
-            Request::PublishKeyPackage(args) => self.run(op_publish_key_package(args), Vec::new()),
+            Request::EnsureKeyPackage(args) => self.run(op_ensure_key_package(args), Vec::new()),
+            Request::KeyPackageStatus(_) => self.key_package_status(),
             Request::PublishInboxRelays(args) => {
                 self.run(op_publish_inbox_relays(args), Vec::new())
             }
@@ -548,6 +549,16 @@ impl<H: Host> Bridge<H> {
                     .map(Into::into)
                     .collect(),
             }))
+        })
+    }
+
+    /// `key_package_status`: the account `KeyPackage` slot's lifecycle
+    /// standing, read-only.
+    fn key_package_status(&mut self) -> Response {
+        self.sync_op(|session| {
+            Ok(OpResult::KeyPackageStatus(
+                session.key_package_status()?.into(),
+            ))
         })
     }
 
@@ -818,21 +829,15 @@ fn op_report_publish(args: ReportPublishRequest) -> impl FnOnce(Box<Session>) ->
     }
 }
 
-/// `publish_key_package` as an operation future.
-fn op_publish_key_package(args: PublishKeyPackageRequest) -> impl FnOnce(Box<Session>) -> OpFuture {
+/// `ensure_key_package` as an operation future: one lifecycle pass over
+/// the host's NIP-65 write set, answered with the slot's standing.
+fn op_ensure_key_package(args: EnsureKeyPackageRequest) -> impl FnOnce(Box<Session>) -> OpFuture {
     move |mut session| {
         Box::pin(async move {
-            let info = session.publish_key_package(&args.relays).await;
+            let status = session.ensure_key_package(&args.write_relays).await;
             (
                 session,
-                info.map(|info| {
-                    OpResult::KeyPackage(KeyPackageResult {
-                        key_package: info.key_package,
-                        key_package_ref: info.key_package_ref,
-                        event_id: info.event_id.0,
-                        account: info.account.0,
-                    })
-                }),
+                status.map(|status| OpResult::KeyPackageStatus(status.into())),
             )
         })
     }

@@ -62,6 +62,12 @@
     "group": "dead",
     "type": "enable_disbanding"
   },
+  "ensure_key_package": {
+    "type": "ensure_key_package",
+    "write_relays": [
+      "wss://relay.example"
+    ]
+  },
   "forget_group": {
     "group": "dead",
     "type": "forget_group"
@@ -117,6 +123,9 @@
     ],
     "type": "invite"
   },
+  "key_package_status": {
+    "type": "key_package_status"
+  },
   "leave": {
     "group": "dead",
     "type": "leave"
@@ -147,12 +156,6 @@
       "wss://relay.example"
     ],
     "type": "publish_inbox_relays"
-  },
-  "publish_key_package": {
-    "relays": [
-      "wss://relay.example"
-    ],
-    "type": "publish_key_package"
   },
   "remove_members": {
     "group": "dead",

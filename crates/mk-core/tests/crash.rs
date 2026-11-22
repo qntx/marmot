@@ -141,7 +141,7 @@ mod crash {
     /// One driver action. Member indices are stable labels.
     #[derive(Clone, Debug)]
     enum Step {
-        /// `publish_key_package` — one staging call; `Flush` publishes.
+        /// `ensure_key_package` — one staging call; `Flush` publishes.
         KeyPackage(usize),
         /// `publish_inbox_relays` — one staging call; `Flush` publishes.
         InboxRelays(usize),
@@ -562,7 +562,7 @@ mod crash {
                 Step::KeyPackage(m) => {
                     self.world.members[m]
                         .session
-                        .publish_key_package(&[RELAY.to_owned()])
+                        .ensure_key_package(&[RELAY.to_owned()])
                         .await
                         .expect("key package");
                     self.drain(m);
@@ -1332,7 +1332,7 @@ mod crash {
     async fn debug_batch_tables() {
         let mut a = open_member().await;
         a.session
-            .publish_key_package(&[RELAY.to_owned()])
+            .ensure_key_package(&[RELAY.to_owned()])
             .await
             .expect("key package");
         let mut reopened = reopen_member(&a).await;

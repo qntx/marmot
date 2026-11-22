@@ -36,7 +36,10 @@ use thiserror as _;
 use tokio as _;
 use tracing as _;
 
-const SESSION_RS: &str = include_str!("../../mk-core/src/session.rs");
+const SESSION_RS: &[&str] = &[
+    include_str!("../../mk-core/src/session.rs"),
+    include_str!("../../mk-core/src/key_package_lifecycle.rs"),
+];
 
 /// How a session method is surfaced over the bridge protocol.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -74,8 +77,13 @@ const TABLE: &[(&str, &str, Mapping)] = &[
     ("Session", "report_publish", Request("report_publish")),
     (
         "Session",
-        "publish_key_package",
-        Request("publish_key_package"),
+        "ensure_key_package",
+        Request("ensure_key_package"),
+    ),
+    (
+        "Session",
+        "key_package_status",
+        Request("key_package_status"),
     ),
     (
         "Session",
@@ -135,10 +143,10 @@ const TABLE: &[(&str, &str, Mapping)] = &[
 /// (brace-matched; nested impl blocks are not expected in session.rs).
 fn public_methods(source: &str, impl_name: &str) -> Vec<String> {
     let needle = format!("impl {impl_name} {{");
-    let start = source
-        .find(&needle)
-        .unwrap_or_else(|| panic!("{needle} exists in session.rs"))
-        + needle.len();
+    let Some(found) = source.find(&needle) else {
+        return Vec::new();
+    };
+    let start = found + needle.len();
     let mut depth = 1usize;
     let mut methods = Vec::new();
     for line in source[start..].lines() {
@@ -169,7 +177,15 @@ fn session_methods_all_mapped() {
     let table: BTreeMap<(&str, &str), Mapping> =
         TABLE.iter().map(|(ty, m, map)| ((*ty, *m), *map)).collect();
     for impl_name in ["Session", "PendingProof"] {
-        let in_source: Vec<String> = public_methods(SESSION_RS, impl_name);
+        let in_source: Vec<String> = {
+            let mut methods: Vec<String> = SESSION_RS
+                .iter()
+                .flat_map(|source| public_methods(source, impl_name))
+                .collect();
+            methods.sort();
+            methods.dedup();
+            methods
+        };
         let in_table: Vec<String> = table
             .keys()
             .filter(|(ty, _)| *ty == impl_name)
