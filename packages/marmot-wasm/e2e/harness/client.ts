@@ -157,6 +157,7 @@ function snapshotShape(snapshot: GroupSnapshot): unknown {
     relays: [...snapshot.relays].toSorted(),
     nostrGroupId: snapshot.nostrGroupId,
     state: snapshot.state,
+    access: snapshot.access,
   };
 }
 

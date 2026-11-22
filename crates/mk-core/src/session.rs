@@ -827,6 +827,25 @@ pub enum GroupState {
     Disbanded,
 }
 
+/// How this device's local copy of a group stands: the one host
+/// vocabulary for "this device can't read this group". Each variant has
+/// exactly one source of truth in [`Session::group`]; `Active` also marks
+/// a disbanded copy because `state` already reports that ending.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum GroupAccess {
+    /// The local copy reads and writes normally.
+    Active,
+    /// This device's leaf was removed; the account still has a leaf.
+    RemovedDevice,
+    /// The account no longer has any leaf in the group.
+    Removed,
+    /// The copy cannot select a canonical branch (engine-flagged).
+    Unrecoverable,
+    /// The stall detector flagged the copy as behind.
+    Stalled,
+}
+
 /// One member in a [`GroupSnapshot`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MemberSnapshot {
@@ -849,6 +868,9 @@ pub struct GroupSnapshot {
     pub epoch: u64,
     /// Lifecycle bucket.
     pub state: GroupState,
+    /// Whether this device can still read the group; `Active` also marks
+    /// a `Disbanded` snapshot (`state` carries the ending).
+    pub access: GroupAccess,
     /// Members (account + admin flag).
     pub members: Vec<MemberSnapshot>,
     /// The group's Nostr routing relays.
@@ -3348,6 +3370,7 @@ impl Session {
                 description: record.description,
                 epoch: record.epoch.0,
                 state: GroupState::Disbanded,
+                access: GroupAccess::Active,
                 members: record
                     .members
                     .iter()
@@ -3387,6 +3410,24 @@ impl Session {
             GroupState::Unrecoverable
         } else {
             state
+        };
+        let access = if record.removed {
+            // A removed copy keeps its roster: an account that still
+            // holds another leaf lost this device, not its membership.
+            if members
+                .iter()
+                .any(|member| member.id.as_slice() == self.account().0)
+            {
+                GroupAccess::RemovedDevice
+            } else {
+                GroupAccess::Removed
+            }
+        } else if record.unrecoverable
+            || matches!(state, GroupState::Unrecoverable)
+        {
+            GroupAccess::Unrecoverable
+        } else {
+            GroupAccess::Active
         };
         let routing = self.routing_of(&gid).ok();
         let relays = routing
@@ -3430,6 +3471,7 @@ impl Session {
             description: record.description,
             epoch,
             state,
+            access,
             nostr_group_id,
             members: members
                 .iter()

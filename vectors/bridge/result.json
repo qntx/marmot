@@ -16,6 +16,7 @@
   },
   "group_created": {
     "group": {
+      "access": "active",
       "agent_text_stream": {
         "allowed_roles": 3,
         "max_plaintext_frame_len": 4096,
@@ -63,6 +64,7 @@
   "groups": {
     "groups": [
       {
+        "access": "active",
         "agent_text_stream": {
           "allowed_roles": 3,
           "max_plaintext_frame_len": 4096,

@@ -32,6 +32,7 @@ tagged `"type"` (the error enum uses `"kind"`), fieldless enums are plain
 | `relay_status.json` | `RelayStatus` |
 | `outbound_purpose.json` | `OutboundPurpose` |
 | `group_state.json` | `GroupState` |
+| `group_access.json` | `GroupAccess` |
 | `local_state.json` | `LocalState` |
 | `attachment_result.json` | `AttachmentResult` |
 | `config.json` | `Config` |

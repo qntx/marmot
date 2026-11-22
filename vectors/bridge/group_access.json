@@ -1,0 +1,8 @@
+{
+  "active": "active",
+  "removed": "removed",
+  "removed_device": "removed_device",
+  "stalled": "stalled",
+  "unmapped": "unmapped",
+  "unrecoverable": "unrecoverable"
+}

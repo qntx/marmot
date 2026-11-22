@@ -236,6 +236,15 @@ fn group_state_variants() {
 }
 
 #[test]
+fn group_access_variants() {
+    check::<GroupAccess>(
+        "group_access.json",
+        "type",
+        Value::String("\u{0}".to_owned()),
+    );
+}
+
+#[test]
 fn local_state_variants() {
     check::<LocalState>(
         "local_state.json",

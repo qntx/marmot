@@ -25,6 +25,7 @@ import type {
   DropReason,
   EncryptedMediaPolicy,
   GroupAvatar,
+  GroupAccess,
   GroupChange,
   GroupSnapshot,
   GroupState,
@@ -66,6 +67,7 @@ import {
   AVAILABILITY_VALUES,
   DROP_REASONS,
   ERROR_KINDS,
+  GROUP_ACCESSES,
   GROUP_STATES,
   INPUT_CATEGORY_VALUES,
   LOCAL_STATES,
@@ -718,6 +720,10 @@ export function decodeGroupState(value: unknown, path = "state"): GroupState {
   return oneOf(value, path, GROUP_STATES);
 }
 
+export function decodeGroupAccess(value: unknown, path = "access"): GroupAccess {
+  return oneOf(value, path, GROUP_ACCESSES);
+}
+
 export function decodeLocalState(value: unknown, path = "state"): LocalState {
   return oneOf(value, path, LOCAL_STATES);
 }
@@ -1210,6 +1216,7 @@ const SNAPSHOT_KEYS = [
   "description",
   "epoch",
   "state",
+  "access",
   "members",
   "relays",
   "nostr_group_id",
@@ -1252,6 +1259,7 @@ export function decodeGroupSnapshot(value: unknown, path = "group"): GroupSnapsh
     description: str(field(o, "description", path), `${path}.description`),
     epoch: u64(field(o, "epoch", path), `${path}.epoch`),
     state: decodeGroupState(field(o, "state", path), `${path}.state`),
+    access: decodeGroupAccess(field(o, "access", path), `${path}.access`),
     members: arr(field(o, "members", path), `${path}.members`, decodeMember),
     relays: strList(field(o, "relays", path), `${path}.relays`),
     nostrGroupId: hex32(field(o, "nostr_group_id", path), `${path}.nostr_group_id`),
@@ -1281,6 +1289,7 @@ export function encodeGroupSnapshot(snapshot: GroupSnapshot): Json {
     description: snapshot.description,
     epoch: snapshot.epoch.toString(),
     state: snapshot.state,
+    access: snapshot.access,
     members: snapshot.members.map(encodeMember),
     relays: snapshot.relays,
     nostr_group_id: snapshot.nostrGroupId,

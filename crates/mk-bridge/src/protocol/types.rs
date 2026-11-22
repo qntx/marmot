@@ -923,6 +923,38 @@ impl From<core::GroupState> for GroupState {
     }
 }
 
+/// Whether this device's local copy of a group can still read it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GroupAccess {
+    /// The local copy reads and writes normally.
+    Active,
+    /// This device's leaf was removed; the account still has a leaf.
+    RemovedDevice,
+    /// The account no longer has any leaf in the group.
+    Removed,
+    /// The copy cannot select a canonical branch.
+    Unrecoverable,
+    /// The stall detector flagged the copy as behind.
+    Stalled,
+    /// An `mk-core` access this wire version does not know.
+    Unmapped,
+}
+
+impl From<core::GroupAccess> for GroupAccess {
+    fn from(access: core::GroupAccess) -> Self {
+        match access {
+            core::GroupAccess::Active => Self::Active,
+            core::GroupAccess::RemovedDevice => Self::RemovedDevice,
+            core::GroupAccess::Removed => Self::Removed,
+            core::GroupAccess::Unrecoverable => Self::Unrecoverable,
+            core::GroupAccess::Stalled => Self::Stalled,
+            // `GroupAccess` is `#[non_exhaustive]`.
+            _ => Self::Unmapped,
+        }
+    }
+}
+
 /// A convergence disposition (spec `foundation/errors.md` vocabulary).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1744,6 +1776,8 @@ pub struct GroupSnapshot {
     pub epoch: u64,
     /// Lifecycle bucket.
     pub state: GroupState,
+    /// Whether this device can still read the group.
+    pub access: GroupAccess,
     /// Members (account + admin flag).
     pub members: Vec<MemberSnapshot>,
     /// The group's Nostr routing relays.
@@ -1776,6 +1810,7 @@ impl From<core::GroupSnapshot> for GroupSnapshot {
             description: snapshot.description,
             epoch: snapshot.epoch,
             state: snapshot.state.into(),
+            access: snapshot.access.into(),
             members: snapshot
                 .members
                 .into_iter()

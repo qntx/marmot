@@ -111,6 +111,7 @@ function snapshot(): GroupSnapshot {
     description: "",
     epoch: 1n,
     state: "stable",
+    access: "active",
     members: [],
     relays: [RELAY],
     nostrGroupId: ROUTE,

@@ -1,5 +1,5 @@
 /**
- * TypeScript mirror of the mk-bridge JSON wire protocol (`PROTOCOL_VERSION` 6). Decoded
+ * TypeScript mirror of the mk-bridge JSON wire protocol (`PROTOCOL_VERSION` 7). Decoded
  * representation: `u64` fields arrive as decimal strings and decode to `bigint`; identifiers (event
  * ids, pubkeys, group ids, nostr group ids, signatures, outbound ids, hashes, nonces) decode to
  * validated lowercase hex `string`s; payload blobs (`key_package`, component `data`, attachment
@@ -17,7 +17,7 @@ import type { InputCategory } from "../core/errors.ts";
 export type Complete<T extends never> = T;
 
 /** Wire protocol version. Bumped on any breaking schema change. */
-export const PROTOCOL_VERSION = 6;
+export const PROTOCOL_VERSION = 7;
 
 /** One reading of the injected clock (decimal strings on the wire). */
 export type ClockReading = {
@@ -368,6 +368,26 @@ export const GROUP_STATES = [
 
 export type _GroupStateComplete = Complete<Exclude<GroupState, (typeof GROUP_STATES)[number]>>;
 
+/** Whether this device's local copy of a group can still read it. */
+export type GroupAccess =
+  | "active"
+  | "removed_device"
+  | "removed"
+  | "unrecoverable"
+  | "stalled"
+  | "unmapped";
+
+export const GROUP_ACCESSES = [
+  "active",
+  "removed_device",
+  "removed",
+  "unrecoverable",
+  "stalled",
+  "unmapped",
+] as const;
+
+export type _GroupAccessComplete = Complete<Exclude<GroupAccess, (typeof GROUP_ACCESSES)[number]>>;
+
 /** A convergence disposition (spec `foundation/errors.md` vocabulary). */
 export type WireDisposition = "accepted" | "deferred" | "stale" | "invalidated" | "unmapped";
 
@@ -645,6 +665,7 @@ export type GroupSnapshot = {
   description: string;
   epoch: bigint;
   state: GroupState;
+  access: GroupAccess;
   members: MemberSnapshot[];
   /** The group's Nostr routing relays. */
   relays: string[];

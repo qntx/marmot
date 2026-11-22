@@ -9,6 +9,7 @@ import {
   decodeCallValue,
   decodeConfigValue,
   decodeDropReason,
+  decodeGroupAccess,
   decodeGroupChange,
   decodeGroupState,
   decodeInputOutcome,
@@ -49,6 +50,7 @@ import {
   AVAILABILITY_VALUES,
   DROP_REASONS,
   ERROR_KINDS,
+  GROUP_ACCESSES,
   GROUP_CHANGE_TYPES,
   GROUP_STATES,
   INPUT_OUTCOME_TYPES,
@@ -143,6 +145,7 @@ const UNION_CASES = [
   caseOf("availability_category", AVAILABILITY_VALUES, decodeAvailability, (value) => value),
   caseOf("outbound_purpose", OUTBOUND_PURPOSES, decodeOutboundPurpose, (value) => value),
   caseOf("group_state", GROUP_STATES, decodeGroupState, (value) => value),
+  caseOf("group_access", GROUP_ACCESSES, decodeGroupAccess, (value) => value),
   caseOf("local_state", LOCAL_STATES, decodeLocalState, (value) => value),
   caseOf("publish_resolution", PUBLISH_RESOLUTIONS, decodePublishResolution, (value) => value),
 ];
