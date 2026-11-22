@@ -47,6 +47,7 @@ import {
   inboxCursorKey,
 } from "../src/transport/plan.ts";
 import type { RelayFilter, RelayPort, SubscriptionHandlers } from "../src/transport/port.ts";
+import { verifyInbound } from "../src/transport/verify.ts";
 
 const ACCOUNT = "a".repeat(64);
 const RELAY = "wss://r1.example";
@@ -58,16 +59,27 @@ const DONE: BridgeResponse = { type: "ok", result: { type: "done" } };
 const KEYS = Keys.fromSecretKey(new Uint8Array(32).fill(7));
 
 /**
- * A genuinely signed inbound event — the pump verifies id + signature before dedupe, so fixtures
- * cannot fake them. Set `kind`/`createdAt`/`tags`/`content` here, before signing; the id, pubkey
- * and sig come out of `finalizeEvent`.
+ * Genuinely signed inbound events — the pump verifies id + signature before dedupe, so fixtures
+ * cannot fake them. Signing and verifying dominate this file's runtime, so every event is cached by
+ * its parameters: a repeated parameter set returns the same object, which also hits the pump's
+ * WeakSet verification cache when a later test delivers it. Set `kind`/`createdAt`/`tags`/
+ * `content` here, before signing; the id, pubkey and sig come out of `finalizeEvent`.
  */
+const signed = new Map<string, NostrEvent>();
+
 function event(partial: {
   kind?: number;
   createdAt?: bigint;
   tags?: string[][];
   content?: string;
 }): NostrEvent {
+  const key = `${partial.kind ?? 445}:${partial.createdAt ?? 1000n}:${JSON.stringify(
+    partial.tags ?? [],
+  )}:${partial.content ?? ""}`;
+  const hit = signed.get(key);
+  if (hit !== undefined) {
+    return hit;
+  }
   const wire = finalizeEvent(
     {
       kind: partial.kind ?? 445,
@@ -77,7 +89,7 @@ function event(partial: {
     },
     KEYS,
   );
-  return {
+  const evt: NostrEvent = {
     id: wire.id,
     pubkey: wire.pubkey,
     createdAt: BigInt(wire.created_at),
@@ -86,10 +98,29 @@ function event(partial: {
     content: wire.content,
     sig: wire.sig,
   };
+  signed.set(key, evt);
+  return evt;
 }
 
 const groupEvent = (createdAt = 1000n, content = ""): NostrEvent =>
   event({ kind: 445, createdAt, tags: [["h", ROUTE]], content });
+
+/**
+ * One shared pool of distinct events for the flood and batch tests: ids differ by content,
+ * timestamps cycle 600–999 (below the 10 000 seeded cursor, above the 500 one so a backlog fold is
+ * visible), and every test delivers the same objects — each signs once and each verifies once in
+ * the pump's WeakSet for the whole file.
+ */
+const FILL_TOP = 999;
+const fill = (i: number): NostrEvent => groupEvent(600n + BigInt(i % 400), `f${i}`);
+
+// Warm the shared pool at module load: the per-test timeouts must cover the assertions, not a
+// thousand signatures and verifications. `verifyInbound` marks each object once, so every later
+// delivery hits the pump's WeakSet fast path.
+const FILL_COUNT = MAX_PENDING_INBOUND + 1;
+for (let i = 0; i < FILL_COUNT; i += 1) {
+  verifyInbound(fill(i));
+}
 
 const wrapEvent = (createdAt = 1000n, content = ""): NostrEvent =>
   event({ kind: 1059, createdAt, tags: [["p", ACCOUNT]], content });
@@ -445,8 +476,8 @@ describe("malicious relay", () => {
 
     // Distinct valid kind-445 events past the pending cap while ingest never answers.
     // Their createdAts stay below the seeded cursor so the durable cursor never moves.
-    for (let i = 0; i < MAX_PENDING_INBOUND + INGEST_BATCH_MAX; i += 1) {
-      push(sub, groupEvent(BigInt(i % 8000), i.toString()));
+    for (let i = 0; i < MAX_PENDING_INBOUND + 1; i += 1) {
+      push(sub, fill(i));
     }
     await macrotask();
     // The delivering subscription was closed by the pump, so later pushes land nowhere.
@@ -588,9 +619,10 @@ describe("malicious relay", () => {
         });
       });
     };
-    const total = 3 * INGEST_BATCH_MAX;
-    for (let i = 0; i < total; i += 1) {
-      push(sub, groupEvent(BigInt(total - i)));
+    // Two full parked batches (a short tail would wait for the ingest delay): the fold waits
+    // for the last one to go durable.
+    for (let i = 0; i < 2 * INGEST_BATCH_MAX; i += 1) {
+      push(sub, fill(i));
     }
     await settle(fixture.timer, 0);
     // EOSE lands while every pre-EOSE batch is still parked in the queue.
@@ -605,10 +637,7 @@ describe("malicious relay", () => {
     expect(cursor()).toBe(500);
     popGate(gates).ok();
     await settle(fixture.timer, 0);
-    expect(cursor()).toBe(500);
-    popGate(gates).ok();
-    await settle(fixture.timer, 0);
-    expect(cursor()).toBe(total);
+    expect(cursor()).toBe(FILL_TOP);
     await fixture.client.close();
   });
 
@@ -631,8 +660,10 @@ describe("malicious relay", () => {
         });
       });
     };
+    // Two full batches (a short tail would wait for the ingest delay instead of flushing),
+    // from the shared pool — the events were signed and verified once already.
     for (let i = 0; i < 2 * INGEST_BATCH_MAX; i += 1) {
-      push(sub, groupEvent(BigInt(1000 + i)));
+      push(sub, fill(i));
     }
     await settle(fixture.timer, 0);
     pushEose(sub);
@@ -703,14 +734,14 @@ describe("malicious relay", () => {
     await settle(fixture.timer, 5000);
     const sub = mustSub(groupSubs(fixture.network));
 
-    // Ten batches' worth of backlog while ingest is held — the pending cap binds.
+    // One event past the pending cap while ingest is held — the cap binds the backlog.
     let releaseIngest: () => void = () => undefined;
     const hold = new Promise<void>((resolve) => {
       releaseIngest = resolve;
     });
     script.ingestGate = async () => hold;
-    for (let i = 0; i < 10 * INGEST_BATCH_MAX; i += 1) {
-      push(sub, groupEvent(BigInt(i % 4000)));
+    for (let i = 0; i < MAX_PENDING_INBOUND + 1; i += 1) {
+      push(sub, fill(i));
     }
     await macrotask();
     expect(sub.open).toBe(false);
