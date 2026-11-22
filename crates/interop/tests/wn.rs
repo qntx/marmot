@@ -1379,44 +1379,72 @@ async fn scenario20_stall_detection() {
         .map(|event| event.id)
         .collect();
 
-    // The rename is one commit; the three chats ride it. Dropping the
-    // commit (the earliest fresh event on the route) leaves the chats
-    // transport-deferred.
+    // The rename is one commit; the three chats ride it. Capture the
+    // commit before the chats go out — picking "the earliest fresh event"
+    // afterwards is not deterministic because a chat that shares the
+    // commit's `created_at` second can sort first by id. Everything the
+    // rename step publishes is withheld, so the chats cannot reach their
+    // epoch and stay transport-deferred.
     wn(
         &rig.home,
         &rig.socket,
         Some(&rig.wn_npub),
         &["groups", "rename", &wn_gid, "interop-20-renamed"],
     );
-    for i in 0..3 {
-        wn_send(&rig, &wn_gid, &format!("s20-m{i}"));
-    }
-    let mut fresh: Vec<mk_core::Event> = until(
+    let last_seen = std::cell::RefCell::new(std::collections::BTreeSet::<mk_core::EventId>::new());
+    let dropped: std::collections::BTreeSet<mk_core::EventId> = until(
         || {
             let rig = Arc::clone(&rig);
             let seen = seen.clone();
+            let route = route.clone();
+            let last_seen = &last_seen;
+            async move {
+                let fresh: std::collections::BTreeSet<mk_core::EventId> = fetch_group(&rig, &route)
+                    .await
+                    .into_iter()
+                    .filter(|event| !seen.contains(&event.id))
+                    .map(|event| event.id)
+                    .collect();
+                // The commit set is trusted only once it stays unchanged
+                // between two polls — a stray that arrives before the
+                // rename lands must not close the window early.
+                let mut last = last_seen.borrow_mut();
+                if !fresh.is_empty() && fresh == *last {
+                    Some(fresh)
+                } else {
+                    *last = fresh;
+                    None
+                }
+            }
+        },
+        "wn's rename commit on the route",
+        90_000,
+        800,
+    )
+    .await;
+    for i in 0..3 {
+        wn_send(&rig, &wn_gid, &format!("s20-m{i}"));
+    }
+    let without_commit: Vec<mk_core::Event> = until(
+        || {
+            let rig = Arc::clone(&rig);
+            let seen = seen.clone();
+            let dropped = dropped.clone();
             let route = route.clone();
             async move {
                 let fresh: Vec<mk_core::Event> = fetch_group(&rig, &route)
                     .await
                     .into_iter()
-                    .filter(|event| !seen.contains(&event.id))
+                    .filter(|event| !seen.contains(&event.id) && !dropped.contains(&event.id))
                     .collect();
-                (fresh.len() >= 4).then_some(fresh)
+                (fresh.len() >= 3).then_some(fresh)
             }
         },
-        "wn's commit plus three chats on the route",
+        "wn's three chats on the route",
         90_000,
         800,
     )
     .await;
-    fresh.sort_by_key(|event| (event.created_at, event.id));
-    let dropped = fresh[0].id;
-    let without_commit: Vec<mk_core::Event> = fresh
-        .iter()
-        .filter(|event| event.id != dropped)
-        .cloned()
-        .collect();
 
     // Exactly one suspicion across the whole feed.
     let events = ingest(&mut a, without_commit).await;
@@ -1433,7 +1461,7 @@ async fn scenario20_stall_detection() {
     let refetch: Vec<mk_core::Event> = fetch_group(&rig, &route)
         .await
         .into_iter()
-        .filter(|event| event.id != dropped)
+        .filter(|event| !dropped.contains(&event.id))
         .collect();
     let _ = ingest(&mut a, refetch).await;
     a.session.history_fetched(&gid).expect("history_fetched");

@@ -1400,14 +1400,26 @@ async function run(): Promise<void> {
       client2.onGroupChange((event) => {
         changes2.push(event);
       });
+      // Relative count: wait for one NEW package, so the scenario does
+      // not depend on how many devices published before it.
+      const knownKps = new Set(
+        served.relay
+          .events()
+          .filter((stored) => stored.kind === KEY_PACKAGE_KIND && stored.pubkey === signer.pubkey)
+          .map((stored) => stored.id),
+      );
       await client2.ensureKeyPackage();
       await client2.publishInboxRelays([url]);
       await waitFor(
         () =>
           served.relay
             .events()
-            .filter((stored) => stored.kind === KEY_PACKAGE_KIND && stored.pubkey === signer.pubkey)
-            .length >= 2 || undefined,
+            .some(
+              (stored) =>
+                stored.kind === KEY_PACKAGE_KIND &&
+                stored.pubkey === signer.pubkey &&
+                !knownKps.has(stored.id),
+            ) || undefined,
         "second device's KeyPackage on the relay",
       );
 
@@ -1463,12 +1475,13 @@ async function run(): Promise<void> {
         "device 2 observes its own removal",
       );
       // The signed-out device lost its leaf; the account lives on through
-      // device 1 — `access` is removed_device, not removed.
-      const snapshots2 = await client2.groups();
-      const snapshot2 = snapshots2.find((item) => item.id === gid2);
-      if (snapshot2?.access !== "removed_device") {
-        throw new Error(`device 2 access ${String(snapshot2?.access)}, expected removed_device`);
-      }
+      // device 1 — `access` is removed_device, not removed. A removed
+      // copy is no longer live, so the snapshot comes from `group(id)`,
+      // not `groups()`.
+      await waitFor(async () => {
+        const snapshot = await client2.group(gid2);
+        return snapshot?.access === "removed_device" || undefined;
+      }, "device 2 access removed_device");
       log(`device 2 signed out; wn keeps one leaf (${secs(at)})`);
 
       // Device 1 applies wn's removal commit too: the shared leaf update
@@ -1576,9 +1589,12 @@ async function run(): Promise<void> {
     // defers the chats for real.
     await scenario("S20 stall detection", async () => {
       const inner = nostrRelayPort(pool);
-      // The first kind-445 seen on the armed route — the one commit —
-      // is dropped every time it reappears, refetch replay included.
-      const drop = { route: undefined as string | undefined, id: undefined as string | undefined };
+      // Two-stage drop: while `armed` every kind-445 event is withheld
+      // and its id recorded — the rename's commit hits the live
+      // subscription before the relay store can be polled for it, so
+      // arming must precede the rename. After disarm, only the recorded
+      // ids stay censored, refetch replay included.
+      const drop = { armed: false, ids: new Set<string>() };
       const droppingPort: RelayPort = {
         publish: async (relay, event) => inner.publish(relay, event),
         connect: async (relay) => inner.connect(relay),
@@ -1586,10 +1602,12 @@ async function run(): Promise<void> {
           inner.subscribe(relay, filters, {
             ...handlers,
             event: (event) => {
-              const h = event.tags.find((tag) => tag[0] === "h")?.[1];
-              if (drop.route !== undefined && event.kind === 445 && h === drop.route) {
-                drop.id ??= event.id;
-                if (event.id === drop.id) {
+              if (event.kind === 445) {
+                if (drop.armed) {
+                  drop.ids.add(event.id);
+                  return;
+                }
+                if (drop.ids.has(event.id)) {
                   return;
                 }
               }
@@ -1622,14 +1640,27 @@ async function run(): Promise<void> {
       client3.onGroupChange((event) => {
         changes3.push(event);
       });
+      // The count is relative: earlier scenarios may or may not have run
+      // under WN_ONLY filtering, so wait for one NEW package, not a
+      // third total.
+      const knownKps = new Set(
+        served.relay
+          .events()
+          .filter((stored) => stored.kind === KEY_PACKAGE_KIND && stored.pubkey === signer.pubkey)
+          .map((stored) => stored.id),
+      );
       await client3.ensureKeyPackage();
       await client3.publishInboxRelays([url]);
       await waitFor(
         () =>
           served.relay
             .events()
-            .filter((stored) => stored.kind === KEY_PACKAGE_KIND && stored.pubkey === signer.pubkey)
-            .length >= 3 || undefined,
+            .some(
+              (stored) =>
+                stored.kind === KEY_PACKAGE_KIND &&
+                stored.pubkey === signer.pubkey &&
+                !knownKps.has(stored.id),
+            ) || undefined,
         "third device's KeyPackage on the relay",
       );
 
@@ -1663,11 +1694,48 @@ async function run(): Promise<void> {
       const route = snapshot3.nostrGroupId;
       log(`device 3 created ${wnGid}; wn accepted as admin (${secs(at)})`);
 
-      // Arm the drop, then the rename is one commit and three chats ride
-      // it — the device sees the chats but never the commit.
+      // Arm the drop, then rename: the commit must never reach the live
+      // subscription. The relay-store read below only CONFIRMS the set —
+      // it stays nonempty and unchanged across two polls before the
+      // port is disarmed, so a slow publish cannot slip one through.
       at = Date.now();
-      drop.route = route;
+      const seenIds = new Set(
+        served.relay
+          .events()
+          .filter(
+            (stored) =>
+              stored.kind === 445 && stored.tags.some((tag) => tag[0] === "h" && tag[1] === route),
+          )
+          .map((stored) => stored.id),
+      );
+      drop.armed = true;
       await wn(rig, ["groups", "rename", wnGid, "m3b-20-renamed"], rig.wnNpub);
+      let lastIds = "";
+      const newIds = await waitFor(() => {
+        const ids = served.relay
+          .events()
+          .filter(
+            (stored) =>
+              stored.kind === 445 &&
+              !seenIds.has(stored.id) &&
+              stored.tags.some((tag) => tag[0] === "h" && tag[1] === route),
+          )
+          .map((stored) => stored.id)
+          .toSorted()
+          .join(",");
+        if (ids !== "" && ids === lastIds) {
+          return new Set(ids.split(","));
+        }
+        lastIds = ids;
+        return undefined;
+      }, "wn's rename commit on the route");
+      for (const id of newIds) {
+        drop.ids.add(id);
+      }
+      drop.armed = false;
+      if (drop.ids.size === 0) {
+        throw new Error("the censoring port captured no commit to withhold");
+      }
       for (const text of ["s20-m0", "s20-m1", "s20-m2"]) {
         // oxlint-disable-next-line no-await-in-loop -- sends are sequential by design
         await wn(rig, ["messages", "send", wnGid, text], rig.wnNpub);
