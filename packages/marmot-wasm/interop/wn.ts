@@ -1514,6 +1514,48 @@ async function run(): Promise<void> {
       }, `wn messages list shows ${ourText}`);
     });
 
+    // S21 — post-join self-update: the Pump reports history_fetched at
+    // EOSE; quiet + jitter gate one commit wn accepts both ways.
+    await scenario("S21 post-join self-update", async () => {
+      let at = Date.now();
+      const created = await wn(rig, ["groups", "create", "m3b-21", ourNpub], rig.wnNpub);
+      const wnGid = wnGroupId(created);
+      const ourGid = await waitFor(
+        () => invites.flatMap((event) => (event.type === "joined" ? [event.group] : [])).at(-1),
+        "our onInvite joined (s21 group)",
+      );
+      if (ourGid !== wnGid) {
+        throw new Error(`group id mismatch: ours ${ourGid} wn ${wnGid}`);
+      }
+      log(`joined ${ourGid}; waiting for the maintenance self-update (${secs(at)})`);
+
+      at = Date.now();
+      await waitFor(
+        () =>
+          groupChanges.flatMap((event) =>
+            event.type === "self_updated" && event.group === ourGid ? [event] : [],
+          )[0] ?? undefined,
+        "self_updated group-change event",
+        240_000,
+      );
+      log(`self_updated for ${ourGid} (${secs(at)})`);
+
+      const wnText = `s21-wn-${Math.floor(Date.now() / 1000)}`;
+      await wn(rig, ["messages", "send", wnGid, wnText], rig.wnNpub);
+      await waitFor(
+        () =>
+          received.some((entry) => entry.group === ourGid && entry.message.content === wnText) ||
+          undefined,
+        `we receive wn message ${wnText}`,
+      );
+      const ourText = `s21-us-${Math.floor(Date.now() / 1000)}`;
+      await client.sendMessage(ourGid, { kind: CHAT_KIND, tags: [], content: ourText });
+      await waitFor(async () => {
+        const entries = await wnMessages(rig, wnGid);
+        return entries.some((entry) => entry.includes(ourText)) || undefined;
+      }, `wn messages list shows ${ourText}`);
+    });
+
     log(`NIP-11 documents served: ${served.documentsServed()}`);
     if (RELAY_SHAPE === "nip11" && served.documentsServed() === 0) {
       failures.push("relay shape: wnd never asked for the NIP-11 document");

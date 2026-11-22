@@ -1273,3 +1273,58 @@ async fn scenario17_second_device_signs_out() {
     rig.relay.shutdown();
     eprintln!("SCENARIO-17 PASS {:.1}s", start.elapsed().as_secs_f64());
 }
+
+/// S21 (D4): after the host reports the post-join fetch done, the session
+/// runs its quiet window and sampled jitter, then authors exactly one
+/// self-update commit wn accepts — messaging survives in both directions.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[ignore = "needs WN_BIN and WND_BIN; CI runs it"]
+async fn scenario21_post_join_self_update() {
+    let start = Instant::now();
+    let rig = Arc::new(rig("s21").await);
+    let mut a = open_member().await;
+    publish_identity(&mut a, &rig).await;
+    let a_npub = a.npub();
+
+    let created = wn(
+        &rig.home,
+        &rig.socket,
+        Some(&rig.wn_npub),
+        &["groups", "create", "interop-21", &a_npub],
+    );
+    let wn_gid = wn_group_id(&created);
+    let gid = hex_group(&wn_gid);
+    join_wn_group(&rig, &mut a, &gid).await;
+
+    // The host's post-join history fetch is done (EOSE on every relay):
+    // quiet (60 s) plus the sampled jitter gate one self-update commit.
+    a.session.history_fetched(&gid).expect("history_fetched");
+    let gid_ref = gid.clone();
+    until_member(
+        &mut a,
+        |a| {
+            let rig = Arc::clone(&rig);
+            let gid = gid_ref.clone();
+            Box::pin(async move {
+                let mut events = sync(&mut *a, &rig, &gid).await;
+                events.append(&mut a.session.drain_events().expect("drain"));
+                events
+                    .iter()
+                    .any(|event| {
+                        matches!(event, SessionEvent::SelfUpdated { group } if *group == gid)
+                    })
+                    .then_some(())
+            })
+        },
+        "self-update commit after quiet + jitter",
+        240_000,
+    )
+    .await;
+
+    // Both directions keep working after the rotation.
+    member_says(&rig, &mut a, &gid, &wn_gid, "s21-after-self-update").await;
+    wn_says(&rig, &mut a, &gid, &wn_gid, "s21-wn-replies").await;
+
+    rig.relay.shutdown();
+    eprintln!("SCENARIO-21 PASS {:.1}s", start.elapsed().as_secs_f64());
+}
