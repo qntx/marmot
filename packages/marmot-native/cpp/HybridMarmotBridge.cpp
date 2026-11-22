@@ -1,5 +1,7 @@
 #include "HybridMarmotBridge.hpp"
 
+#include <stdexcept>
+
 namespace margelo::nitro::marmotnative {
 
 namespace {
@@ -24,6 +26,13 @@ std::shared_ptr<ArrayBuffer> runDrain(MkBridge* handle) {
 } // namespace
 
 std::shared_ptr<Promise<std::shared_ptr<ArrayBuffer>>> HybridMarmotBridge::open(const std::shared_ptr<ArrayBuffer>& config) {
+  // Open is once-per-bridge: a second call's `load` would race the first task's `rows` clear
+  // on the engine thread (or read a cleared snapshot). Reject before going async so it can
+  // never reach mk_bridge_open.
+  if (_opened.exchange(true)) {
+    return Promise<std::shared_ptr<ArrayBuffer>>::rejected(
+        std::make_exception_ptr(std::runtime_error("marmot: open may run once per bridge")));
+  }
   // JS ArrayBuffers may only be read on the JS thread — copy the input before going async.
   // The async task captures `self` so the bridge (and the mk-ffi handle) outlives the
   // in-flight call even if JS drops its last reference.

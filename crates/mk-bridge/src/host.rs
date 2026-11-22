@@ -43,9 +43,17 @@ impl HostError {
 /// The `mk-core` side of the port: queues committed batches for the bridge
 /// to flush through [`Host::commit`] in order. `Send + Sync` per
 /// [`KvHost`]'s contract.
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub(crate) struct QueueHost {
     queue: Arc<Mutex<VecDeque<KvBatch>>>,
+}
+
+impl std::fmt::Debug for QueueHost {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("QueueHost")
+            .field("queue_len", &lock(&self.queue).len())
+            .finish()
+    }
 }
 
 impl QueueHost {

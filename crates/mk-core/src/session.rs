@@ -36,7 +36,7 @@
     )
 )]
 
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use cgka_engine::account_identity_proof::{
@@ -56,7 +56,7 @@ use cgka_traits::app_components::{
     GroupLifecycleV1, NOSTR_ROUTING_COMPONENT_ID, NostrRoutingV1, decode_components_list,
     decode_group_avatar_url_v1, decode_group_lifecycle_v1, decode_nostr_routing_v1,
     decode_quic_varint, default_group_components, encode_group_avatar_url_v1, encode_quic_varint,
-    is_loopback_host, is_public_ip, validate_and_normalize_group_avatar_url,
+    is_loopback_host, reject_non_public_ip, validate_and_normalize_group_avatar_url,
     validate_nostr_relay_url,
 };
 use cgka_traits::app_event::{
@@ -90,7 +90,7 @@ use zeroize::Zeroizing;
 
 use crate::agent_stream::{AgentStreamPolicy, StreamRoles};
 use crate::clock::{Clock, EngineConvergenceClock, EngineMaintenanceRandom, EngineWallClock, Time};
-use crate::delivered::{self, ExpiryHeap, HeldModifier};
+use crate::delivered::{self, ExpiryHeap, HeldModifier, HeldQueue};
 use crate::events::{InputOutcome, InputReport, SessionEvent, input_outcome, session_event};
 use crate::key_package::{self, KeyPackageInfo, is_valid_client_name};
 use crate::kv::{CommitSeq, KvHost};
@@ -105,8 +105,8 @@ use crate::pacing::PacingMap;
 use crate::provider::KvStorageProvider;
 use crate::semantics::{self, MessageIntent};
 use crate::signer::{
-    AccountSigner, DeferringProofSigner, FixedProofSigner, RefusingProofSigner, SignerAdapter,
-    SignerError, SignerLatch, SignerVerdict,
+    AccountSigner, CheckedSigner, DeferringProofSigner, FixedProofSigner, RefusingProofSigner,
+    SignerAdapter, SignerError, SignerLatch, SignerVerdict,
 };
 use crate::types::{AccountId, Event, EventId, GroupId, OutboundId, UnsignedEvent};
 use cgka_traits::storage::StorageError;
@@ -131,15 +131,17 @@ pub struct SessionConfig {
 /// Local safety policy for relay URLs before anything is published.
 ///
 /// Every URL passes MDK's relay-URL profile check
-/// ([`validate_nostr_relay_url`]); additionally, literal hosts that are
-/// loopback, private or link-local, and `localhost`, are refused unless
-/// `allow_loopback` — a dev/test flag, default off. DNS resolution checks
-/// (public A/AAAA records) are the host transport's job: a hostname that
-/// resolves to a private address is not something this layer can see.
+/// ([`validate_nostr_relay_url`]); additionally, every literal IP is
+/// classified: public addresses pass, loopback passes only under
+/// `allow_loopback` — a dev/test flag, default off — and private,
+/// link-local and other special-use addresses never pass. `localhost`
+/// follows the loopback rule. DNS resolution checks (public A/AAAA
+/// records) are the host transport's job: a hostname that resolves to a
+/// private address is not something this layer can see.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct DestinationPolicy {
-    /// Permit loopback/private/link-local literal hosts and `localhost`
-    /// (tests and local relays only).
+    /// Permit loopback literal hosts and `localhost` (tests and local
+    /// relays only); private/link-local/special-use addresses stay refused.
     pub allow_loopback: bool,
 }
 
@@ -891,10 +893,11 @@ pub struct Session {
     /// armed around each kind-1059 ingest so a refused/failed unwrap can
     /// roll the span back instead of poisoning it as a permanent rejection.
     signer_latch: Arc<SignerLatch>,
-    /// Held kind 1009/5 modifiers per group, arrival order. Memory-only:
-    /// an unacked pending row re-presents the modifier after restart, so
-    /// holds are crash-safe without a durable table. Keyed by group bytes.
-    pub(crate) held_modifiers: HashMap<Vec<u8>, VecDeque<HeldModifier>>,
+    /// Held kind 1009/5 modifiers per group, arrival order with the
+    /// running byte total. Memory-only: an unacked pending row re-presents
+    /// the modifier after restart, so holds are crash-safe without a
+    /// durable table. Keyed by group bytes.
+    pub(crate) held_modifiers: HashMap<Vec<u8>, HeldQueue>,
     /// Events `tick` produced (hold expiries, retention sweeps) for the
     /// next `drain_events`.
     pub(crate) tick_events: Vec<SessionEvent>,
@@ -946,13 +949,16 @@ impl Session {
             return Err(OpenError::InvalidConfig("client name"));
         }
         let provider = KvStorageProvider::open(config.rows, config.host)?;
+        // One wrap covers every signing path: sign_checked, the MDK-driven
+        // SignerAdapter (seal/Welcome signing) and the bridge's QueueSigner.
+        let signer: Arc<dyn AccountSigner> = Arc::new(CheckedSigner::new(config.signer));
         let capture = Arc::new(DeferringProofSigner::new());
         let cloned = Arc::clone(&capture);
         let proof_signer: Arc<dyn AccountIdentityProofSigner> = cloned;
         let signer_latch = Arc::new(SignerLatch::new(provider.store().clone()));
         match build_engine(
             &provider,
-            &config.signer,
+            &signer,
             &config.clock,
             proof_signer,
             &signer_latch,
@@ -966,7 +972,7 @@ impl Session {
                     provider,
                     request,
                     unsigned,
-                    signer: config.signer,
+                    signer,
                     clock: config.clock,
                     destination_policy: config.destination_policy,
                     client_name: config.client_name,
@@ -975,7 +981,7 @@ impl Session {
             Ok(engine) => open_session(Self {
                 provider,
                 engine,
-                signer: config.signer,
+                signer,
                 clock: config.clock,
                 destination_policy: config.destination_policy,
                 client_name: config.client_name,
@@ -1650,18 +1656,15 @@ impl Session {
         Ok(OutboundId(signed.id.0))
     }
 
-    /// Sign `unsigned` through the account signer and sanity-check the
-    /// result (right account, right id commitment).
+    /// Sign `unsigned` through the account signer. Reply validation — right
+    /// account, untouched commitment fields, committed id, verifying
+    /// signature — lives in [`CheckedSigner`], installed once at
+    /// [`Session::open`].
     async fn sign_checked(&self, unsigned: UnsignedEvent) -> Result<Event, SessionError> {
-        let signed = self
-            .signer
+        self.signer
             .sign_event(unsigned)
             .await
-            .map_err(SessionError::Signer)?;
-        if signed.pubkey != self.account() || signed.id != signed.compute_id() {
-            return Err(SessionError::Signer(SignerError::Refused));
-        }
-        Ok(signed)
+            .map_err(SessionError::Signer)
     }
 
     fn stage_publication(
@@ -2815,10 +2818,13 @@ impl Session {
         })
     }
 
-    /// Admit a batch of inbound events: sorted ascending by `(created_at,
-    /// id)`, deduplicated by id within the batch, ingested one by one. The
-    /// convergence drive runs once after the last event — batch ingest then
-    /// tick reaches the same state as per-event drives.
+    /// Admit a batch of inbound events: every event is verified (id +
+    /// schnorr signature) BEFORE dedupe — a same-id forgery is reported
+    /// `InvalidSignature` and can never shadow the genuine event — then the
+    /// valid ones are sorted ascending by `(created_at, id)`, deduplicated
+    /// by id and ingested one by one. The convergence drive runs once after
+    /// the last event — batch ingest then tick reaches the same state as
+    /// per-event drives.
     ///
     /// # Errors
     /// [`SessionError`] for engine/storage failures.
@@ -2827,10 +2833,22 @@ impl Session {
         mut events: Vec<Event>,
     ) -> Result<Vec<InputReport>, SessionError> {
         events.sort_by_key(|a| (a.created_at, a.id));
-        events.dedup_by_key(|event| event.id);
+        let mut seen = HashSet::with_capacity(events.len());
         let mut reports = Vec::with_capacity(events.len());
-        for event in &events {
-            let outcome = self.ingest_verified(event).await?;
+        for event in events {
+            if event.verify().is_err() {
+                reports.push(InputReport {
+                    event: event.id,
+                    outcome: InputOutcome::Rejected {
+                        category: crate::events::InputCategory::InvalidSignature,
+                    },
+                });
+                continue;
+            }
+            if !seen.insert(event.id) {
+                continue;
+            }
+            let outcome = self.ingest_verified(&event).await?;
             reports.push(InputReport {
                 event: event.id,
                 outcome,
@@ -2866,6 +2884,11 @@ impl Session {
             // signer verdict and fences every write after it, so the ingest
             // ends in an engine error before the dedup epilogue can remember
             // the id — and the savepoint discards whatever it did write.
+            // An `InvalidPayload` unwrap is different: the signer ran and
+            // the payload itself is permanently undecryptable, so no verdict
+            // is latched and the terminal rejection commits — the dedup
+            // marker remembers the id and every re-delivery is a duplicate
+            // that never reaches the signer.
             self.signer_latch.arm();
             let savepoint = self
                 .provider
@@ -3365,16 +3388,20 @@ impl Session {
         if validate_nostr_relay_url(relay).is_err() {
             return false;
         }
-        if self.destination_policy.allow_loopback {
-            return true;
-        }
         let Ok(url) = url::Url::parse(relay) else {
             return false;
         };
+        let allow_loopback = self.destination_policy.allow_loopback;
         match url.host() {
-            Some(url::Host::Domain(domain)) => !is_loopback_host(url::Host::Domain(domain)),
-            Some(url::Host::Ipv4(addr)) => is_public_ip(std::net::IpAddr::V4(addr)),
-            Some(url::Host::Ipv6(addr)) => is_public_ip(std::net::IpAddr::V6(addr)),
+            Some(url::Host::Domain(domain)) => {
+                allow_loopback || !is_loopback_host(url::Host::Domain(domain))
+            }
+            Some(url::Host::Ipv4(addr)) => {
+                reject_non_public_ip(std::net::IpAddr::V4(addr), allow_loopback).is_ok()
+            }
+            Some(url::Host::Ipv6(addr)) => {
+                reject_non_public_ip(std::net::IpAddr::V6(addr), allow_loopback).is_ok()
+            }
             None => false,
         }
     }

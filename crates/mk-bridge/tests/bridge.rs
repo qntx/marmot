@@ -1009,6 +1009,99 @@ async fn signer_refusal() {
     }
 }
 
+/// A host `invalid_payload` reply to a pending `nip44_decrypt` is the
+/// signer's verdict that the wrap itself is undecryptable: the ingest
+/// reports `rejected: invalid_encoding` — a permanent rejection, not
+/// `unavailable` — the dedup marker makes a re-delivery `duplicate`,
+/// and the signer is never asked again.
+#[tokio::test(flavor = "current_thread")]
+async fn signer_invalid_payload() {
+    let mut relay = FakeRelay::new();
+
+    let mut a = Member::new();
+    a.open().await;
+    a.publish_identity(&mut relay).await;
+
+    let mut b = Member::new();
+    b.open().await;
+    b.publish_identity(&mut relay).await;
+    let response = a
+        .call(Request::CreateGroup(CreateGroupRequest {
+            name: "g".to_owned(),
+            description: String::new(),
+            relays: vec![RELAY.to_owned()],
+            invitees: vec![Invitee {
+                key_package: key_package_of(&relay, &b.account_hex()),
+                inbox_relays: vec![RELAY.to_owned()],
+            }],
+            admins: Vec::new(),
+            components: Vec::new(),
+        }))
+        .await;
+    assert!(
+        matches!(response, Response::Ok { .. }),
+        "create: {response:?}"
+    );
+    a.publish(&mut relay).await;
+    let welcomes = welcomes_for(&relay, &b.account_hex());
+    assert_ne!(welcomes.len(), 0, "welcome published");
+
+    let response = b.call_once(Request::Ingest(IngestRequest {
+        events: welcomes.clone(),
+    }));
+    let Response::SignerPending { requests } = response else {
+        panic!("welcome ingest suspends on nip44: {response:?}")
+    };
+    // `invalid_payload` only fits `nip44_decrypt`; other ops in the batch
+    // get a real answer.
+    let mut replies = Vec::with_capacity(requests.len());
+    for request in &requests {
+        let result = match &request.op {
+            SignerOp::Nip44Decrypt { .. } => SignerResult::InvalidPayload,
+            op => b.answer(op).await,
+        };
+        replies.push(SignerReply {
+            id: request.id,
+            result,
+        });
+    }
+    let response = b.call_once(Request::SignerReply(SignerReplyRequest { replies }));
+    let Response::Ok { result } = response else {
+        panic!("invalid-payload welcome reports, not errors: {response:?}")
+    };
+    let OpResult::Ingested(IngestedResult { reports }) = *result else {
+        panic!()
+    };
+    assert!(
+        reports.iter().all(|report| matches!(
+            report.outcome,
+            InputOutcome::Rejected {
+                category: InputCategory::InvalidEncoding,
+            }
+        )),
+        "undecryptable welcome is a permanent rejection: {reports:?}"
+    );
+
+    // The rejection is remembered: a re-delivery is `duplicate` and the
+    // ingest resolves without ever suspending on the signer.
+    let response = b.call_once(Request::Ingest(IngestRequest { events: welcomes }));
+    let Response::Ok { result } = response else {
+        panic!("re-delivery must not suspend on the signer: {response:?}")
+    };
+    let OpResult::Ingested(IngestedResult { reports }) = *result else {
+        panic!()
+    };
+    assert!(
+        reports.iter().all(|report| matches!(
+            report.outcome,
+            InputOutcome::Rejected {
+                category: InputCategory::Duplicate,
+            }
+        )),
+        "re-delivered poison wrap is a duplicate: {reports:?}"
+    );
+}
+
 /// Ingest order invariance: the same backlog delivered ascending,
 /// descending and deterministically shuffled converges to identical
 /// snapshots and message sets.
@@ -2229,4 +2322,40 @@ async fn send_pacing_rate_exceeded() {
         panic!("take_outbound result")
     };
     assert!(items.is_empty(), "refused send staged nothing: {items:?}");
+}
+
+/// `Debug` on a live bridge surfaces the lifecycle label and counters only —
+/// never attachment metadata parked in the pending table.
+#[tokio::test(flavor = "current_thread")]
+async fn bridge_debug_redacts_pending_data() {
+    let mut a = Member::new();
+    a.open().await;
+    let response = a
+        .call(Request::CreateGroup(CreateGroupRequest {
+            name: "g".to_owned(),
+            description: "d".to_owned(),
+            relays: vec![RELAY.to_owned()],
+            invitees: Vec::new(),
+            admins: Vec::new(),
+            components: vec![media_component()],
+        }))
+        .await;
+    let OpResult::GroupCreated(created) = ok_result(response) else {
+        panic!("create_group");
+    };
+    let sealed = a
+        .call(Request::SealAttachment(SealAttachmentRequest {
+            group: created.group.id,
+            attachment: AttachmentInput {
+                plaintext: vec![0x70, 0x69, 0x63],
+                media_type: "image/png".to_owned(),
+                filename: "debug-leak-probe.png".to_owned(),
+                dim: None,
+                thumbhash: None,
+            },
+        }))
+        .await;
+    assert!(matches!(sealed, Response::Ok { .. }), "seal: {sealed:?}");
+    let debug = format!("{:?}", a.bridge);
+    assert!(!debug.contains("debug-leak-probe"), "{debug}");
 }

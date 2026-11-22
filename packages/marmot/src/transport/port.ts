@@ -24,7 +24,10 @@ export type RelayFilter = {
 };
 
 export type SubscriptionHandlers = {
-  /** One inbound event. */
+  /**
+   * One inbound event. Events need not be verified by the port: the pump verifies id + signature
+   * before dedupe.
+   */
   event: (event: NostrEvent) => void;
   /** The relay signalled end of stored events. */
   eose: () => void;

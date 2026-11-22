@@ -75,9 +75,21 @@ enum State {
     Poisoned,
 }
 
+impl State {
+    const fn label(&self) -> &'static str {
+        match self {
+            Self::Fresh => "fresh",
+            Self::AwaitingProof(_) => "awaiting_proof",
+            Self::Ready(_) => "ready",
+            Self::Suspended(_) => "suspended",
+            Self::Closed => "closed",
+            Self::Poisoned => "poisoned",
+        }
+    }
+}
+
 /// A byte-protocol bridge over one [`Session`]. See the crate docs for the
 /// host contract.
-#[derive(Debug)]
 pub struct Bridge<H: Host> {
     host: H,
     /// Batches the session's `QueueHost` committed, awaiting flush.
@@ -98,6 +110,19 @@ pub struct Bridge<H: Host> {
     /// Next attachment handle.
     next_handle: u32,
     state: State,
+}
+
+/// Diagnostics name the lifecycle and counters only — queued rows,
+/// attachments and session state never reach a debug string.
+impl<H: Host> std::fmt::Debug for Bridge<H> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Bridge")
+            .field("state", &self.state.label())
+            .field("last_committed", &self.last_committed)
+            .field("pending_ack", &self.pending_ack)
+            .field("attachments", &self.attachments.len())
+            .finish_non_exhaustive()
+    }
 }
 
 impl<H: Host> Bridge<H> {
@@ -938,6 +963,11 @@ const fn reply_fits(op: &crate::protocol::SignerOp, result: &SignerResult) -> bo
                 | crate::protocol::SignerOp::Nip44Decrypt { .. }
         ),
         SignerResult::Refused | SignerResult::Failed => true,
+        // Only a `nip44_decrypt` has a payload the signer can report
+        // undecryptable; on `sign_event`/`nip44_encrypt` it is nonsense.
+        SignerResult::InvalidPayload => {
+            matches!(op, crate::protocol::SignerOp::Nip44Decrypt { .. })
+        }
     }
 }
 

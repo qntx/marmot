@@ -30,6 +30,9 @@ use crate::types::{AccountId, EventId, GroupId};
 
 /// Held modifiers per group; beyond it the oldest drops `unverifiable`.
 pub(crate) const MAX_HELD_PER_GROUP: usize = 128;
+/// Held modifier bytes per group; beyond it the oldest drops
+/// `unverifiable` — a peer cannot pin unbounded memory with large edits.
+pub(crate) const MAX_HELD_BYTES_PER_GROUP: usize = 4 * 1024 * 1024;
 /// How long a held modifier waits for its targets before expiring
 /// `unverifiable` — a bound on acceptable relay reordering.
 pub(crate) const HOLD_WINDOW_MS: u64 = 300_000;
@@ -87,6 +90,53 @@ impl HeldModifier {
     /// Its transport id as the pending-row key.
     fn pending_id(&self) -> MessageId {
         MessageId::new(self.message.transport_id.0.to_vec())
+    }
+
+    /// The bytes the hold counts toward `MAX_HELD_BYTES_PER_GROUP`: the
+    /// message content plus every tag string.
+    fn held_bytes(&self) -> usize {
+        self.message.content.len()
+            + self
+                .message
+                .tags
+                .iter()
+                .flatten()
+                .map(String::len)
+                .sum::<usize>()
+    }
+}
+
+/// One group's hold queue with its running byte total. `bytes` is the
+/// sum of every held entry's `held_bytes`, maintained on push and on
+/// every removal path (release, expiry, eviction, invalidation) so both
+/// caps check in O(1).
+#[derive(Debug, Default)]
+pub(crate) struct HeldQueue {
+    /// Arrival-order hold queue — also the eviction order.
+    pub(crate) queue: VecDeque<HeldModifier>,
+    /// Total `held_bytes` of every entry in `queue`.
+    pub(crate) bytes: usize,
+}
+
+impl HeldQueue {
+    /// Push `entry`, adding its size to `bytes`.
+    fn push_back(&mut self, entry: HeldModifier) {
+        self.bytes += entry.held_bytes();
+        self.queue.push_back(entry);
+    }
+
+    /// Pop the oldest entry, subtracting its size.
+    fn pop_front(&mut self) -> Option<HeldModifier> {
+        let entry = self.queue.pop_front()?;
+        self.bytes -= entry.held_bytes();
+        Some(entry)
+    }
+
+    /// Remove the entry at `index`, subtracting its size.
+    fn remove(&mut self, index: usize) -> Option<HeldModifier> {
+        let entry = self.queue.remove(index)?;
+        self.bytes -= entry.held_bytes();
+        Some(entry)
     }
 }
 
@@ -321,7 +371,9 @@ impl Session {
     }
 
     /// Push `entry` to the group's hold queue (deduped by transport id) and
-    /// resolve the oldest finally when the queue overflows.
+    /// resolve the oldest finally while either bound overflows — entry
+    /// count or held bytes. An entry that alone exceeds the byte cap
+    /// resolves immediately once the queue in front of it drains.
     fn hold_modifier(
         &mut self,
         group: &GroupId,
@@ -331,24 +383,27 @@ impl Session {
         {
             let queue = self.held_modifiers.entry(group.0.clone()).or_default();
             if queue
+                .queue
                 .iter()
                 .any(|held| held.message.transport_id == entry.message.transport_id)
             {
                 return Ok(());
             }
             queue.push_back(entry);
-            if queue.len() <= MAX_HELD_PER_GROUP {
-                return Ok(());
-            }
         }
-        let Some(oldest) = self
-            .held_modifiers
-            .get_mut(&group.0)
-            .and_then(VecDeque::pop_front)
-        else {
-            return Ok(());
-        };
-        self.resolve_modifier(group, oldest, true, out)
+        while self.held_modifiers.get(&group.0).is_some_and(|queue| {
+            queue.queue.len() > MAX_HELD_PER_GROUP || queue.bytes > MAX_HELD_BYTES_PER_GROUP
+        }) {
+            let Some(oldest) = self
+                .held_modifiers
+                .get_mut(&group.0)
+                .and_then(HeldQueue::pop_front)
+            else {
+                break;
+            };
+            self.resolve_modifier(group, oldest, true, out)?;
+        }
+        Ok(())
     }
 
     /// The earliest held entry whose targets are all indexed, or `None`.
@@ -357,7 +412,7 @@ impl Session {
             return Ok(None);
         };
         let group_id = EngineGroupId::new(group.0.clone());
-        for (index, held) in queue.iter().enumerate() {
+        for (index, held) in queue.queue.iter().enumerate() {
             if self.all_indexed(&group_id, held.modifier.targets())? {
                 return Ok(Some(index));
             }
@@ -407,10 +462,12 @@ impl Session {
         let mut pending = Vec::new();
         if let Some(queue) = self.held_modifiers.get_mut(&group.0) {
             let (dropped, kept): (VecDeque<HeldModifier>, VecDeque<HeldModifier>) = queue
+                .queue
                 .drain(..)
                 .partition(|held| held.message.transport_id == *transport);
             pending.extend(dropped.iter().map(HeldModifier::pending_id));
-            *queue = kept;
+            queue.bytes -= dropped.iter().map(HeldModifier::held_bytes).sum::<usize>();
+            queue.queue = kept;
         }
         self.provider.delete_pending_application_events(&pending)?;
         self.provider
@@ -468,8 +525,13 @@ impl Session {
     fn pop_due_hold(&mut self, gid: &[u8], now_ms: u64) -> Option<HeldModifier> {
         self.held_modifiers
             .get_mut(gid)
-            .filter(|queue| queue.front().is_some_and(|held| held.deadline_ms <= now_ms))
-            .and_then(VecDeque::pop_front)
+            .filter(|queue| {
+                queue
+                    .queue
+                    .front()
+                    .is_some_and(|held| held.deadline_ms <= now_ms)
+            })
+            .and_then(HeldQueue::pop_front)
     }
 
     /// Up to `MAX_EXPIRY_SWEEP_PER_TICK` due rows: delete index row and
@@ -539,7 +601,7 @@ impl Session {
         let now_secs = now_ms / 1_000;
         let mut wake: Option<u64> = None;
         for queue in self.held_modifiers.values() {
-            if let Some(held) = queue.front() {
+            if let Some(held) = queue.queue.front() {
                 let delay = held.deadline_ms.saturating_sub(now_ms);
                 wake = Some(wake.map_or(delay, |current| current.min(delay)));
             }

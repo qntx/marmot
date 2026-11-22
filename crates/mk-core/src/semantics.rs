@@ -300,26 +300,39 @@ pub(crate) fn classify(
                 _ => Classified::Drop(DropReason::Malformed),
             }
         }
-        MARMOT_APP_EVENT_KIND_DELETE => {
-            let mut targets: Vec<EventId> = Vec::new();
-            for tag in tags
-                .iter()
-                .filter(|tag| tag.first().map(String::as_str) == Some("e"))
-            {
-                if let Some(id) = tag.get(1).and_then(|raw| event_id_of_hex(raw))
-                    && !targets.contains(&id)
-                {
-                    targets.push(id);
-                }
-            }
-            if targets.is_empty() {
-                Classified::Drop(DropReason::Malformed)
-            } else {
+        MARMOT_APP_EVENT_KIND_DELETE => delete_targets(tags)
+            .map_or(Classified::Drop(DropReason::Malformed), |targets| {
                 Classified::Modifier(Modifier::Delete { targets })
-            }
-        }
+            }),
         _ => Classified::Deliver(Semantics::Other),
     }
+}
+
+/// The most distinct targets a kind-5 delete may name; more is malformed.
+const MAX_DELETE_TARGETS: usize = MAX_UNREACT_IDS;
+
+/// Collect the distinct valid `e` targets of a kind-5 event in tag order.
+/// `None` when no valid target is present or a `MAX_DELETE_TARGETS`+1th
+/// distinct id appears — both malformed, and the bound caps the dedupe and
+/// the held-modifier memory a single event can claim.
+fn delete_targets(tags: &[Vec<String>]) -> Option<Vec<EventId>> {
+    let mut targets: Vec<EventId> = Vec::new();
+    for tag in tags
+        .iter()
+        .filter(|tag| tag.first().map(String::as_str) == Some("e"))
+    {
+        let Some(id) = tag.get(1).and_then(|raw| event_id_of_hex(raw)) else {
+            continue;
+        };
+        if targets.contains(&id) {
+            continue;
+        }
+        if targets.len() == MAX_DELETE_TARGETS {
+            return None;
+        }
+        targets.push(id);
+    }
+    (!targets.is_empty()).then_some(targets)
 }
 
 /// Kinds a kind-5 delete may honour: chat, reaction, edit.
@@ -1011,6 +1024,34 @@ mod tests {
         assert!(matches!(
             resolve(&delete(vec![id(0xaa), id(0x02)]), &alice, lookup, true),
             Resolution::Drop(DropReason::Unauthorized)
+        ));
+    }
+
+    #[test]
+    fn delete_targets_are_bounded() {
+        let tags = |count: usize, distinct: usize| {
+            (0..count)
+                .map(|i| {
+                    vec![
+                        "e".to_owned(),
+                        hex_id(u8::try_from(i % distinct).expect("distinct fits u8")),
+                    ]
+                })
+                .collect::<Vec<_>>()
+        };
+        // 101st distinct id -> malformed; exactly 100 -> modifier; 150
+        // tags over only 100 distinct ids -> still a 100-target modifier.
+        assert!(matches!(
+            classify(5, &tags(101, 101), "", None, None, 0),
+            Classified::Drop(DropReason::Malformed)
+        ));
+        assert!(matches!(
+            classify(5, &tags(100, 100), "", None, None, 0),
+            Classified::Modifier(Modifier::Delete { ref targets }) if targets.len() == 100
+        ));
+        assert!(matches!(
+            classify(5, &tags(150, 100), "", None, None, 0),
+            Classified::Modifier(Modifier::Delete { ref targets }) if targets.len() == 100
         ));
     }
 }

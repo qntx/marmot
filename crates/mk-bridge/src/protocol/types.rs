@@ -1845,4 +1845,7 @@ pub enum SignerResult {
     Refused,
     /// The signer failed the operation.
     Failed,
+    /// The signer ran and a `nip44_decrypt` payload does not decrypt or
+    /// authenticate: the wrap is permanently undecryptable.
+    InvalidPayload,
 }

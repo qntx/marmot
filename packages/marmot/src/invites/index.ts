@@ -4,10 +4,12 @@
  * records signer refusals/failures so client ops map them to typed errors. A refused or failed
  * unwrap is `unavailable` in the engine — rolled back and retryable — so the client emits `pending`
  * and offers `retryInvites`, which reopens the inbox subscriptions at the capped cursor and lets
- * the relays replay the wraps.
+ * the relays replay the wraps. A `SignerInvalidPayloadError` unwrap is a successful signer
+ * invocation whose verdict is on the payload: the engine rejects the wrap permanently, so it is
+ * neither a `pending` condition nor a recorded verdict.
  */
 
-import { SignerRefusedError } from "../backend/engine.ts";
+import { SignerInvalidPayloadError, SignerRefusedError } from "../backend/engine.ts";
 import type { Signer } from "../backend/engine.ts";
 import type { InputReport } from "../backend/protocol.ts";
 
@@ -17,8 +19,9 @@ export type InviteEvent =
 
 /**
  * Wrap `signer` so the first refused/failed call since the last `take()` is recorded.
- * `SignerRefusedError` records "refused", any other throw "failed"; the error is always rethrown
- * unchanged.
+ * `SignerRefusedError` records "refused", any other throw "failed" — except
+ * `SignerInvalidPayloadError`, which records nothing (the signer worked; the wrap is rejected
+ * permanently). The error is always rethrown unchanged.
  */
 export function observeSigner(signer: Signer): {
   signer: Signer;
@@ -29,7 +32,9 @@ export function observeSigner(signer: Signer): {
     try {
       return await call();
     } catch (error) {
-      verdict ??= error instanceof SignerRefusedError ? "refused" : "failed";
+      if (!(error instanceof SignerInvalidPayloadError)) {
+        verdict ??= error instanceof SignerRefusedError ? "refused" : "failed";
+      }
       throw error;
     }
   };
@@ -67,4 +72,25 @@ export function pendingInvites(reports: InputReport[]): InviteEvent[] {
     }
   }
   return [...reasons].map((reason) => ({ type: "pending", reason }));
+}
+
+/**
+ * One self round trip at the NIP-44 extended-length boundary (spec `transports/nostr.md`): the
+ * signer must encrypt and decrypt its own 65,536-byte plaintext exactly — that size needs the
+ * 6-byte `00 00 ‖ u32be(len)` prefix a legacy signer cannot produce. `SignerRefusedError` maps to
+ * "refused" (retryable: unlock and open again); any other throw or a mismatched round trip maps to
+ * "unsupported". `MarmotClient.open` runs this once per client state and caches the pass as
+ * `nip44Extended`.
+ */
+export async function probeNip44Extended(
+  signer: Signer,
+): Promise<"ok" | "refused" | "unsupported"> {
+  const plaintext = "a".repeat(65_536);
+  try {
+    const ciphertext = await signer.nip44Encrypt(signer.pubkey, plaintext);
+    const recovered = await signer.nip44Decrypt(signer.pubkey, ciphertext);
+    return recovered === plaintext ? "ok" : "unsupported";
+  } catch (error) {
+    return error instanceof SignerRefusedError ? "refused" : "unsupported";
+  }
 }

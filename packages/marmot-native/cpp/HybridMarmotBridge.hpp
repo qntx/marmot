@@ -2,6 +2,7 @@
 
 #include "HybridMarmotBridgeSpec.hpp"
 
+#include <atomic>
 #include <functional>
 #include <memory>
 #include <vector>
@@ -16,7 +17,8 @@ namespace margelo::nitro::marmotnative {
  * once (the `open` task clears it right after the `mk_bridge_open` that consumed it returns);
  * `commit` is the JS notification function. The vtable's `ctx` is a heap `std::shared_ptr`
  * pointing here — `release` deletes the box while this class holds the only other reference —
- * so the context outlives both destruction orders.
+ * so the context outlives both destruction orders. `open` runs at most once per bridge
+ * (`_opened`), so the clear can never race a `load` a second open would have triggered.
  */
 struct HostContext {
   std::vector<uint8_t> rows;
@@ -40,6 +42,9 @@ public:
 private:
   MkBridge* _handle;
   std::shared_ptr<HostContext> _ctx;
+  /// Once-per-bridge open guard: set before the open task starts, so a second `open` is
+  /// rejected at the call site and can never reach `mk_bridge_open`.
+  std::atomic<bool> _opened{false};
 };
 
 } // namespace margelo::nitro::marmotnative

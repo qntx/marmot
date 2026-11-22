@@ -41,3 +41,11 @@ here alongside `parity.json` in later milestones.
   script). Its `mdk-kdf-aad` case equals MDK's own literal KAT;
   `tests/media.rs` checks every case against `media::derive_file_key`,
   `media::media_aad`, `media::encrypt_file` and `media::decrypt_file`.
+
+- `nip44/` — NIP-44 transport vectors (not upstream copies of spec files).
+  `extended-length.json` records the three boundary cases of the
+  `00 00 || u32be(len)` extended plaintext-length prefix (65,535 / 65,536 /
+  65,537 bytes) from the pinned rust-nostr fork's
+  `test_extended_length_prefix_vectors`; `packages/marmot/tests/nip44-extended.test.ts`
+  replays them through `@qntx/nostr` and `crates/mk-core/tests/nip44_extended.rs`
+  through `nostr::nips::nip44::v2`.

@@ -2,6 +2,9 @@
   "failed": {
     "type": "failed"
   },
+  "invalid_payload": {
+    "type": "invalid_payload"
+  },
   "refused": {
     "type": "refused"
   },

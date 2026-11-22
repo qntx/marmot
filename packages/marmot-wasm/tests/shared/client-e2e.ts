@@ -793,17 +793,20 @@ export async function scenarioClockSkew(): Promise<ScenarioReport> {
   return report;
 }
 
-/** A `testSigner` whose first `nip44Decrypt` answers `SignerRefusedError`, then works. */
+/**
+ * A `testSigner` whose first `nip44Decrypt` after the open probe answers `SignerRefusedError`, then
+ * works — the probe's self round trip is call 1, so the first Welcome unwrap is call 2.
+ */
 function refusingSigner(): Signer {
   const inner = testSigner();
-  let refused = false;
+  let decrypts = 0;
   return {
     pubkey: inner.pubkey,
     signEvent: inner.signEvent,
     nip44Encrypt: inner.nip44Encrypt,
     nip44Decrypt: async (peer, ciphertext) => {
-      if (!refused) {
-        refused = true;
+      decrypts += 1;
+      if (decrypts === 2) {
         throw new SignerRefusedError();
       }
       return inner.nip44Decrypt(peer, ciphertext);

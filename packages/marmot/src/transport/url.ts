@@ -1,7 +1,8 @@
 /**
- * `safeRelayUrl` — the destination-safety (SSRF) gate every relay URL passes before any connection.
+ * `safeRelayUrl` — the destination-safety (SSRF) gate every relay URL passes before any connection
+ * — and `safeMediaUrl`, the same gate for peer-supplied media locators and group avatar URLs.
  * Hand-written parser: `URL` shims differ across Hermes, Node and browsers, and this is a security
- * check. The URL is never rewritten; callers compare relay strings exactly.
+ * check. The URL is never rewritten; callers compare strings exactly.
  *
  * Host classification mirrors MDK `cgka_traits::app_components::host_safety` exactly: the IPv4
  * non-public set, the IPv6 special-purpose rules, IPv4-mapped IPv6 folded into the IPv4 rules, and
@@ -303,28 +304,25 @@ function parsePort(text: string): boolean {
 }
 
 /**
- * Whether `url` is a dialable relay endpoint. `wss` needs a public host (or a loopback host when
- * `allowLoopback`); `ws` additionally requires a loopback host even with `allowLoopback`.
- * Everything else refuses.
+ * Parse `url` and classify its host, shared by `safeRelayUrl` and `safeMediaUrl` so the two cannot
+ * drift. `undefined` for anything malformed or carrying a fragment, userinfo, a bad port or a
+ * non-ASCII body; the scheme whitelist and the verdict mapping are the caller's.
  */
-export function safeRelayUrl(url: string, allowLoopback: boolean): boolean {
+function classifyUrl(url: string): { scheme: string; verdict: HostVerdict } | undefined {
   if (!withinSizeLimit(url) || !isPrintableAscii(url)) {
-    return false;
+    return undefined;
   }
   if (url.includes("#")) {
-    return false;
+    return undefined;
   }
   const schemeEnd = url.indexOf(":");
   if (schemeEnd <= 0) {
-    return false;
+    return undefined;
   }
   const scheme = url.slice(0, schemeEnd).toLowerCase();
-  if (scheme !== "wss" && scheme !== "ws") {
-    return false;
-  }
   const after = url.slice(schemeEnd + 1);
   if (!after.startsWith("//")) {
-    return false;
+    return undefined;
   }
   const rest = after.slice(2);
   let authorityEnd = rest.length;
@@ -336,7 +334,7 @@ export function safeRelayUrl(url: string, allowLoopback: boolean): boolean {
   }
   const authority = rest.slice(0, authorityEnd);
   if (authority.includes("@")) {
-    return false;
+    return undefined;
   }
   let host: string;
   let bracketed = false;
@@ -344,14 +342,14 @@ export function safeRelayUrl(url: string, allowLoopback: boolean): boolean {
   if (authority.startsWith("[")) {
     const close = authority.indexOf("]");
     if (close === -1) {
-      return false;
+      return undefined;
     }
     bracketed = true;
     host = authority.slice(1, close);
     const tail = authority.slice(close + 1);
     if (tail !== "") {
       if (!tail.startsWith(":")) {
-        return false;
+        return undefined;
       }
       portText = tail.slice(1);
     }
@@ -365,17 +363,54 @@ export function safeRelayUrl(url: string, allowLoopback: boolean): boolean {
     }
   }
   if (host === "" || host.includes("%")) {
-    return false;
+    return undefined;
   }
   if (portText !== undefined && !parsePort(portText)) {
+    return undefined;
+  }
+  return { scheme, verdict: classifyHost(host, bracketed) };
+}
+
+/**
+ * Shared `secure`/`plain` scheme pair rule: a public host takes `secureScheme` only, a loopback
+ * host takes either scheme but only under `allowLoopback`. Everything else refuses.
+ */
+function safeSchemePairUrl(
+  url: string,
+  allowLoopback: boolean,
+  secureScheme: string,
+  plainScheme: string,
+): boolean {
+  const classified = classifyUrl(url);
+  if (
+    classified === undefined ||
+    (classified.scheme !== secureScheme && classified.scheme !== plainScheme)
+  ) {
     return false;
   }
-  const verdict = classifyHost(host, bracketed);
-  if (verdict === "public") {
-    return scheme === "wss";
+  if (classified.verdict === "public") {
+    return classified.scheme === secureScheme;
   }
-  if (verdict === "loopback") {
-    return allowLoopback;
-  }
-  return false;
+  return classified.verdict === "loopback" && allowLoopback;
+}
+
+/**
+ * Whether `url` is a dialable relay endpoint. `wss` needs a public host (or a loopback host when
+ * `allowLoopback`); `ws` additionally requires a loopback host even with `allowLoopback`.
+ * Everything else refuses.
+ */
+export function safeRelayUrl(url: string, allowLoopback: boolean): boolean {
+  return safeSchemePairUrl(url, allowLoopback, "wss", "ws");
+}
+
+/**
+ * Whether `url` is a fetchable peer-supplied media endpoint (attachment locators, group avatar
+ * URLs). `https` needs a public host (or a loopback host when `allowLoopback`); `http` additionally
+ * requires a loopback host even with `allowLoopback`. Everything else refuses. Hosts using
+ * `@qntx/marmot/backend` directly get raw values and must apply this check — or
+ * `mk_core::media::Locator::destination` + `check_resolved_address` in Rust — before fetching;
+ * DNS-resolved addresses remain the host's check, same as relays.
+ */
+export function safeMediaUrl(url: string, allowLoopback: boolean): boolean {
+  return safeSchemePairUrl(url, allowLoopback, "https", "http");
 }

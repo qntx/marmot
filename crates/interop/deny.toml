@@ -23,7 +23,20 @@ ignore = [
   # proc-macro-error2 via openmls_rust_crypto -> libcrux (pinned git dep).
   # Unmaintained only; no safe upgrade path at the pinned revs.
   { id = "RUSTSEC-2026-0173", reason = "transitive dep of pinned OpenMLS git rev; unmaintained advisory, no upgrade available" },
+  # heapless 0.8.0 unsound advisories, linked via the rust-nostr fork -> faster-hex.
+  # faster-hex reaches heapless only under no-alloc; every graph here enables
+  # faster-hex/alloc, so none of the flagged code is linked into a reachable path.
+  { id = "RUSTSEC-2026-0574", reason = "heapless 0.8 via rust-nostr fork e93cc06 -> faster-hex 0.10.1; unreachable: faster-hex uses heapless only without its alloc feature, which every graph here enables; revisit when the MDK nostr pin reaches faster-hex >= 1.0 (2026-11-22)" },
+  { id = "RUSTSEC-2026-0575", reason = "heapless 0.8 via rust-nostr fork e93cc06 -> faster-hex 0.10.1; unreachable: faster-hex uses heapless only without its alloc feature, which every graph here enables; revisit when the MDK nostr pin reaches faster-hex >= 1.0 (2026-11-22)" },
+  { id = "RUSTSEC-2026-0576", reason = "heapless 0.8 via rust-nostr fork e93cc06 -> faster-hex 0.10.1; unreachable: faster-hex uses heapless only without its alloc feature, which every graph here enables; revisit when the MDK nostr pin reaches faster-hex >= 1.0 (2026-11-22)" },
+  { id = "RUSTSEC-2026-0577", reason = "heapless 0.8 via rust-nostr fork e93cc06 -> faster-hex 0.10.1; unreachable: faster-hex uses heapless only without its alloc feature, which every graph here enables; revisit when the MDK nostr pin reaches faster-hex >= 1.0 (2026-11-22)" },
+  { id = "RUSTSEC-2026-0578", reason = "heapless 0.8 via rust-nostr fork e93cc06 -> faster-hex 0.10.1; unreachable: faster-hex uses heapless only without its alloc feature, which every graph here enables; revisit when the MDK nostr pin reaches faster-hex >= 1.0 (2026-11-22)" },
+  { id = "RUSTSEC-2026-0579", reason = "heapless 0.8 via rust-nostr fork e93cc06 -> faster-hex 0.10.1; unreachable: faster-hex uses heapless only without its alloc feature, which every graph here enables; revisit when the MDK nostr pin reaches faster-hex >= 1.0 (2026-11-22)" },
+  { id = "RUSTSEC-2026-0580", reason = "heapless 0.8 via rust-nostr fork e93cc06 -> faster-hex 0.10.1; unreachable: faster-hex uses heapless only without its alloc feature, which every graph here enables; revisit when the MDK nostr pin reaches faster-hex >= 1.0 (2026-11-22)" },
+  { id = "RUSTSEC-2026-0581", reason = "heapless 0.8 via rust-nostr fork e93cc06 -> faster-hex 0.10.1; unreachable: faster-hex uses heapless only without its alloc feature, which every graph here enables; revisit when the MDK nostr pin reaches faster-hex >= 1.0 (2026-11-22)" },
+  { id = "RUSTSEC-2026-0582", reason = "heapless 0.8 via rust-nostr fork e93cc06 -> faster-hex 0.10.1; unreachable: faster-hex uses heapless only without its alloc feature, which every graph here enables; revisit when the MDK nostr pin reaches faster-hex >= 1.0 (2026-11-22)" },
 ]
+unsound = "all"
 yanked = "deny"
 
 [licenses]

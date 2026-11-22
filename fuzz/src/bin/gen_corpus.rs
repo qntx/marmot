@@ -12,7 +12,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use mk_core::testing::{LocalSigner, ManualClock, RecordingHost};
-use mk_core::{AccountSigner, DestinationPolicy, Opened, Session, SessionConfig};
+use mk_core::{
+    AccountSigner, AppMessage, CreateGroup, DestinationPolicy, Opened, Session, SessionConfig,
+};
 
 fn config(
     signer: Arc<LocalSigner>,
@@ -161,7 +163,12 @@ async fn main() {
         let bytes = serde_json::to_string(&envelope)
             .expect("envelope encodes")
             .into_bytes();
-        write(&corpus, "bridge_request", &format!("request-{variant}"), &bytes);
+        write(
+            &corpus,
+            "bridge_request",
+            &format!("request-{variant}"),
+            &bytes,
+        );
         write(&corpus, "ffi_call", &format!("request-{variant}"), &bytes);
     }
     for target in ["bridge_request", "ffi_call"] {
@@ -186,5 +193,40 @@ async fn main() {
         "bridge_config",
         "rows-0",
         &mk_bridge::encode_rows(&rows),
+    );
+
+    // session_rows: a group, one sent message, and an outbound item still
+    // staged (no take_outbound since the send) — the durable frontier after
+    // every commit is acknowledged.
+    let group = session
+        .create_group(CreateGroup {
+            name: "fuzz seed".to_owned(),
+            description: "d".to_owned(),
+            relays: vec!["ws://localhost:7777".to_owned()],
+            invitees: Vec::new(),
+            admins: Vec::new(),
+            components: Vec::new(),
+        })
+        .await
+        .expect("create group");
+    session
+        .send_message(
+            &group,
+            AppMessage {
+                kind: 9,
+                tags: Vec::new(),
+                content: "seed message".to_owned(),
+            },
+        )
+        .await
+        .expect("send seed");
+    while let Some(seq) = session.awaiting_durability() {
+        session.acknowledge_durable(seq);
+    }
+    write(
+        &corpus,
+        "session_rows",
+        "rows-0",
+        &mk_bridge::encode_rows(&host.durable_rows()),
     );
 }

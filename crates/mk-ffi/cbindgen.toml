@@ -28,8 +28,10 @@ header = """
  * - `mk_bridge_close` blocks until the engine thread ran the bridge's
  *   close and exited; `mk_bridge_free` never blocks — without a close
  *   it enqueues shutdown and detaches the thread, which still runs
- *   `release` exactly once. `free` runs at most once per handle; calls
- *   already in flight finish on the detached engine's state.
+ *   `release` exactly once. `free` may run more than once (repeats are
+ *   no-ops) and may run while calls are in flight: they finish on the
+ *   detached engine's state. A freed, unknown or forged handle answers
+ *   `not_open`, like NULL.
  * - A panicking job poisons only its handle: later calls answer an
  *   encoded `poisoned` envelope and `release` still runs once.
  */"""

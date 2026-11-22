@@ -5,22 +5,25 @@
 //! Caller contract (also written into `include/marmot_ffi.h`): a handle
 //! comes from `mk_bridge_new`, any thread may call the API (calls
 //! serialize), input pointers stay valid for the call's duration, `out`
-//! may be null, and `mk_bridge_free` runs at most once per handle —
-//! calls already in flight finish on the detached engine's state. Host
-//! callbacks must not reenter the API for the same handle — the engine
-//! thread is busy inside the callback, so a reentrant call would
-//! deadlock.
+//! may be null, and `mk_bridge_free` may run while calls are in flight
+//! — they hold their own engine `Arc` and finish on the detached
+//! engine's state. `free` may also run more than once: a second `free`
+//! is a no-op, and every call on a freed, unknown or forged handle
+//! answers `not_open` like null does. Host callbacks must not reenter
+//! the API for the same handle — the engine thread is busy inside the
+//! callback, so a reentrant call would deadlock.
 #![allow(
     unsafe_code,
     reason = "the C ABI boundary: raw pointers, host callback invocations and owned buffers cross here"
 )]
 
+use std::collections::HashMap;
 use std::ffi::c_void;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::{Arc, LazyLock, Mutex, MutexGuard};
 
 use mk_bridge::{Bridge, BridgeError, Host, HostError, MAX_REQUEST_BYTES, encode_error};
 
@@ -77,13 +80,47 @@ pub struct MkHostVtable {
 /// One account-device bridge behind the C ABI. Opaque; create with
 /// `mk_bridge_new`, destroy with `mk_bridge_free`.
 ///
-/// `open`/`call`/`drain` may be called from any thread — they serialize
-/// on the handle's job channel. `mk_bridge_free` may run while calls
-/// are in flight: every entry clones this `Arc` first, so the engine
-/// state outlives the box until the last in-flight call returns.
-#[derive(Debug)]
+/// Handles are registry tokens, not pointers into anything dereferenceable:
+/// `open`/`call`/`drain` may be called from any thread — they serialize on
+/// the engine's job channel. `mk_bridge_free` may run while calls are in
+/// flight: every entry clones the engine `Arc` under the registry lock
+/// before doing any work, so a concurrent free cannot race it. A freed,
+/// unknown or double-freed handle answers `not_open` like null does;
+/// `close`/`free` on one are no-ops.
+#[derive(Clone, Copy, Debug)]
 pub struct MkBridge {
-    engine: Arc<Engine>,
+    /// Keeps cbindgen emitting `MkBridge` as an opaque typedef: neither
+    /// struct is `repr(C)`. The type only ever exists as a registry
+    /// token behind a never-dereferenced pointer.
+    _private: MkBridgeOpaque,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct MkBridgeOpaque {
+    _private: usize,
+}
+
+/// Token → live engine. Every ABI call resolves its handle through this
+/// map under the lock, so a freed or never-issued token is just a missing
+/// entry. `next` starts at 1 so a token can never alias the null handle.
+struct Registry {
+    next: usize,
+    engines: HashMap<usize, Arc<Engine>>,
+}
+
+static REGISTRY: LazyLock<Mutex<Registry>> = LazyLock::new(|| {
+    Mutex::new(Registry {
+        next: 1,
+        engines: HashMap::new(),
+    })
+});
+
+/// Lock the registry, ignoring poisoning — the map is only ever mutated
+/// between consistent states, so a poisoned lock still serves reads.
+fn registry() -> MutexGuard<'static, Registry> {
+    REGISTRY
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// The host parts moved onto the engine thread: the copied vtable plus
@@ -267,15 +304,16 @@ fn poison_outside(engine: Option<&Arc<Engine>>) -> Vec<u8> {
     encode_error(&BridgeError::Poisoned)
 }
 
-/// Clone the engine `Arc` behind an ABI pointer, keeping the engine
-/// state alive for the whole call even when `free` drops the box.
+/// Clone the engine `Arc` registered for a handle token, keeping the
+/// engine state alive for the whole call even when `free` detaches the
+/// thread. A null, freed or never-issued handle resolves to `None`, which
+/// every entry maps to `not_open` (or a no-op for `close`/`free`). The
+/// pointer is never dereferenced.
 fn engine_of(handle: *mut MkBridge) -> Option<Arc<Engine>> {
     if handle.is_null() {
         return None;
     }
-    // SAFETY: caller contract — a non-null handle came from
-    // `mk_bridge_new` and is valid at entry.
-    Some(unsafe { Arc::clone(&(*handle).engine) })
+    registry().engines.get(&handle.addr()).map(Arc::clone)
 }
 
 /// Validate a request pointer/length pair without touching the bridge.
@@ -367,16 +405,24 @@ pub unsafe extern "C" fn mk_bridge_new(
         }) else {
             return ptr::null_mut();
         };
-        if matches!(wait.recv(), Ok(Ok(()))) {
-            Box::into_raw(Box::new(MkBridge {
-                engine: Arc::new(engine),
-            }))
-        } else {
+        if !matches!(wait.recv(), Ok(Ok(()))) {
             // Init failed (or the thread died): `release` must not run —
             // the engine main returned before the loop.
             engine.close();
-            ptr::null_mut()
+            return ptr::null_mut();
         }
+        let mut registry = registry();
+        let token = registry.next;
+        let Some(next) = token.checked_add(1) else {
+            // Token space exhausted: do not leak the engine thread.
+            drop(registry);
+            engine.close();
+            return ptr::null_mut();
+        };
+        registry.next = next;
+        registry.engines.insert(token, Arc::new(engine));
+        drop(registry);
+        ptr::without_provenance_mut::<MkBridge>(token)
     }))
     .unwrap_or(ptr::null_mut())
 }
@@ -447,12 +493,12 @@ pub unsafe extern "C" fn mk_bridge_drain(handle: *mut MkBridge, out: *mut MkByte
 }
 
 /// Close the session: blocks until the engine thread ran `Bridge::close`
-/// and exited. Idempotent; null is a no-op. Afterwards `open`/`call`/
-/// `drain` answer `closed` (or `poisoned` on a poisoned handle).
+/// and exited. Idempotent; a dead handle is a no-op. Afterwards
+/// `open`/`call`/`drain` answer `closed` (or `poisoned`).
 ///
 /// # Safety
 ///
-/// `handle` must come from `mk_bridge_new` and not have been freed.
+/// `handle` is never dereferenced; any value answers safely.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn mk_bridge_close(handle: *mut MkBridge) {
     let _outcome = catch_unwind(AssertUnwindSafe(|| {
@@ -462,26 +508,30 @@ pub unsafe extern "C" fn mk_bridge_close(handle: *mut MkBridge) {
     }));
 }
 
-/// Destroy the handle. Never blocks; null is a no-op.
+/// Destroy the handle. Never blocks; null, freed and unknown handles are
+/// no-ops — `free` may run any number of times.
 ///
 /// Without a prior `mk_bridge_close` it enqueues close+shutdown and
-/// detaches the engine thread, which still runs `release` once. `free`
-/// may run at most once; calls already in flight keep the engine state
-/// alive through their own `Arc` and finish (or answer `poisoned` if
-/// their job lands behind the shutdown).
+/// detaches the engine thread, which still runs `release` once. Calls
+/// already in flight keep the engine state alive through their own `Arc`
+/// and finish (or answer `poisoned` if their job lands behind the
+/// shutdown); calls on the freed handle afterwards answer `not_open`.
 ///
 /// # Safety
 ///
-/// `handle` must come from `mk_bridge_new` and not have been freed;
-/// `free` may run at most once.
+/// `handle` is never dereferenced; any value frees safely at most once.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn mk_bridge_free(handle: *mut MkBridge) {
     let _outcome = catch_unwind(AssertUnwindSafe(|| {
-        if !handle.is_null() {
-            // SAFETY: caller contract — `handle` came from
-            // `mk_bridge_new` and is freed exactly once.
-            let bridge = unsafe { Box::from_raw(handle) };
-            bridge.engine.detach();
+        let engine = if handle.is_null() {
+            None
+        } else {
+            registry().engines.remove(&handle.addr())
+        };
+        // Detach outside the lock: the in-flight-call count stays on the
+        // removed Arc, and registry waiters are never held by shutdown.
+        if let Some(engine) = engine {
+            engine.detach();
         }
     }));
 }

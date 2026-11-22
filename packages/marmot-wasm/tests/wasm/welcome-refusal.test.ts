@@ -4,13 +4,16 @@
  *
  * Contract (release artifact): the refused/failed unwrap is `unavailable` with `signer_refused` or
  * `signer_failed`, rolled back in a store savepoint and retryable — a re-ingest with a working
- * signer unwraps and joins, in-session and after a reopen.
+ * signer unwraps and joins, in-session and after a reopen. An unwrap that throws
+ * `SignerInvalidPayloadError` is the signer's verdict that the wrap itself is undecryptable: the
+ * ingest is `rejected: invalid_encoding`, the dedup marker is durable, and re-delivery is
+ * `rejected: duplicate` without calling the signer again.
  */
 
 import { generateSecretKey } from "nostr-tools";
 import { describe, expect, test } from "vite-plus/test";
 
-import { Engine, SignerRefusedError } from "@qntx/marmot/backend";
+import { Engine, SignerInvalidPayloadError, SignerRefusedError } from "@qntx/marmot/backend";
 import type { InputReport, NostrEvent, SessionEvent, Signer } from "@qntx/marmot/backend";
 import { fakeRelay, manualClock, memoryKv } from "@qntx/marmot/testing";
 import type { FakeRelayNetwork } from "@qntx/marmot/testing";
@@ -50,7 +53,7 @@ async function publishIdentity(engine: Engine, network: FakeRelayNetwork): Promi
   await publish(engine, network);
 }
 
-type Refusal = "refused" | "failed";
+type Refusal = "refused" | "failed" | "invalid";
 
 type RefusalProbe = {
   signer: Signer;
@@ -70,7 +73,13 @@ function refusalProbe(base: Signer, kind: Refusal): RefusalProbe {
         state.calls += 1;
         await Promise.resolve();
         if (state.refuse) {
-          throw kind === "refused" ? new SignerRefusedError() : new Error("test signer failure");
+          if (kind === "refused") {
+            throw new SignerRefusedError();
+          }
+          if (kind === "invalid") {
+            throw new SignerInvalidPayloadError();
+          }
+          throw new Error("test signer failure");
         }
         return base.nip44Decrypt(peer, ciphertext);
       },
@@ -254,6 +263,36 @@ describe("welcome refusal (release wasm)", () => {
       ]);
       expect(second.groups).toBe(1);
       expect(second.decryptCalls).toBeGreaterThan(0);
+    },
+  );
+
+  test(
+    "an undecryptable wrap is rejected permanently and re-delivery never re-asks the signer",
+    { timeout: 120_000 },
+    async () => {
+      const pair = await openPair("invalid");
+      const wraps = await inviteB(pair);
+      expect(wraps).toHaveLength(1);
+
+      pair.probe.state.refuse = true;
+      const first = await snapshot(pair.b, await pair.b.ingest(wraps), pair.probe.state.calls);
+      expect(first.reports).toStrictEqual([
+        { event: wraps[0]?.id, outcome: { type: "rejected", category: "invalid_encoding" } },
+      ]);
+      expect(first.groups).toBe(0);
+      expect(first.decryptCalls).toBe(1);
+
+      const callsBefore = pair.probe.state.calls;
+      const second = await snapshot(
+        pair.b,
+        await pair.b.ingest(wraps),
+        pair.probe.state.calls - callsBefore,
+      );
+      expect(second.reports).toStrictEqual([
+        { event: wraps[0]?.id, outcome: { type: "rejected", category: "duplicate" } },
+      ]);
+      expect(second.groups).toBe(0);
+      expect(second.decryptCalls).toBe(0);
     },
   );
 });

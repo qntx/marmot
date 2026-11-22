@@ -3,7 +3,9 @@
  * drains and dispatches session events, reconciles subscriptions when flagged, and publishes
  * whatever `takeOutbound` released after `whenDurable`. Inbound events are buffered per event id
  * with the cursor keys that delivered them, ingested in bounded batches, and cursors advance only
- * after `whenDurable`.
+ * after `whenDurable`: an event delivered after its subscription's EOSE counts immediately; an
+ * event from the stored-event backlog folds in only when that EOSE arrives, so a subscription lost
+ * mid-replay cannot persist a cursor past events never received.
  */
 
 import type { Clock, Engine } from "../backend/engine.ts";
@@ -27,9 +29,11 @@ import {
   groupCursorKey,
   inboxCursorKey,
   planSubscriptions,
+  safeMediaUrl,
   safeRelayUrl,
   wireEventBytes,
 } from "../transport/index.ts";
+import { verifyInbound } from "../transport/verify.ts";
 import { MarmotError, toMarmotError } from "./errors.ts";
 import type { ClientState } from "./state.ts";
 import { encodeClientState } from "./state.ts";
@@ -57,10 +61,28 @@ export type DeliveryEvent = { outbound: string; resolution: PublishResolution };
 
 /** Flush the inbound buffer inline once this many events are buffered. */
 export const INGEST_BATCH_MAX = 256;
+/**
+ * The most distinct inbound events held at once — buffered plus already flushed to the engine but
+ * not yet settled. Past it the delivering subscription is closed and reopened from the durable
+ * cursor after `RESUBSCRIBE_DELAY_MS`.
+ */
+export const MAX_PENDING_INBOUND: number = 4 * INGEST_BATCH_MAX;
+/** Inbound events whose wire encoding exceeds this are dropped before buffering. */
+export const MAX_INBOUND_EVENT_BYTES: number = 1024 * 1024;
+/** Commit ids tracked for post-confirmation refusal warnings before the oldest entry is evicted. */
+export const MAX_TRACKED_COMMITS = 256;
 /** Delay after the first buffered inbound event before a flush runs. */
 export const INGEST_DELAY_MS = 25;
 /** Delay before reconciling after a relay-initiated subscription close. */
 export const RESUBSCRIBE_DELAY_MS = 5000;
+/**
+ * Kind-1059 gift wraps handed to `engine.ingest` per `GIFT_WRAP_WINDOW_MS` — every wrap costs a
+ * signer `nip44_decrypt` (a remote round trip, possibly an extension prompt), so a wrap flood must
+ * not stampede the signer. Kind-445 group events are never budgeted.
+ */
+export const GIFT_WRAP_BUDGET = 32;
+/** The fixed window `GIFT_WRAP_BUDGET` applies to, on the injected clock. */
+export const GIFT_WRAP_WINDOW_MS = 10_000;
 /**
  * The largest commit sent to a relay whose event limit is unknown — MDK `COMMIT_SIZE_FLOOR_BYTES`
  * (mdk#2332). The client knows no relay limits, so every relay counts as unknown-limit.
@@ -83,10 +105,28 @@ type ActiveSub = {
   relay: string;
   kind: 445 | 1059;
   routes: string[];
+  /** The relay signalled end of stored events; later deliveries count live. */
+  eose: boolean;
+  /** Per cursor key the pre-EOSE aggregate, folded into `state.cursors` at EOSE. */
+  backlog: Map<string, { max?: number; cap?: number }>;
+  /** An ingest covering this sub's backlog failed — its EOSE job applies nothing. */
+  tainted: boolean;
   close: () => void;
 };
 
-type Buffered = { event: NostrEvent; keys: Set<string> };
+/** An event plus, per cursor key, the sub that delivered it pre-EOSE (`undefined` when live). */
+type Buffered = { event: NostrEvent; keys: Map<string, ActiveSub | undefined> };
+
+/** Drop the oldest insertion once a commit-bookkeeping collection exceeds `MAX_TRACKED_COMMITS`. */
+function capTracked<K, V>(entries: Map<K, V> | Set<K>): void {
+  if (entries.size <= MAX_TRACKED_COMMITS) {
+    return;
+  }
+  const oldest = entries.keys().next().value;
+  if (oldest !== undefined) {
+    entries.delete(oldest);
+  }
+}
 
 export class Pump {
   private readonly engine: Engine;
@@ -113,18 +153,27 @@ export class Pump {
   private readonly inflight = new Set<Promise<void>>();
   private readonly buffer = new Map<string, Buffered>();
   private readonly active = new Map<string, ActiveSub>();
+  /** Distinct events buffered or inside an unsettled ingest batch. */
+  private pendingInbound = 0;
   private wake: (() => void) | undefined;
   /**
    * Confirmed-commit refusal tracking (mdk#2333): `confirmed` holds outbound ids whose report
    * resolved `confirmed`; `earlyRefusals` holds the relays that reported `rejected` while the
    * commit was still `pending` — an `accepted` from the same relay on a later attempt reverses that
    * refusal. Kept in memory only: a restart between the confirmation and a later refusal loses the
-   * warning (MDK persists refusals until acknowledged; we surface them per occurrence).
+   * warning (MDK persists refusals until acknowledged; we surface them per occurrence). Each
+   * collection evicts its oldest entry past `MAX_TRACKED_COMMITS`; eviction loses only a warning.
    */
   private readonly confirmedCommits = new Set<string>();
   private readonly earlyRefusals = new Map<string, Set<string>>();
 
   private flushTimer: (() => void) | undefined;
+  /** Re-flush armed for the wrap budget window reset while wraps stay deferred in `buffer`. */
+  private wrapTimer: (() => void) | undefined;
+  /** Start of the current wrap budget window, ms on the injected clock. */
+  private wrapWindowStart: number | undefined;
+  /** Kind-1059 events `flushNow` may still take in the current window. */
+  private wrapBudgetLeft = 0;
   private reconcileTimer: (() => void) | undefined;
   private reconcileFlag = false;
   private saveScheduled = false;
@@ -257,6 +306,8 @@ export class Pump {
     this.wake = undefined;
     this.flushTimer?.();
     this.flushTimer = undefined;
+    this.wrapTimer?.();
+    this.wrapTimer = undefined;
     this.reconcileTimer?.();
     this.reconcileTimer = undefined;
     for (const sub of this.active.values()) {
@@ -441,9 +492,11 @@ export class Pump {
         set.add(relay);
       }
       this.earlyRefusals.set(item.id, set);
+      capTracked(this.earlyRefusals);
     }
     if (resolution === "confirmed") {
       this.confirmedCommits.add(item.id);
+      capTracked(this.confirmedCommits);
       this.earlyRefusals.delete(item.id);
     }
     if (resolution === "rolled_back" || resolution === "complete") {
@@ -503,8 +556,33 @@ export class Pump {
     });
   }
 
+  /**
+   * Arm the wrap-deferral re-flush for the current window's reset; a no-op while one is armed.
+   * `flushNow` re-arms it whenever deferred wraps stay in the buffer.
+   */
+  private scheduleWrapFlush(ms: number): void {
+    if (this.wrapTimer !== undefined) {
+      return;
+    }
+    this.wrapTimer = this.timer.set(ms, () => {
+      this.wrapTimer = undefined;
+      this.flushNow();
+    });
+  }
+
   private onInbound(sub: ActiveSub, event: NostrEvent): void {
     if (this.closed) {
+      return;
+    }
+    if (
+      event.content.length > MAX_INBOUND_EVENT_BYTES ||
+      wireEventBytes(event) > MAX_INBOUND_EVENT_BYTES
+    ) {
+      return;
+    }
+    // The port is not obliged to verify: a forged copy must never enter the dedupe buffer or
+    // credit a cursor key, or a same-id forgery could shadow the genuine event.
+    if (!verifyInbound(event)) {
       return;
     }
     let key: string;
@@ -525,9 +603,23 @@ export class Pump {
     }
     const existing = this.buffer.get(event.id);
     if (existing === undefined) {
-      this.buffer.set(event.id, { event, keys: new Set([key]) });
+      if (this.pendingInbound >= MAX_PENDING_INBOUND) {
+        // The relay outruns the engine: drop the event, close its subscription and let the
+        // reconcile reopen it from the durable cursor after RESUBSCRIBE_DELAY_MS.
+        sub.close();
+        if (this.active.get(sub.key) === sub) {
+          this.active.delete(sub.key);
+        }
+        this.scheduleReconcile();
+        return;
+      }
+      this.pendingInbound += 1;
+      this.buffer.set(event.id, {
+        event,
+        keys: new Map([[key, sub.eose ? undefined : sub]]),
+      });
     } else {
-      existing.keys.add(key);
+      existing.keys.set(key, sub.eose ? undefined : sub);
     }
     if (this.buffer.size >= INGEST_BATCH_MAX) {
       this.flushNow();
@@ -544,11 +636,53 @@ export class Pump {
     if (this.buffer.size === 0 || this.closed) {
       return;
     }
-    const batch = [...this.buffer.values()];
-    this.buffer.clear();
+    const nowMs = Number(this.clock.now().unixMs);
+    let windowStart = this.wrapWindowStart;
+    if (windowStart === undefined || nowMs - windowStart >= GIFT_WRAP_WINDOW_MS) {
+      windowStart = nowMs;
+      this.wrapBudgetLeft = GIFT_WRAP_BUDGET;
+    }
+    this.wrapWindowStart = windowStart;
+    // Every group event flushes; kind-1059s flush only within the window's remaining budget —
+    // deferred wraps stay buffered (still counted in `pendingInbound`) until the window resets.
+    const batch: Buffered[] = [];
+    let wraps = 0;
+    for (const [id, entry] of this.buffer) {
+      if (entry.event.kind === GIFT_WRAP_KIND) {
+        if (wraps >= this.wrapBudgetLeft) {
+          continue;
+        }
+        wraps += 1;
+      }
+      batch.push(entry);
+      this.buffer.delete(id);
+    }
+    this.wrapBudgetLeft -= wraps;
+    if (this.buffer.size > 0) {
+      this.scheduleWrapFlush(windowStart + GIFT_WRAP_WINDOW_MS - nowMs);
+    }
+    if (batch.length === 0) {
+      return;
+    }
     const work = this.run(async () => {
       const events = batch.map((entry) => entry.event);
-      const reports = await this.engine.ingest(events);
+      let reports: InputReport[];
+      try {
+        reports = await this.engine.ingest(events);
+      } catch (error) {
+        // The ingest never landed: every sub this batch carried backlog for is tainted — its
+        // EOSE job applies nothing and the next reopen refetches the range. Marked inside the
+        // job so it is visible to the fold link queued behind this run; a detached `work`
+        // catch would race it.
+        for (const entry of batch) {
+          for (const sub of entry.keys.values()) {
+            if (sub !== undefined) {
+              sub.tainted = true;
+            }
+          }
+        }
+        throw error;
+      }
       for (const invite of pendingInvites(reports)) {
         this.emitInvite(invite);
       }
@@ -562,6 +696,8 @@ export class Pump {
       } catch (error) {
         this.emitError(toMarmotError(error));
         return;
+      } finally {
+        this.pendingInbound -= batch.length;
       }
       // Deferred peels are bounded by real time — keep ticking until the engine is quiet, and
       // re-flush immediately whatever arrived while this batch was ingesting.
@@ -575,7 +711,11 @@ export class Pump {
   /**
    * Cursor advance, per key: `max(old, min(createdAt, nowSecs))` over events whose outcome is not
    * `unavailable`; any `unavailable` event caps the key at its earliest `createdAt` − 1 — the range
-   * is not synchronized, so the cursor may move back.
+   * is not synchronized, so the cursor may move back. Keys an event reached after its
+   * subscription's EOSE apply to `state.cursors` here; keys it reached from the stored-event
+   * backlog fold into the delivering sub's `backlog` instead and land only when that sub's EOSE job
+   * runs — a sub closed or tainted before then drops its aggregate and the next `since` refetches
+   * the range.
    */
   private advanceCursors(batch: Buffered[], reports: InputReport[]): void {
     const outcomes = new Map(reports.map((report) => [report.event, report.outcome] as const));
@@ -586,7 +726,22 @@ export class Pump {
       if (outcome === undefined) {
         continue;
       }
-      for (const key of entry.keys) {
+      for (const [key, sub] of entry.keys) {
+        if (sub !== undefined) {
+          let aggregate = sub.backlog.get(key);
+          if (aggregate === undefined) {
+            aggregate = {};
+            sub.backlog.set(key, aggregate);
+          }
+          if (outcome.type === "unavailable") {
+            const at = Number(entry.event.createdAt) - 1;
+            aggregate.cap = aggregate.cap === undefined ? at : Math.min(aggregate.cap, at);
+          } else {
+            const secs = Math.min(Number(entry.event.createdAt), nowSecs);
+            aggregate.max = aggregate.max === undefined ? secs : Math.max(aggregate.max, secs);
+          }
+          continue;
+        }
         let list = perKey.get(key);
         if (list === undefined) {
           list = [];
@@ -599,7 +754,8 @@ export class Pump {
       }
     }
     for (const [key, entries] of perKey) {
-      let value = this.state.cursors[key] ?? 0;
+      const old = this.state.cursors[key] ?? 0;
+      let value = old;
       for (const entry of entries) {
         if (entry.unavailable) {
           continue;
@@ -608,6 +764,10 @@ export class Pump {
         if (secs > value) {
           value = secs;
         }
+      }
+      const buffered = this.bufferedCap(key);
+      if (buffered !== undefined) {
+        value = Math.max(old, Math.min(value, buffered));
       }
       let cap: number | undefined;
       for (const entry of entries) {
@@ -621,6 +781,52 @@ export class Pump {
       }
       this.state.cursors[key] = value;
     }
+  }
+
+  /**
+   * `min(createdAt) − 1` over still-buffered (not yet ingested) events carrying `key`, or
+   * `undefined` when none remain. A cursor must never advance past an event still buffered for it:
+   * a budget-deferred wrap sitting on the far side of a persisted `since` would never be refetched
+   * after reconnect. It may only stall advancement, never pull a cursor below its previous value —
+   * every buffered event arrived through a subscription whose `since` already covers it, so the old
+   * cursor still refetches it. Applies to live keys (`advanceCursors`) and the EOSE fold
+   * (`applyBacklog`) alike — a live wrap deferred beside a folded backlog is just as lost.
+   */
+  private bufferedCap(key: string): number | undefined {
+    let cap: number | undefined;
+    for (const entry of this.buffer.values()) {
+      if (!entry.keys.has(key)) {
+        continue;
+      }
+      const at = Number(entry.event.createdAt) - 1;
+      cap = cap === undefined ? at : Math.min(cap, at);
+    }
+    return cap;
+  }
+
+  /** Apply a settled backlog aggregate (`sub.backlog` entries) at EOSE; used only by the EOSE job. */
+  private applyBacklog(sub: ActiveSub): void {
+    if (this.active.get(sub.key) !== sub || sub.tainted || sub.backlog.size === 0) {
+      return;
+    }
+    for (const [key, aggregate] of sub.backlog) {
+      const old = this.state.cursors[key] ?? 0;
+      let value = old;
+      if (aggregate.max !== undefined && aggregate.max > value) {
+        value = aggregate.max;
+      }
+      const buffered = this.bufferedCap(key);
+      if (buffered !== undefined) {
+        value = Math.max(old, Math.min(value, buffered));
+      }
+      const { cap } = aggregate;
+      if (cap !== undefined) {
+        value = Math.max(0, Math.min(value, cap));
+      }
+      this.state.cursors[key] = value;
+    }
+    sub.backlog.clear();
+    this.scheduleSave();
   }
 
   private scheduleSave(): void {
@@ -644,7 +850,10 @@ export class Pump {
     for (const event of events) {
       switch (event.type) {
         case "message_received":
-          batch.push({ group: event.group, message: event.message });
+          batch.push({
+            group: event.group,
+            message: this.filterAttachmentLocators(event.message),
+          });
           break;
         case "publish_resolved":
           this.emitDelivery({ outbound: event.outbound, resolution: event.resolution });
@@ -746,13 +955,35 @@ export class Pump {
       relay: planned.relay,
       kind: planned.kind,
       routes: planned.routes,
+      eose: false,
+      backlog: new Map(),
+      tainted: false,
       close: () => undefined,
     };
     sub.close = this.relays.subscribe(planned.relay, planned.filters, {
       event: (event) => {
         this.onInbound(sub, event);
       },
-      eose: () => undefined,
+      eose: () => {
+        if (sub.eose) {
+          return;
+        }
+        sub.eose = true;
+        // Flush so every pre-EOSE event's ingest is queued ahead of the fold; the link runs
+        // after every still-parked pre-EOSE batch settled, so the aggregate is complete — and
+        // tainted — by the time it lands. A bare queue link: the fold needs serialization,
+        // not another drain/dispatch cycle.
+        this.flushNow();
+        const prior = this.queue;
+        this.queue = (async () => {
+          try {
+            await prior;
+            this.applyBacklog(sub);
+          } catch (error) {
+            this.emitError(toMarmotError(error));
+          }
+        })();
+      },
       closed: () => {
         this.active.delete(sub.key);
         this.scheduleReconcile();
@@ -778,6 +1009,30 @@ export class Pump {
         }
       })();
     });
+  }
+
+  /**
+   * Peer-supplied locators reach `onMessages` listeners verbatim: keep only the ones `safeMediaUrl`
+   * accepts. The attachment itself is never dropped — `openAttachment` authenticates against the
+   * reference hashes, which do not include the locators.
+   */
+  private filterAttachmentLocators(message: ReceivedMessage): ReceivedMessage {
+    return {
+      ...message,
+      attachments: message.attachments.map((attachment) =>
+        attachment.type === "ok"
+          ? {
+              ...attachment,
+              reference: {
+                ...attachment.reference,
+                locators: attachment.reference.locators.filter((locator) =>
+                  safeMediaUrl(locator.value, this.allowLoopback),
+                ),
+              },
+            }
+          : attachment,
+      ),
+    };
   }
 
   private emitGroupChange(event: GroupEvent): void {

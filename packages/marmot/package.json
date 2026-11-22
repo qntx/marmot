@@ -77,6 +77,8 @@
   },
   "devDependencies": {
     "@arethetypeswrong/cli": "0.18.5",
+    "@noble/ciphers": "2.4.0",
+    "@noble/hashes": "2.4.0",
     "@qntx/tsconfig": "1.0.1",
     "@types/node": "26.6.5",
     "fake-indexeddb": "6.2.8",

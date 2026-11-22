@@ -54,12 +54,36 @@ export class SignerRefusedError extends Error {
   }
 }
 
-/** The account-signer surface the engine drives on `signer_pending`. */
+/**
+ * A signer may throw this from `nip44Decrypt` when the payload itself does not decrypt or
+ * authenticate (`invalid_payload` reply): the wrap is permanently undecryptable, so the ingest is
+ * rejected and remembered — not a retryable signer failure.
+ */
+export class SignerInvalidPayloadError extends Error {
+  constructor() {
+    super("payload failed to decrypt");
+    this.name = "SignerInvalidPayloadError";
+  }
+}
+
+/**
+ * The account-signer surface the engine drives on `signer_pending`. Both NIP-44 directions must
+ * support extended length — plaintexts of at least 65,536 bytes under the 6-byte `00 00 ‖
+ * u32be(len)` prefix (spec `transports/nostr.md`) — including when the signer is a NIP-46 remote
+ * signer (the requirement covers its request/response events) or a NIP-07/NIP-55 extension;
+ * `MarmotClient.open` probes this once per client state and rejects `signer_unsupported` otherwise,
+ * and `@qntx/marmot/testing` `checkSignerNip44` is the host conformance check.
+ */
 export type Signer = {
   /** The account this session signs for, 32-byte hex. */
   readonly pubkey: string;
   signEvent: (unsigned: UnsignedEvent) => Promise<NostrEvent>;
   nip44Encrypt: (peer: string, plaintext: string) => Promise<string>;
+  /**
+   * `nip44Decrypt` MUST throw `SignerInvalidPayloadError` when the payload itself fails to decrypt
+   * (MAC/padding/version/base64); throw `SignerRefusedError` for a refusal/lock; anything else is
+   * `failed` and retryable.
+   */
   nip44Decrypt: (peer: string, ciphertext: string) => Promise<string>;
 };
 
@@ -278,7 +302,13 @@ export class Engine {
     try {
       return await this.dispatchSigner(op);
     } catch (error) {
-      return error instanceof SignerRefusedError ? { type: "refused" } : { type: "failed" };
+      if (error instanceof SignerRefusedError) {
+        return { type: "refused" };
+      }
+      if (error instanceof SignerInvalidPayloadError) {
+        return { type: "invalid_payload" };
+      }
+      return { type: "failed" };
     }
   }
 
