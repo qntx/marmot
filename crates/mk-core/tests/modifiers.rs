@@ -778,6 +778,44 @@ mod modifier_tests {
         assert_still_held(&tail, &[5]);
     }
 
+    /// Held bytes are bounded too: five ~1 MiB edits exceed the 4 MiB
+    /// group cap, so the fifth push resolves the oldest `unverifiable`
+    /// while the four still-fitting modifiers stay held.
+    #[tokio::test(flavor = "current_thread")]
+    async fn hold_queue_byte_cap_evicts_oldest() {
+        let (relay, mut a, mut b, gid) = pair("modifier-byte-cap").await;
+        let route_a = a.route_hex(&gid);
+
+        // Five kind-1009 edits of ~1 MB each (plus tag bytes), distinct
+        // unknown targets: four fit under the 4 MiB cap, the fifth evicts.
+        for i in 0u8..5 {
+            send_typed(
+                &mut b,
+                &relay,
+                &gid,
+                MessageIntent::Edit {
+                    target: EventId([i.wrapping_add(1); 32]),
+                    content: "x".repeat(1_000_000),
+                },
+            )
+            .await;
+        }
+        let a_events = collect(&mut a, &relay, &route_a).await;
+        assert_eq!(
+            dropped_reasons(&a_events),
+            vec![DropReason::Unverifiable],
+            "exactly the oldest held modifier drops: {:?}",
+            dropped_reasons(&a_events)
+        );
+        assert!(
+            !a_events.iter().any(|event| matches!(
+                event,
+                SessionEvent::MessageReceived { message, .. } if message.kind == 1009
+            )),
+            "no kind 1009 delivers"
+        );
+    }
+
     /// A message delivered under a branch that later loses convergence is
     /// invalidated: the drain's `MessageInvalidated` also removes its
     /// `DeliveredMessage` row. Both forked branches carry a self-update

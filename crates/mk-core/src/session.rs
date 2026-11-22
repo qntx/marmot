@@ -36,7 +36,7 @@
     )
 )]
 
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use cgka_engine::account_identity_proof::{
@@ -90,7 +90,7 @@ use zeroize::Zeroizing;
 
 use crate::agent_stream::{AgentStreamPolicy, StreamRoles};
 use crate::clock::{Clock, EngineConvergenceClock, EngineMaintenanceRandom, EngineWallClock, Time};
-use crate::delivered::{self, ExpiryHeap, HeldModifier};
+use crate::delivered::{self, ExpiryHeap, HeldModifier, HeldQueue};
 use crate::events::{InputOutcome, InputReport, SessionEvent, input_outcome, session_event};
 use crate::key_package::{self, KeyPackageInfo, is_valid_client_name};
 use crate::kv::{CommitSeq, KvHost};
@@ -893,10 +893,11 @@ pub struct Session {
     /// armed around each kind-1059 ingest so a refused/failed unwrap can
     /// roll the span back instead of poisoning it as a permanent rejection.
     signer_latch: Arc<SignerLatch>,
-    /// Held kind 1009/5 modifiers per group, arrival order. Memory-only:
-    /// an unacked pending row re-presents the modifier after restart, so
-    /// holds are crash-safe without a durable table. Keyed by group bytes.
-    pub(crate) held_modifiers: HashMap<Vec<u8>, VecDeque<HeldModifier>>,
+    /// Held kind 1009/5 modifiers per group, arrival order with the
+    /// running byte total. Memory-only: an unacked pending row re-presents
+    /// the modifier after restart, so holds are crash-safe without a
+    /// durable table. Keyed by group bytes.
+    pub(crate) held_modifiers: HashMap<Vec<u8>, HeldQueue>,
     /// Events `tick` produced (hold expiries, retention sweeps) for the
     /// next `drain_events`.
     pub(crate) tick_events: Vec<SessionEvent>,
