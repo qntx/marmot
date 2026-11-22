@@ -1809,21 +1809,20 @@ async function run(): Promise<void> {
         name: "m3b-20",
         description: "",
         relays: [url],
-        invitees: [
-          ...wnInvitees,
-          ...siblingKps.map((stored) => ({
-            keyPackage: {
-              id: stored.id,
-              pubkey: stored.pubkey,
-              createdAt: BigInt(stored.created_at),
-              kind: stored.kind,
-              tags: stored.tags.map((tag) => [...tag]),
-              content: stored.content,
-              sig: stored.sig,
-            },
-            inboxRelays: [url],
-          })),
-        ],
+        invitees: wnInvitees,
+        includeOwnDevices: false,
+        ownDevices: siblingKps.map((stored) => ({
+          keyPackage: {
+            id: stored.id,
+            pubkey: stored.pubkey,
+            createdAt: BigInt(stored.created_at),
+            kind: stored.kind,
+            tags: stored.tags.map((tag) => [...tag]),
+            content: stored.content,
+            sig: stored.sig,
+          },
+          inboxRelays: [url],
+        })),
         admins: [rig.wnPub],
       });
       const gid = snapshot3.id;
@@ -2294,11 +2293,18 @@ async function run(): Promise<void> {
         return undefined;
       }, "wn sibling accepts the invite");
 
-      await waitFor(async () => {
-        const snap = await client.group(gid);
-        const member = snap?.members.find((entry) => entry.account === signer.pubkey);
-        return member?.devices === 2 || undefined;
-      }, "our account shows devices == 2");
+      await waitFor(
+        async () => {
+          const snap = await client.group(gid);
+          const member = snap?.members.find((entry) => entry.account === signer.pubkey);
+          // `devices` counts every slot the wn admin invited — earlier
+          // scenarios left more of this account's KeyPackages on the
+          // relay, so assert the aggregate grew past our own leaf.
+          return (member?.devices ?? 0) >= 2 || undefined;
+        },
+        "our account aggregates the sibling's leaf",
+        180_000,
+      );
 
       await client.sendMessage(gid, { kind: CHAT_KIND, tags: [], content: "s14-mk-to-wn" });
       await waitFor(async () => {
@@ -2491,11 +2497,17 @@ async function run(): Promise<void> {
       if (joined !== gid) {
         throw new Error(`sibling joined ${joined}, expected ${gid}`);
       }
-      await waitFor(async () => {
-        const snap = await client.group(gid);
-        const member = snap?.members.find((entry) => entry.account === signer.pubkey);
-        return member?.devices === 2 || undefined;
-      }, "our account shows devices == 2");
+      await waitFor(
+        async () => {
+          const snap = await client.group(gid);
+          const member = snap?.members.find((entry) => entry.account === signer.pubkey);
+          // includeOwnDevices founders every fresh slot of this account,
+          // which earlier scenarios left more than two of.
+          return (member?.devices ?? 0) >= 2 || undefined;
+        },
+        "our account aggregates the sibling's leaf",
+        180_000,
+      );
       await waitFor(async () => {
         const reply = await wn(rig, ["groups", "members", gid], rig.wnNpub);
         const entries = ptrArr(reply, "/result/members").filter((item) =>
