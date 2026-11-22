@@ -26,7 +26,7 @@ import type {
   GroupSnapshot,
   InputReport,
   Invitee,
-  KeyPackageResult,
+  KeyPackageStatusResult,
   MediaAttachmentRef,
   MediaReference,
   MessageIntent,
@@ -402,15 +402,35 @@ export class Engine {
     );
   }
 
-  /** Build, sign and stage the account's kind-30443 `KeyPackage`. */
-  async publishKeyPackage(relays: string[]): Promise<KeyPackageResult> {
-    return this.op({ type: "publish_key_package", relays }, (r) =>
-      r.type === "key_package"
+  /**
+   * Drive the account `KeyPackage` slot's lifecycle against the NIP-65 write set: stage/sign/queue
+   * a replacement when due, republish to gained relays, promote an acknowledged pending. Answers
+   * the slot's standing.
+   */
+  async ensureKeyPackage(writeRelays: string[]): Promise<KeyPackageStatusResult> {
+    return this.op({ type: "ensure_key_package", writeRelays }, (r) =>
+      r.type === "key_package_status"
         ? {
-            keyPackage: r.keyPackage,
-            keyPackageRef: r.keyPackageRef,
-            eventId: r.eventId,
-            account: r.account,
+            slot: r.slot,
+            current: r.current,
+            pending: r.pending,
+            retained: r.retained,
+            nextDueMs: r.nextDueMs,
+          }
+        : MISS,
+    );
+  }
+
+  /** The account `KeyPackage` slot's lifecycle standing. */
+  async keyPackageStatus(): Promise<KeyPackageStatusResult> {
+    return this.op({ type: "key_package_status" }, (r) =>
+      r.type === "key_package_status"
+        ? {
+            slot: r.slot,
+            current: r.current,
+            pending: r.pending,
+            retained: r.retained,
+            nextDueMs: r.nextDueMs,
           }
         : MISS,
     );

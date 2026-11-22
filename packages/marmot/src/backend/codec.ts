@@ -31,6 +31,7 @@ import type {
   InputOutcome,
   InputReport,
   Invitee,
+  KeyPackageInfo,
   LocalState,
   Locator,
   MediaAttachmentRef,
@@ -1086,6 +1087,7 @@ export function decodeSessionEvent(value: unknown, path = "event"): SessionEvent
         group: group(path),
         reason: decodeDropReason(field(o, "reason", path), `${path}.reason`),
       };
+    case "key_package_rotated":
     case "unmapped":
       return { type };
     default:
@@ -1181,6 +1183,7 @@ export function encodeSessionEvent(event: SessionEvent): Json {
       group: event.group,
       reason: event.reason,
     }),
+    key_package_rotated: () => ({ type: "key_package_rotated" }),
     unmapped: () => ({ type: "unmapped" }),
   });
 }
@@ -1216,6 +1219,25 @@ const SNAPSHOT_KEYS = [
   "disband_enabled",
   "disbanding",
 ];
+
+export function decodeKeyPackageInfo(value: unknown, path = "current"): KeyPackageInfo {
+  const o = rec(value, path, ["key_package", "key_package_ref", "event_id", "account"]);
+  return {
+    keyPackage: hex(field(o, "key_package", path), `${path}.key_package`),
+    keyPackageRef: str(field(o, "key_package_ref", path), `${path}.key_package_ref`),
+    eventId: hex32(field(o, "event_id", path), `${path}.event_id`),
+    account: hex32(field(o, "account", path), `${path}.account`),
+  };
+}
+
+export function encodeKeyPackageInfo(info: KeyPackageInfo): Json {
+  return {
+    key_package: hexEncode(info.keyPackage),
+    key_package_ref: info.keyPackageRef,
+    event_id: info.eventId,
+    account: info.account,
+  };
+}
 
 export function decodeGroupSnapshot(value: unknown, path = "group"): GroupSnapshot {
   const o = rec(value, path, SNAPSHOT_KEYS);
@@ -1507,6 +1529,7 @@ export function decodeRequest(value: unknown, path = "request"): BridgeRequest {
     "events",
     "ids",
     "replies",
+    "write_relays",
     "intent",
     "account",
     "admin",
@@ -1526,7 +1549,13 @@ export function decodeRequest(value: unknown, path = "request"): BridgeRequest {
         id: hex32(field(o, "id", path), `${path}.id`),
         results: arr(field(o, "results", path), `${path}.results`, decodeRelayResult),
       };
-    case "publish_key_package":
+    case "ensure_key_package":
+      return {
+        type,
+        writeRelays: strList(field(o, "write_relays", path), `${path}.write_relays`),
+      };
+    case "key_package_status":
+      return { type };
     case "publish_inbox_relays":
       return { type, relays: strList(field(o, "relays", path), `${path}.relays`) };
     case "create_group":
@@ -1679,7 +1708,11 @@ export function encodeRequest(request: BridgeRequest): Json {
       id: request.id,
       results: request.results.map(encodeRelayResult),
     }),
-    publish_key_package: (request) => ({ type: request.type, relays: request.relays }),
+    ensure_key_package: (request) => ({
+      type: "ensure_key_package",
+      write_relays: request.writeRelays,
+    }),
+    key_package_status: () => ({ type: "key_package_status" }),
     publish_inbox_relays: (request) => ({ type: request.type, relays: request.relays }),
     create_group: (request) => ({
       type: "create_group",
@@ -1789,9 +1822,11 @@ export function decodeOpResult(value: unknown, path = "result"): OpResult {
     "seq",
     "items",
     "resolution",
-    "key_package",
-    "key_package_ref",
-    "event_id",
+    "slot",
+    "current",
+    "pending",
+    "retained",
+    "next_due_ms",
     "outbound_id",
     "group",
     "groups",
@@ -1823,14 +1858,20 @@ export function decodeOpResult(value: unknown, path = "result"): OpResult {
         type,
         resolution: decodePublishResolution(field(o, "resolution", path), `${path}.resolution`),
       };
-    case "key_package":
+    case "key_package_status": {
+      const current = field(o, "current", path);
       return {
         type,
-        keyPackage: hex(field(o, "key_package", path), `${path}.key_package`),
-        keyPackageRef: str(field(o, "key_package_ref", path), `${path}.key_package_ref`),
-        eventId: hex32(field(o, "event_id", path), `${path}.event_id`),
-        account: hex32(field(o, "account", path), `${path}.account`),
+        slot: hex32(field(o, "slot", path), `${path}.slot`),
+        current:
+          current === null || current === undefined
+            ? undefined
+            : decodeKeyPackageInfo(current, `${path}.current`),
+        pending: bool(field(o, "pending", path), `${path}.pending`),
+        retained: uint(field(o, "retained", path), `${path}.retained`),
+        nextDueMs: optU64(o["next_due_ms"], `${path}.next_due_ms`),
       };
+    }
     case "inbox_relays":
       return {
         type,
@@ -1906,12 +1947,13 @@ export function encodeOpResult(result: OpResult): Json {
     }),
     outbound: (result) => ({ type: "outbound", items: result.items.map(encodeOutbound) }),
     publish_resolution: (result) => ({ type: "publish_resolution", resolution: result.resolution }),
-    key_package: (result) => ({
-      type: "key_package",
-      key_package: hexEncode(result.keyPackage),
-      key_package_ref: result.keyPackageRef,
-      event_id: result.eventId,
-      account: result.account,
+    key_package_status: (result) => ({
+      type: "key_package_status",
+      slot: result.slot,
+      current: result.current === undefined ? null : encodeKeyPackageInfo(result.current),
+      pending: result.pending,
+      retained: result.retained,
+      next_due_ms: result.nextDueMs === undefined ? null : result.nextDueMs.toString(),
     }),
     inbox_relays: (result) => ({ type: "inbox_relays", outbound_id: result.outboundId }),
     group_created: (result) => ({

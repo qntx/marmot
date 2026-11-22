@@ -314,6 +314,7 @@ export type OutboundPurpose =
   | "commit"
   | "welcome"
   | "key_package"
+  | "key_package_republish"
   | "inbox_relays"
   | "unmapped";
 
@@ -323,6 +324,7 @@ export const OUTBOUND_PURPOSES = [
   "commit",
   "welcome",
   "key_package",
+  "key_package_republish",
   "inbox_relays",
   "unmapped",
 ] as const;
@@ -582,6 +584,7 @@ export type SessionEvent =
   | { type: "group_unrecoverable"; group: string }
   | { type: "publish_resolved"; outbound: string; resolution: PublishResolution }
   | { type: "app_event_dropped"; group: string; reason: DropReason }
+  | { type: "key_package_rotated" }
   | { type: "unmapped" };
 
 export const SESSION_EVENT_TYPES = [
@@ -604,6 +607,7 @@ export const SESSION_EVENT_TYPES = [
   "group_unrecoverable",
   "publish_resolved",
   "app_event_dropped",
+  "key_package_rotated",
   "unmapped",
 ] as const;
 
@@ -611,7 +615,7 @@ export type _SessionEventComplete = Complete<
   Exclude<SessionEvent["type"], (typeof SESSION_EVENT_TYPES)[number]>
 >;
 
-/** What `publish_key_package` returns. */
+/** A published `KeyPackage`'s identity, as reported by `key_package_status`. */
 export type KeyPackageInfo = {
   /** Raw `KeyPackage` bytes. */
   keyPackage: Uint8Array;
@@ -707,7 +711,8 @@ export type BridgeRequest =
   | { type: "awaiting_durability" }
   | { type: "take_outbound" }
   | { type: "report_publish"; id: string; results: RelayResult[] }
-  | { type: "publish_key_package"; relays: string[] }
+  | { type: "ensure_key_package"; writeRelays: string[] }
+  | { type: "key_package_status" }
   | { type: "publish_inbox_relays"; relays: string[] }
   | {
       type: "create_group";
@@ -776,15 +781,16 @@ export const REQUEST_TYPES = [
   "disband",
   "discard_attachment",
   "enable_disbanding",
+  "ensure_key_package",
   "forget_group",
   "group",
   "groups",
   "ingest",
   "invite",
+  "key_package_status",
   "leave",
   "open_attachment",
   "publish_inbox_relays",
-  "publish_key_package",
   "remove_members",
   "report_publish",
   "seal_attachment",
@@ -808,12 +814,18 @@ export type _BridgeRequestComplete = Complete<
   Exclude<BridgeRequest["type"], (typeof REQUEST_TYPES)[number]>
 >;
 
-/** Result payloads returned by `publish_key_package`. */
-export type KeyPackageResult = {
-  keyPackage: Uint8Array;
-  keyPackageRef: string;
-  eventId: string;
-  account: string;
+/** `ensure_key_package`/`key_package_status` result: the slot's lifecycle standing. */
+export type KeyPackageStatusResult = {
+  /** The stable replaceable-event slot (`d` tag), hex. */
+  slot: string;
+  /** The promoted, acknowledged publication, or `undefined`. */
+  current: KeyPackageInfo | undefined;
+  /** Whether a replacement is staged or in flight. */
+  pending: boolean;
+  /** Retired private material still inside its grace period. */
+  retained: number;
+  /** Absolute Unix milliseconds of the earliest lifecycle deadline, or `undefined`. */
+  nextDueMs: bigint | undefined;
 };
 
 /** `seal_attachment` result: the blob to upload plus the send-time handle. */
@@ -837,11 +849,12 @@ export type OpResult =
   | { type: "outbound"; items: Outbound[] }
   | { type: "publish_resolution"; resolution: PublishResolution }
   | {
-      type: "key_package";
-      keyPackage: Uint8Array;
-      keyPackageRef: string;
-      eventId: string;
-      account: string;
+      type: "key_package_status";
+      slot: string;
+      current: KeyPackageInfo | undefined;
+      pending: boolean;
+      retained: number;
+      nextDueMs: bigint | undefined;
     }
   | { type: "inbox_relays"; outboundId: string }
   | { type: "group_created"; group: GroupSnapshot }
@@ -861,7 +874,7 @@ export const RESULT_TYPES = [
   "awaiting_durability",
   "outbound",
   "publish_resolution",
-  "key_package",
+  "key_package_status",
   "inbox_relays",
   "group_created",
   "send_outcome",

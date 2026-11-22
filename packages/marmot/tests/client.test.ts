@@ -236,15 +236,17 @@ function scriptedBackend(script: Script): {
                         type: "ok",
                         result: { type: "group", group: script.groups[0] },
                       };
-                    case "publish_key_package":
+                    case "ensure_key_package":
+                    case "key_package_status":
                       return {
                         type: "ok",
                         result: {
-                          type: "key_package",
-                          keyPackage: Uint8Array.of(1),
-                          keyPackageRef: "00".repeat(32),
-                          eventId: "00".repeat(32),
-                          account: ACCOUNT,
+                          type: "key_package_status",
+                          slot: "11".repeat(32),
+                          current: undefined,
+                          pending: false,
+                          retained: 0,
+                          nextDueMs: undefined,
                         },
                       };
                     case "publish_inbox_relays":

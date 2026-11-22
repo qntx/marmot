@@ -148,6 +148,7 @@ async function openInstance(handle: HandleSeed): Promise<MarmotClient> {
     clock: e2eClock(handle.skew),
     timer: handle.timer,
     relays: handle.port ?? handle.network.port(handle.portName),
+    lookupRelays: [LOOKUP],
     allowLoopback: false,
   });
   client.onMessages(async (batch) => {
@@ -194,7 +195,7 @@ export async function waitFor(
 
 /**
  * Publish the account's NIP-65 relay list (kind-10002, `["r", relay]` tags) onto the lookup relay,
- * then the client's own `publishKeyPackage` + `publishInboxRelays`.
+ * then the client's own `ensureKeyPackage` + `publishInboxRelays`.
  */
 export async function identity(handle: ClientHandle): Promise<void> {
   const event = await handle.signer.signEvent({
@@ -205,7 +206,7 @@ export async function identity(handle: ClientHandle): Promise<void> {
     content: "",
   });
   await handle.network.port(handle.portName).publish(LOOKUP, event);
-  await handle.client.publishKeyPackage([LOOKUP]);
+  await handle.client.ensureKeyPackage();
   await handle.client.publishInboxRelays([INBOX]);
   // The ops resolve once durable; their publish pass is async — wait until the relay actually
   // holds both events so a following `lookupInvitees` cannot read an empty store.

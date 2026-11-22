@@ -50,6 +50,7 @@ export type GroupEvent = Exclude<
   | { type: "message_received" }
   | { type: "publish_resolved" }
   | { type: "app_event_dropped" }
+  | { type: "key_package_rotated" }
   | { type: "unmapped" }
 >;
 
@@ -866,6 +867,7 @@ export class Pump {
         case "app_event_dropped":
           this.emitDropped({ group: event.group, reason: event.reason });
           break;
+        case "key_package_rotated":
         case "unmapped":
           break;
         case "group_created":
@@ -1075,7 +1077,7 @@ export class Pump {
     }
   }
 
-  private emitError(error: MarmotError): void {
+  emitError(error: MarmotError): void {
     for (const listener of this.listeners.error) {
       try {
         listener(error);

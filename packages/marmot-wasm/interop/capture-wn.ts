@@ -587,6 +587,7 @@ async function run(): Promise<void> {
       },
       timer,
       relays: nostrRelayPort(pool),
+      lookupRelays: [url],
       allowLoopback: true,
     });
     clientRef = client;
@@ -607,7 +608,7 @@ async function run(): Promise<void> {
     await step({
       name: "c.publish-identity",
       actor: "C",
-      command: "finalizeEvent(10002) + client.publishKeyPackage + client.publishInboxRelays",
+      command: "finalizeEvent(10002) + client.ensureKeyPackage + client.publishInboxRelays",
       run: async () => {
         const relayList = finalizeEvent(
           {
@@ -619,7 +620,7 @@ async function run(): Promise<void> {
           secret,
         );
         await pool.publish([url], relayList);
-        await client.publishKeyPackage([url]);
+        await client.ensureKeyPackage();
         await client.publishInboxRelays([url]);
         return { npub: ourNpub, published: [RELAY_LIST_KIND, KEY_PACKAGE_KIND, INBOX_RELAYS_KIND] };
       },

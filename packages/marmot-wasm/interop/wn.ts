@@ -487,6 +487,7 @@ async function run(): Promise<void> {
       },
       timer,
       relays: nostrRelayPort(pool),
+      lookupRelays: [url],
       allowLoopback: true,
     });
     clientRef = client;
@@ -524,7 +525,7 @@ async function run(): Promise<void> {
       secret,
     );
     await pool.publish([url], relayList);
-    await client.publishKeyPackage([url]);
+    await client.ensureKeyPackage();
     await client.publishInboxRelays([url]);
     await waitFor(
       () =>

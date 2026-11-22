@@ -140,7 +140,7 @@ async function sync(member: Member, network: FakeRelayNetwork, group: string): P
 }
 
 async function publishIdentity(member: Member, network: FakeRelayNetwork): Promise<void> {
-  await member.engine.publishKeyPackage([RELAY]);
+  await member.engine.ensureKeyPackage([RELAY]);
   await publish(member, network);
   await member.engine.publishInboxRelays([RELAY]);
   await publish(member, network);

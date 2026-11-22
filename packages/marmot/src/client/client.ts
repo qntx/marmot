@@ -23,6 +23,7 @@ import type {
   GroupAvatar,
   GroupSnapshot,
   Invitee,
+  KeyPackageStatusResult,
   MediaReference,
   SendOutcome,
   SentMessage,
@@ -50,6 +51,11 @@ export type MarmotClientOptions = {
   clock: Clock;
   timer: Timer;
   relays: RelayPort;
+  /**
+   * Read relays used to fetch this account's NIP-65 list for `ensureKeyPackage`. When non-empty,
+   * `open` runs `ensureKeyPackage` once in the background (errors surface via `onError`).
+   */
+  lookupRelays?: string[];
   allowLoopback?: boolean;
 };
 
@@ -132,6 +138,15 @@ export class MarmotClient {
     }
     const client = new MarmotClient(options, engine, observed, state);
     client.pump.start();
+    if ((options.lookupRelays?.length ?? 0) > 0) {
+      void (async () => {
+        try {
+          await client.ensureKeyPackage();
+        } catch (error) {
+          client.pump.emitError(toMarmotError(error, observed.take()));
+        }
+      })();
+    }
     return client;
   }
 
@@ -192,10 +207,16 @@ export class MarmotClient {
     });
   }
 
-  /** Publish the account KeyPackage to its NIP-65 write relays discovered via `lookupRelays`. */
-  async publishKeyPackage(lookupRelays: string[]): Promise<void> {
+  /**
+   * Drive the account `KeyPackage` slot's lifecycle: the NIP-65 write set is fetched from this
+   * account's newest kind-10002 on `options.lookupRelays`, then `ensure_key_package` runs inside
+   * the op queue. `no_relay_list` when the lookup relays are missing or the list is empty.
+   */
+  async ensureKeyPackage(): Promise<KeyPackageStatusResult> {
     this.guard();
-    const safe = lookupRelays.filter((relay) => safeRelayUrl(relay, this.allowLoopback));
+    const safe = (this.options.lookupRelays ?? []).filter((relay) =>
+      safeRelayUrl(relay, this.allowLoopback),
+    );
     let write: string[] | undefined;
     try {
       write = await writeRelaysOf(
@@ -211,9 +232,12 @@ export class MarmotClient {
     if (write === undefined || write.length === 0) {
       throw new MarmotError("no_relay_list");
     }
-    await this.op(async (engine) => {
-      await engine.publishKeyPackage(write);
-    });
+    return this.op(async (engine) => engine.ensureKeyPackage(write));
+  }
+
+  /** The account `KeyPackage` slot's lifecycle standing. */
+  async keyPackageStatus(): Promise<KeyPackageStatusResult> {
+    return this.op(async (engine) => engine.keyPackageStatus());
   }
 
   /**
