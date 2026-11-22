@@ -1226,7 +1226,7 @@ async fn scenario17_second_device_signs_out() {
         .await
         .expect("sign_out");
     assert_eq!(report.left, vec![gid.clone()], "the member group is left");
-    assert!(report.kept_admin_leaves.is_empty());
+    assert_eq!(report.kept_admin_leaves, Vec::<GroupId>::new());
     flush(&mut a2, &rig).await;
 
     let wn_gid_ref = &wn_gid;
