@@ -30,14 +30,14 @@ import { createServer } from "node:http";
 import { connect } from "node:net";
 import { join, resolve } from "node:path";
 
-import { finalizeEvent, generateSecretKey } from "nostr-tools";
+import { finalizeEvent, generateSecretKey, getPublicKey } from "nostr-tools";
 
 import type { Backend } from "@qntx/marmot/backend";
 import { MarmotClient, nostrRelayPort, MarmotError } from "@qntx/marmot/client";
 import type { ClientMessage, GroupEvent, InviteEvent, RelayPort, Timer } from "@qntx/marmot/client";
 import { memoryCursorStore, memoryKv } from "@qntx/marmot/testing";
 import { Pool } from "@qntx/nostr";
-import { decode, npubEncode } from "@qntx/nostr/nips/nip19";
+import { decode, npubEncode, nsecEncode } from "@qntx/nostr/nips/nip19";
 import { serveFakeRelay } from "@qntx/nostr/testing";
 
 import { releaseBackend } from "../tests/shared/env.ts";
@@ -210,6 +210,93 @@ async function wn(
     throw new Error(`wn ${args.join(" ")} refused: ${raw}`);
   }
   return parsed;
+}
+
+/** One extra `wnd` home of the run — registered for cleanup. */
+type WnHome = { home: string; socket: string; wnd: ChildProcess };
+
+const extraWns: WnHome[] = [];
+
+/** Spawn a second `wnd` against the run's relay and wait for its socket. */
+async function spawnWn(tag: string, relayUrl: string): Promise<WnHome> {
+  const home = mkdtempSync(join(REPO_ROOT, "target", `wn-home-${tag}-`));
+  const socket = join(home, "w.sock");
+  const logsDir = join(REPO_ROOT, "target", "wn-logs", `${tag}-${process.pid}`);
+  mkdirSync(logsDir, { recursive: true });
+  const outFd = openSync(join(logsDir, "wnd.out.log"), "w");
+  const errFd = openSync(join(logsDir, "wnd.err.log"), "w");
+  const wnd = spawn(
+    WND_BIN,
+    [
+      "--home",
+      home,
+      "--socket",
+      socket,
+      "--logs-dir",
+      logsDir,
+      "--discovery-relays",
+      relayUrl,
+      "--default-account-relays",
+      relayUrl,
+    ],
+    { env: wnEnv(home), stdio: ["ignore", outFd, errFd] },
+  );
+  const base = { home, socket };
+  await waitFor(
+    async () => {
+      if (!existsSync(socket)) {
+        return undefined;
+      }
+      const probe = await wnTry(base, ["whoami"]);
+      return probe.ok || undefined;
+    },
+    `extra wnd (${tag}) socket`,
+    WND_START_DEADLINE_MS,
+  );
+  const entry = { home, socket, wnd };
+  extraWns.push(entry);
+  return entry;
+}
+
+/** `wn` invocation with `input` piped to stdin — `login --nsec-stdin`. */
+async function wnStdin(
+  rig: { home: string; socket: string },
+  args: string[],
+  input: string,
+): Promise<unknown> {
+  const argv = ["--json", "--home", rig.home, "--socket", rig.socket, ...args];
+  const out = await new Promise<{ stdout: string; stderr: string }>((resolve, reject) => {
+    const child = spawn(WN_BIN, argv, { env: wnEnv(rig.home) });
+    const chunks = { stdout: "", stderr: "" };
+    child.stdout.setEncoding("utf8").on("data", (data: string) => {
+      chunks.stdout += data;
+    });
+    child.stderr.setEncoding("utf8").on("data", (data: string) => {
+      chunks.stderr += data;
+    });
+    child.on("error", reject);
+    child.on("close", () => {
+      resolve(chunks);
+    });
+    child.stdin.write(input);
+    child.stdin.end();
+  });
+  const text = out.stdout.trim().length === 0 ? out.stderr : out.stdout;
+  const parsed = JSON.parse(text) as unknown;
+  if (!isRecord(parsed) || parsed["ok"] !== true) {
+    throw new Error(`wn ${args.join(" ")} refused: ${text}`);
+  }
+  return parsed;
+}
+
+/** The selected account's npub of a `wn` home (`whoami` account 0). */
+async function wnAccountNpub(rig: { home: string; socket: string }): Promise<string> {
+  const who = await wn(rig, ["whoami"]);
+  const npub = ptrStr(who, "/result/accounts/0/npub");
+  if (npub === undefined) {
+    throw new Error(`whoami carried no npub: ${JSON.stringify(who)}`);
+  }
+  return npub;
 }
 
 function wnGroupId(created: unknown): string {
@@ -2136,6 +2223,350 @@ async function run(): Promise<void> {
         const entries = await wnMessages(rig, wnGid);
         return entries.some((entry) => entry.includes(ourText)) || undefined;
       }, `wn messages list shows ${ourText}`);
+    });
+
+    /** A sibling mk device of our account (same signer, fresh stores). */
+    const openSibling = async (): Promise<{
+      mk: MarmotClient;
+      invites: InviteEvent[];
+      changes: GroupEvent[];
+      received2: ClientMessage[];
+    }> => {
+      const backendN: Backend = await releaseBackend();
+      const mk = await MarmotClient.open({
+        backend: backendN,
+        kv: memoryKv(),
+        cursors: memoryCursorStore(),
+        signer,
+        clock: {
+          now: () => ({
+            unixMs: BigInt(Date.now()),
+            monotonicMs: BigInt(Math.max(0, Date.now() - startMonotonic)),
+          }),
+        },
+        timer,
+        relays: nostrRelayPort(pool),
+        lookupRelays: [url],
+        allowLoopback: true,
+      });
+      const invitesN: InviteEvent[] = [];
+      const changesN: GroupEvent[] = [];
+      const receivedN: ClientMessage[] = [];
+      mk.onInvite((event) => {
+        invitesN.push(event);
+      });
+      mk.onGroupChange((event) => {
+        changesN.push(event);
+      });
+      mk.onMessages((batch) => {
+        receivedN.push(...batch);
+      });
+      return { mk, invites: invitesN, changes: changesN, received2: receivedN };
+    };
+
+    // S14 — wn invites an account holding one wn device (a second wnd
+    // home on our nsec) and one mk device; both join, the account shows
+    // devices 2, messages flow both ways from both devices.
+    await scenario("S14 wn invites our wn sibling + mk device", async () => {
+      const wn2 = await spawnWn("s14", url);
+      await wnStdin(wn2, ["login", "--nsec-stdin"], nsecEncode(secret));
+      const a2npub = await wnAccountNpub(wn2);
+      if (a2npub !== ourNpub) {
+        throw new Error(`wn sibling npub ${a2npub} != ours ${ourNpub}`);
+      }
+      await wn(wn2, ["keys", "publish"], a2npub);
+
+      const created = await wn(rig, ["groups", "create", "m3b-14", ourNpub], rig.wnNpub);
+      const wnGid = wnGroupId(created);
+      const gid = await waitFor(
+        () =>
+          invites.flatMap((event) =>
+            event.type === "joined" && event.group === wnGid ? [event.group] : [],
+          )[0],
+        "mk device joined",
+      );
+      await waitFor(async () => {
+        const reply = await wnTry(wn2, ["groups", "invites"], a2npub);
+        if (reply.ok && JSON.stringify(reply.parsed).includes(wnGid)) {
+          await wn(wn2, ["groups", "accept", wnGid], a2npub);
+          return true;
+        }
+        return undefined;
+      }, "wn sibling accepts the invite");
+
+      await waitFor(async () => {
+        const snap = await client.group(gid);
+        const member = snap?.members.find((entry) => entry.account === signer.pubkey);
+        return member?.devices === 2 || undefined;
+      }, "our account shows devices == 2");
+
+      await client.sendMessage(gid, { kind: CHAT_KIND, tags: [], content: "s14-mk-to-wn" });
+      await waitFor(async () => {
+        const list = await wnTry(
+          wn2,
+          ["messages", "list", wnGid, "--limit", String(WN_MESSAGE_LIMIT)],
+          a2npub,
+        );
+        return (list.ok && JSON.stringify(list.parsed).includes("s14-mk-to-wn")) || undefined;
+      }, "wn sibling lists our message");
+      await wn(wn2, ["messages", "send", wnGid, "s14-sibling-to-mk"], a2npub);
+      await waitFor(
+        () =>
+          received.some(
+            (entry) => entry.group === gid && entry.message.content === "s14-sibling-to-mk",
+          ) || undefined,
+        "mk decodes the sibling's message",
+      );
+    });
+
+    // S15 — we invite an account holding two wn devices (two wnd homes
+    // on one nsec; `wn devices link` when the CLI flow completes, else
+    // unlinked). Both get Welcomes and list the chat; round trip.
+    await scenario("S15 we invite two wn devices of one account", async () => {
+      const nsec15 = generateSecretKey();
+      const npub15 = npubEncode(getPublicKey(nsec15));
+      const wn1 = await spawnWn("s15-d1", url);
+      await wnStdin(wn1, ["login", "--nsec-stdin"], nsecEncode(nsec15));
+      const npub1 = await wnAccountNpub(wn1);
+      if (npub1 !== npub15) {
+        throw new Error(`wn device 1 npub ${npub1} != ${npub15}`);
+      }
+      await wn(wn1, ["keys", "publish"], npub15);
+
+      const wn2 = await spawnWn("s15-d2", url);
+      await wnStdin(wn2, ["login", "--nsec-stdin"], nsecEncode(nsec15));
+      await wn(wn2, ["keys", "publish"], npub15);
+      // The link flow is a SHOULD in the design: run it when the CLI
+      // cooperates; an unlinked second installation also counts.
+      let linked = false;
+      const start = await wnTry(wn2, ["devices", "link", "start"], npub15);
+      if (start.ok) {
+        let prompt: string | undefined;
+        try {
+          prompt = await waitFor(
+            async () => {
+              const status = await wnTry(wn1, ["devices", "link", "status"], npub15);
+              if (!status.ok) {
+                return undefined;
+              }
+              const text = JSON.stringify(status.parsed);
+              const found = /"prompt_?id"\s*:\s*"([^"]+)"/.exec(text);
+              return found?.[1];
+            },
+            "link prompt on the existing device",
+            30_000,
+          );
+        } catch (error) {
+          log(
+            `link prompt never appeared: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+        const matched =
+          prompt === undefined
+            ? { ok: false, raw: "no prompt" }
+            : await wnTry(wn2, ["devices", "link", "confirm-match"], npub15);
+        if (matched.ok && prompt !== undefined) {
+          const approved = await wnTry(
+            wn1,
+            ["devices", "link", "approve", prompt, "--label", "second"],
+            npub15,
+          );
+          linked = approved.ok;
+          if (!approved.ok) {
+            log(`link approve refused: ${approved.raw}`);
+          }
+        } else {
+          log(`link confirm-match refused: ${matched.raw}`);
+        }
+      } else {
+        log(`link start refused: ${start.raw}`);
+      }
+      log(`S15 second wn device ${linked ? "linked" : "unlinked"}`);
+
+      // Both devices' KeyPackages land as invitees; both accept and
+      // list the chat.
+      const kps = await client.lookupInvitees(getPublicKey(nsec15), [url]);
+      log(`S15 invitees: ${kps.length} (${kps.map((i) => i.keyPackage.id.slice(0, 8)).join(",")})`);
+      // Let both wnd workers open the account's inbox subscription
+      // before the Welcomes publish — a wrap older than the `since`
+      // cursor is never replayed to them.
+      await sleep(5000);
+      const created = await client.createGroup({
+        name: "m3b-15",
+        description: "",
+        relays: [url],
+        invitees: kps,
+        admins: [],
+        components: [],
+      });
+      const gid = created.id;
+      // A Welcome lands as a pending invite; when the devices are
+      // linked, the first device's accept fans the joined chat out to
+      // its sibling through the device group, so the sibling may go
+      // straight to `chats list` without an invite of its own.
+      for (const home of [wn1, wn2]) {
+        // oxlint-disable-next-line no-await-in-loop -- device 2's fan-out follows device 1's join
+        await waitFor(
+          async () => {
+            const chats = await wnTry(home, ["chats", "list"], npub15);
+            if (chats.ok && JSON.stringify(chats.parsed).includes(gid)) {
+              return true;
+            }
+            const reply = await wnTry(home, ["groups", "invites"], npub15);
+            if (reply.ok && JSON.stringify(reply.parsed).includes(gid)) {
+              await wn(home, ["groups", "accept", gid], npub15);
+              await wnTry(home, ["sync"], npub15);
+            }
+            return undefined;
+          },
+          `wn device joins and lists ${gid.slice(0, 8)}`,
+        );
+      }
+      await client.sendMessage(gid, { kind: CHAT_KIND, tags: [], content: "s15-mk-to-wn" });
+      for (const home of [wn1, wn2]) {
+        // oxlint-disable-next-line no-await-in-loop -- sequential wn polls
+        await waitFor(async () => {
+          const list = await wnTry(
+            home,
+            ["messages", "list", gid, "--limit", String(WN_MESSAGE_LIMIT)],
+            npub15,
+          );
+          return (list.ok && JSON.stringify(list.parsed).includes("s15-mk-to-wn")) || undefined;
+        }, "wn device lists our message");
+      }
+      await wn(wn1, ["messages", "send", gid, "s15-d1-reply"], npub15);
+      await wn(wn2, ["messages", "send", gid, "s15-d2-reply"], npub15);
+      for (const wanted of ["s15-d1-reply", "s15-d2-reply"]) {
+        // oxlint-disable-next-line no-await-in-loop -- sequential wn polls
+        await waitFor(
+          () =>
+            received.some((entry) => entry.group === gid && entry.message.content === wanted) ||
+            undefined,
+          `mk decodes ${wanted}`,
+        );
+      }
+    });
+
+    // S16 — includeOwnDevices founders our second mk device; it joins
+    // from its own Welcome and the account shows devices 2.
+    await scenario("S16 createGroup includes our own device", async () => {
+      const sibling = await openSibling();
+      const knownKps = new Set(
+        served.relay
+          .events()
+          .filter((stored) => stored.kind === KEY_PACKAGE_KIND && stored.pubkey === signer.pubkey)
+          .map((stored) => stored.id),
+      );
+      await sibling.mk.ensureKeyPackage();
+      await sibling.mk.publishInboxRelays([url]);
+      await waitFor(
+        () =>
+          served.relay
+            .events()
+            .some(
+              (stored) =>
+                stored.kind === KEY_PACKAGE_KIND &&
+                stored.pubkey === signer.pubkey &&
+                !knownKps.has(stored.id),
+            ) || undefined,
+        "sibling's KeyPackage on the relay",
+      );
+      const wnKps = await client.lookupInvitees(rig.wnPub, [url]);
+      const created = await client.createGroup({
+        name: "m3b-16",
+        description: "",
+        relays: [url],
+        invitees: wnKps,
+        admins: [],
+        components: [],
+      });
+      const gid = created.id;
+      const joined = await waitFor(
+        () =>
+          sibling.invites.flatMap((event) =>
+            event.type === "joined" && event.group === gid ? [event.group] : [],
+          )[0],
+        "sibling joined from own_devices",
+      );
+      if (joined !== gid) {
+        throw new Error(`sibling joined ${joined}, expected ${gid}`);
+      }
+      await waitFor(async () => {
+        const snap = await client.group(gid);
+        const member = snap?.members.find((entry) => entry.account === signer.pubkey);
+        return member?.devices === 2 || undefined;
+      }, "our account shows devices == 2");
+      await waitFor(async () => {
+        const reply = await wn(rig, ["groups", "members", gid], rig.wnNpub);
+        const entries = ptrArr(reply, "/result/members").filter((item) =>
+          JSON.stringify(item).includes(signer.pubkey),
+        );
+        return entries.length === 1 || undefined;
+      }, "wn members view shows the account once");
+      await sibling.mk.sendMessage(gid, {
+        kind: CHAT_KIND,
+        tags: [],
+        content: "s16-a2-to-wn",
+      });
+      await waitFor(
+        () =>
+          groupChanges.some((event) => event.group === gid && event.type === "epoch_changed") ||
+          undefined,
+        "primary applies the sibling's message",
+      );
+      await sibling.mk.close();
+    });
+
+    // S18 — wn admin removes our account: every leaf goes in one
+    // Commit and both mk devices end access == "removed".
+    await scenario("S18 wn removes our whole account", async () => {
+      const sibling = await openSibling();
+      const knownKps = new Set(
+        served.relay
+          .events()
+          .filter((stored) => stored.kind === KEY_PACKAGE_KIND && stored.pubkey === signer.pubkey)
+          .map((stored) => stored.id),
+      );
+      await sibling.mk.ensureKeyPackage();
+      await sibling.mk.publishInboxRelays([url]);
+      await waitFor(
+        () =>
+          served.relay
+            .events()
+            .some(
+              (stored) =>
+                stored.kind === KEY_PACKAGE_KIND &&
+                stored.pubkey === signer.pubkey &&
+                !knownKps.has(stored.id),
+            ) || undefined,
+        "sibling's KeyPackage on the relay",
+      );
+      const created = await wn(rig, ["groups", "create", "m3b-18", ourNpub], rig.wnNpub);
+      const wnGid = wnGroupId(created);
+      const gid1 = await waitFor(
+        () =>
+          invites.flatMap((event) =>
+            event.type === "joined" && event.group === wnGid ? [event.group] : [],
+          )[0],
+        "device 1 joined",
+      );
+      const gid2 = await waitFor(
+        () =>
+          sibling.invites.flatMap((event) =>
+            event.type === "joined" && event.group === wnGid ? [event.group] : [],
+          )[0],
+        "device 2 joined",
+      );
+      await wn(rig, ["groups", "remove-members", wnGid, ourNpub], rig.wnNpub);
+      await waitFor(async () => {
+        const snap = await client.group(gid1);
+        return snap?.access === "removed" || undefined;
+      }, "device 1 access == removed");
+      await waitFor(async () => {
+        const snap = await sibling.mk.group(gid2);
+        return snap?.access === "removed" || undefined;
+      }, "device 2 access == removed");
+      await sibling.mk.close();
     });
 
     log(`NIP-11 documents served: ${served.documentsServed()}`);
