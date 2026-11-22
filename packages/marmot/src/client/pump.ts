@@ -154,6 +154,8 @@ export class Pump {
   private readonly inflight = new Set<Promise<void>>();
   /** Nostr route (`nostrGroupId`) → MLS group id, refreshed by `reconcile`. */
   private readonly routeGroup = new Map<string, string>();
+  /** Route → the relays the current plan subscribes it on, refreshed by `reconcile`. */
+  private readonly routeRelays = new Map<string, Set<string>>();
   /** Route → relays whose first EOSE this Pump lifetime has seen. */
   private readonly eoseSeen = new Map<string, Set<string>>();
   /** Groups already reported via `historyFetched` — once per Pump lifetime. */
@@ -956,6 +958,17 @@ export class Pump {
     for (const snapshot of live) {
       this.routeGroup.set(snapshot.nostrGroupId, snapshot.id);
     }
+    this.routeRelays.clear();
+    for (const sub of plan.subscriptions) {
+      for (const route of sub.routes) {
+        let relays = this.routeRelays.get(route);
+        if (relays === undefined) {
+          relays = new Set();
+          this.routeRelays.set(route, relays);
+        }
+        relays.add(sub.relay);
+      }
+    }
     const planned = new Map(plan.subscriptions.map((sub) => [sub.key, sub] as const));
     for (const [key, sub] of this.active) {
       if (!planned.has(key)) {
@@ -1018,10 +1031,11 @@ export class Pump {
   }
 
   /**
-   * First EOSE per group subscription per relay: once every relay covering a route has delivered,
-   * flush the ingest buffer and report `historyFetched` through the serialized op queue — once per
-   * group per Pump lifetime. Never-ending EOSE needs no timer: the session's own deadline covers
-   * it.
+   * First EOSE per group subscription per relay: once every relay the plan subscribes a route on
+   * has delivered, flush the ingest buffer and report `historyFetched` through the serialized op
+   * queue — once per group per Pump lifetime. A subscription lost before its EOSE (relay close,
+   * inbound cap) leaves its relay unseen until the reopened one delivers. Never-ending EOSE needs
+   * no timer: the session's own deadline covers it.
    */
   private onEose(sub: ActiveSub): void {
     if (this.closed || sub.kind === GIFT_WRAP_KIND) {
@@ -1038,13 +1052,8 @@ export class Pump {
       if (group === undefined || this.historyReported.has(group)) {
         continue;
       }
-      const covered = [...this.active.values()].every(
-        (active) =>
-          !active.routes.includes(route) ||
-          active.kind === GIFT_WRAP_KIND ||
-          seen.has(active.relay),
-      );
-      if (!covered) {
+      const relays = this.routeRelays.get(route);
+      if (relays === undefined || ![...relays].every((relay) => seen.has(relay))) {
         continue;
       }
       this.historyReported.add(group);
