@@ -860,6 +860,9 @@ pub enum OutboundPurpose {
     Welcome,
     /// The account's `KeyPackage` (kind 30443).
     KeyPackage,
+    /// A re-send of the same signed `KeyPackage` event to a relay that
+    /// newly joined the write set.
+    KeyPackageRepublish,
     /// The account's inbox relay list (kind 10050).
     InboxRelays,
     /// An `mk-core` purpose this wire version does not know.
@@ -874,6 +877,7 @@ impl From<core::OutboundPurpose> for OutboundPurpose {
             core::OutboundPurpose::Commit => Self::Commit,
             core::OutboundPurpose::Welcome => Self::Welcome,
             core::OutboundPurpose::KeyPackage => Self::KeyPackage,
+            core::OutboundPurpose::KeyPackageRepublish => Self::KeyPackageRepublish,
             core::OutboundPurpose::InboxRelays => Self::InboxRelays,
             // `OutboundPurpose` is `#[non_exhaustive]`.
             _ => Self::Unmapped,
