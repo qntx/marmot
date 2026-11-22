@@ -382,7 +382,9 @@ impl BridgeMember {
                 other => panic!("{}: ingest: {other:?}", self.name),
             }
         }
-        self.call_blocking(Request::Tick(NoArgs {}));
+        // `tick` may suspend on the signer: the KeyPackage lifecycle
+        // stages and signs a replacement after consumption.
+        self.call(Request::Tick(NoArgs {})).await;
         let drained = self.drain_events();
         let ids: Vec<[u8; 32]> = drained
             .iter()
