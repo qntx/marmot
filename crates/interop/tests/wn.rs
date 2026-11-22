@@ -1250,14 +1250,26 @@ async fn scenario17_second_device_signs_out() {
     .await;
 
     // The signed-out device follows the commit to `Removed`.
-    let events = sync(&mut a2, &rig, &gid).await;
-    let _ = events;
-    let state = a2
-        .session
-        .group(&gid)
-        .expect("group")
-        .map(|group| group.state);
-    assert_eq!(state, Some(GroupState::Removed), "a2 is removed");
+    let gid2 = gid.clone();
+    until_member(
+        &mut a2,
+        |a| {
+            let gid2 = gid2.clone();
+            let rig = Arc::clone(&rig);
+            Box::pin(async move {
+                let _ = sync(&mut *a, &rig, &gid2).await;
+                let removed = a
+                    .session
+                    .group(&gid2)
+                    .expect("group")
+                    .is_some_and(|s| s.state == GroupState::Removed);
+                removed.then_some(())
+            })
+        },
+        "a2 is removed",
+        120_000,
+    )
+    .await;
 
     // The remaining device keeps the group: roster {wn, our leaf}.
     let events = sync(&mut a1, &rig, &gid).await;
