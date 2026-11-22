@@ -35,7 +35,7 @@ use cgka_traits::engine_state::EpochState;
 use cgka_traits::error::EngineError;
 use cgka_traits::maintenance::{
     DurableGroupEvolution, GroupEvolutionPhase, GroupEvolutionSemantic, MaintenanceObligation,
-    MaintenancePhase, MaintenanceTrigger, PostJoinHistoryFetchCompletion,
+    MaintenancePhase, MaintenanceTrigger, PostJoinHistoryFetch, PostJoinHistoryFetchCompletion,
     PostJoinHistoryFetchOutcome,
 };
 use cgka_traits::storage::{MaintenanceStorage, StorageError};
