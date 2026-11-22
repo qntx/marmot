@@ -424,6 +424,14 @@ async fn every_request_variant() {
         }))
         .await
     );
+    // `sign_out` after `leave` reports the group already left.
+    mark!(
+        "sign_out",
+        &b.call(Request::SignOut(SignOutRequest {
+            write_relays: vec![RELAY.to_owned()]
+        }))
+        .await,
+    );
     // `signer_reply` while Ready is a typed protocol error.
     mark!(
         "signer_reply",
