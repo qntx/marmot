@@ -98,7 +98,8 @@ impl QueueSigner {
 }
 
 /// A `sign_event` reply: a refusal survives as [`SignerError::Refused`];
-/// a `failed` reply or a mismatched result kind is a generic failure.
+/// a `failed`/`invalid_payload` reply or a mismatched result kind is a
+/// generic failure (a sign/encrypt reply has no payload to be invalid).
 fn sign_reply(result: SignerResult) -> Result<Event, SignerError> {
     match result {
         SignerResult::Signed { event } => Ok(event.into()),
@@ -107,12 +108,15 @@ fn sign_reply(result: SignerResult) -> Result<Event, SignerError> {
     }
 }
 
-/// A `nip44_*` reply: a refusal survives as [`SignerError::Refused`]; a
-/// `failed` reply or a mismatched result kind is a generic failure.
+/// A `nip44_*` reply: a refusal survives as [`SignerError::Refused`]; an
+/// `invalid_payload` reply is the signer's permanent verdict on the
+/// ciphertext; a `failed` reply or a mismatched result kind is a generic
+/// failure.
 fn text_reply(result: SignerResult) -> Result<String, SignerError> {
     match result {
         SignerResult::Text { text } => Ok(text),
         SignerResult::Refused => Err(SignerError::Refused),
+        SignerResult::InvalidPayload => Err(SignerError::InvalidPayload),
         _ => Err(SignerError::Failed("host signer reply".to_owned())),
     }
 }

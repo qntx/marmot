@@ -2866,6 +2866,11 @@ impl Session {
             // signer verdict and fences every write after it, so the ingest
             // ends in an engine error before the dedup epilogue can remember
             // the id — and the savepoint discards whatever it did write.
+            // An `InvalidPayload` unwrap is different: the signer ran and
+            // the payload itself is permanently undecryptable, so no verdict
+            // is latched and the terminal rejection commits — the dedup
+            // marker remembers the id and every re-delivery is a duplicate
+            // that never reaches the signer.
             self.signer_latch.arm();
             let savepoint = self
                 .provider

@@ -149,11 +149,13 @@ pub fn inbox_relays_of(relay: &FakeRelay, url: &str, account_hex: &str) -> Vec<S
 }
 
 /// A `LocalSigner` whose `nip44_decrypt` can be switched to refuse or
-/// fail — for the welcome-unwrap retry path.
+/// fail — for the welcome-unwrap retry path. `decrypt_calls` counts
+/// every `nip44_decrypt` invocation.
 #[derive(Debug)]
 pub struct GatedSigner {
     inner: LocalSigner,
     mode: Mutex<DecryptGate>,
+    calls: Mutex<usize>,
 }
 
 /// What [`GatedSigner::nip44_decrypt`] answers.
@@ -165,6 +167,9 @@ pub enum DecryptGate {
     Refused,
     /// Report `SignerError::Failed`.
     Failed,
+    /// Report `SignerError::InvalidPayload` — the payload itself is
+    /// permanently undecryptable.
+    InvalidPayload,
 }
 
 impl GatedSigner {
@@ -173,12 +178,18 @@ impl GatedSigner {
         Self {
             inner: LocalSigner::new(),
             mode: Mutex::new(DecryptGate::Working),
+            calls: Mutex::new(0),
         }
     }
 
     /// Switch the `nip44_decrypt` answer.
     pub fn set(&self, mode: DecryptGate) {
         *self.mode.lock().unwrap() = mode;
+    }
+
+    /// How many `nip44_decrypt` calls reached the signer.
+    pub fn decrypt_calls(&self) -> usize {
+        *self.calls.lock().unwrap()
     }
 }
 
@@ -210,10 +221,12 @@ impl AccountSigner for GatedSigner {
         peer: &'a AccountId,
         ciphertext: &'a str,
     ) -> SignerFuture<'a, Result<String, SignerError>> {
+        *self.calls.lock().unwrap() += 1;
         let mode = *self.mode.lock().unwrap();
         match mode {
             DecryptGate::Working => self.inner.nip44_decrypt(peer, ciphertext),
             DecryptGate::Refused => Box::pin(async { Err(SignerError::Refused) }),
+            DecryptGate::InvalidPayload => Box::pin(async { Err(SignerError::InvalidPayload) }),
             DecryptGate::Failed => {
                 Box::pin(async { Err(SignerError::Failed("gate closed".to_owned())) })
             }

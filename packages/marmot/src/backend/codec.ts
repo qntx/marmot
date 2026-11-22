@@ -1334,6 +1334,7 @@ export function decodeSignerResult(value: unknown, path = "result"): SignerResul
       return { type, text: str(field(o, "text", path), `${path}.text`) };
     case "refused":
     case "failed":
+    case "invalid_payload":
       return { type };
     default:
       return fail(`${path}.type`, "value");
@@ -1346,6 +1347,7 @@ export function encodeSignerResult(result: SignerResult): Json {
     text: (result) => ({ type: "text", text: result.text }),
     refused: (result) => ({ type: result.type }),
     failed: (result) => ({ type: result.type }),
+    invalid_payload: (result) => ({ type: result.type }),
   });
 }
 

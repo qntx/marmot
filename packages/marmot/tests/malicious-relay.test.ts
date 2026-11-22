@@ -15,6 +15,7 @@ import {
 } from "../src/backend/codec.ts";
 import type { Json } from "../src/backend/codec.ts";
 import type { Signer } from "../src/backend/engine.ts";
+import { SignerInvalidPayloadError } from "../src/backend/engine.ts";
 import { encodeKvBatch } from "../src/backend/kv.ts";
 import type { Backend, BridgeHandle } from "../src/backend/port.ts";
 import type {
@@ -26,6 +27,7 @@ import type {
   NostrEvent,
   Outbound,
   PublishResolution,
+  SignerRequest,
 } from "../src/backend/protocol.ts";
 import { utf8Decode, utf8Encode } from "../src/backend/utf8.ts";
 import { MarmotClient } from "../src/client/client.ts";
@@ -164,6 +166,13 @@ type Script = {
   reports: InputReport[] | "auto";
   /** When set, every `ingest` call parks on this gate before answering. */
   ingestGate: (() => Promise<void>) | undefined;
+  /**
+   * When set, the next `ingest` suspends on these signer requests; the follow-up `signer_reply`
+   * then answers the ingested reports for the suspended call.
+   */
+  signerRequests: SignerRequest[] | undefined;
+  /** The response for the `signer_reply` resolving a suspended ingest. */
+  signerReplyResponse: BridgeResponse | undefined;
   /** Items `take_outbound` returns on the next call, then empty. */
   outbound: Outbound[];
   /** FIFO `report_publish` resolutions; falls back to `complete`. */
@@ -182,6 +191,8 @@ function freshScript(): Script {
     drains: [],
     reports: "auto",
     ingestGate: undefined,
+    signerRequests: undefined,
+    signerReplyResponse: undefined,
     outbound: [],
     resolutions: [],
     groups: [],
@@ -224,8 +235,20 @@ function scriptedBackend(script: Script): Backend {
                         outcome: { type: "accepted" as const },
                       }))
                     : script.reports;
-                return { type: "ok", result: { type: "ingested", reports } };
+                const ingested: BridgeResponse = {
+                  type: "ok",
+                  result: { type: "ingested", reports },
+                };
+                if (script.signerRequests !== undefined) {
+                  const requests = script.signerRequests;
+                  script.signerRequests = undefined;
+                  script.signerReplyResponse = ingested;
+                  return { type: "signer_pending", requests };
+                }
+                return ingested;
               }
+              case "signer_reply":
+                return script.signerReplyResponse ?? DONE;
               case "take_outbound": {
                 const items = script.outbound;
                 script.outbound = [];
@@ -302,7 +325,7 @@ type Fixture = {
   clock: ReturnType<typeof manualClock>;
 };
 
-async function open(script: Script, blob?: Uint8Array): Promise<Fixture> {
+async function open(script: Script, blob?: Uint8Array, hostSigner?: Signer): Promise<Fixture> {
   const timer = manualTimer();
   const network = scriptedRelays();
   const cursors = memoryCursorStore();
@@ -315,7 +338,7 @@ async function open(script: Script, blob?: Uint8Array): Promise<Fixture> {
     backend: scriptedBackend(script),
     kv,
     cursors,
-    signer: signer(),
+    signer: hostSigner ?? signer(),
     clock,
     timer,
     relays: network.port,
@@ -772,6 +795,49 @@ describe("malicious relay", () => {
     await settle(fixture.timer, 25);
     // max(5000, 6000) capped at 2000 − 1.
     expect(decodeClientState(fixture.cursors.bytes()).cursors[key]).toBe(1999);
+    await fixture.client.close();
+  });
+
+  test("a SignerInvalidPayloadError wrap is rejected permanently — invalid_payload reply, no pending invite, cursor folds past it", async () => {
+    const script = freshScript();
+    script.groups = [snapshot()];
+    const wrapId = "08".repeat(32);
+    // The backend suspends the wrap ingest on a nip44_decrypt…
+    script.signerRequests = [
+      { id: 0, op: { type: "nip44_decrypt", peer: ACCOUNT, ciphertext: "garbage" } },
+    ];
+    // …and reports it permanently rejected once the signer answer lands.
+    script.reports = [
+      { event: wrapId, outcome: { type: "rejected", category: "invalid_encoding" } },
+    ];
+    const key = inboxCursorKey(RELAY);
+    const fixture = await open(
+      script,
+      encodeClientState({ cursors: { [key]: 200_000 }, inbox: [RELAY] }),
+      { ...signer(), nip44Decrypt: async () => Promise.reject(new SignerInvalidPayloadError()) },
+    );
+    const invites: unknown[] = [];
+    fixture.client.onInvite((invite) => {
+      invites.push(invite);
+    });
+    await settle(fixture.timer, 5000);
+    const sub = mustSub(inboxSubs(fixture.network));
+
+    push(sub, wrapEvent(wrapId, 300_000n));
+    pushEose(sub);
+    await settle(fixture.timer, 25);
+
+    // The engine answered the pending decrypt with `invalid_payload`.
+    const reply = script.calls.find(
+      (call): call is Extract<BridgeRequest, { type: "signer_reply" }> =>
+        call.type === "signer_reply",
+    );
+    expect(reply?.replies).toStrictEqual([{ id: 0, result: { type: "invalid_payload" } }]);
+    // The wrap's rejection is the backend's verdict, not an invite condition.
+    expect(invites).toStrictEqual([]);
+    // A permanent rejection folds into the cursor normally (an unavailable
+    // outcome would cap it at createdAt − 1 instead).
+    expect(decodeClientState(fixture.cursors.bytes()).cursors[key]).toBe(300_000);
     await fixture.client.close();
   });
 });

@@ -35,6 +35,12 @@ pub enum SignerError {
     /// an unavailable key).
     #[error("signer refused")]
     Refused,
+    /// The signer ran and the ciphertext does not decrypt or authenticate
+    /// (MAC, padding, version or encoding). Permanent for that payload — a
+    /// `nip44_decrypt` answer only — so the ingest commits as a rejection
+    /// and the id is remembered; a re-delivery never reaches the signer.
+    #[error("invalid payload")]
+    InvalidPayload,
     /// A signer-side failure. The message is a fixed category supplied by the
     /// signer implementation; it must not embed payload or key material.
     #[error("signer failed: {0}")]
@@ -76,9 +82,25 @@ fn nostr_account(key: &nostr::prelude::PublicKey) -> Result<AccountId, MarmotSig
         .map_err(|_| MarmotSignerError::new("invalid account public key"))
 }
 
+/// Latch the retryable verdict of a `nip44_decrypt` error. An invalid
+/// payload is not a signer failure — the signer ran and the wrap is
+/// permanently undecryptable — so nothing is recorded for it and the
+/// caller's savepoint commits the rejection.
+fn record_verdict(latch: &Arc<SignerLatch>, error: &SignerError) {
+    let verdict = match error {
+        SignerError::Refused => Some(SignerVerdict::Refused),
+        SignerError::Failed(_) => Some(SignerVerdict::Failed),
+        SignerError::InvalidPayload => None,
+    };
+    if let Some(verdict) = verdict {
+        latch.record(verdict);
+    }
+}
+
 fn signer_failed(error: SignerError) -> MarmotSignerError {
     match error {
         SignerError::Refused => MarmotSignerError::new("signer refused"),
+        SignerError::InvalidPayload => MarmotSignerError::new("invalid payload"),
         SignerError::Failed(message) => MarmotSignerError::new(message),
     }
 }
@@ -97,10 +119,13 @@ pub(crate) enum SignerVerdict {
 
 /// Shared latch between `Session` (arming it around a kind-1059 ingest
 /// span) and [`SignerAdapter`] (recording `nip44_decrypt` failures into
-/// it). On the first recorded verdict it fences the store's writes, so
-/// nothing written after a refused unwrap can reach durable state and the
-/// whole span can be rolled back and reported as retryable instead of
-/// poisoned as a permanent rejection.
+/// it). Only `Refused`/`Failed` verdicts are latched —
+/// [`SignerError::InvalidPayload`] is not a signer failure (the signer ran;
+/// the payload is permanently bad) and does not reach the latch. On the
+/// first recorded verdict it fences the store's writes, so nothing written
+/// after a refused unwrap can reach durable state and the whole span can
+/// be rolled back and reported as retryable instead of poisoned as a
+/// permanent rejection.
 pub(crate) struct SignerLatch {
     store: KvStore,
     state: Mutex<LatchState>,
@@ -254,10 +279,7 @@ impl MarmotNostrSigner for SignerAdapter {
             match inner.nip44_decrypt(&peer, payload).await {
                 Ok(text) => Ok(text),
                 Err(error) => {
-                    latch.record(match &error {
-                        SignerError::Refused => SignerVerdict::Refused,
-                        SignerError::Failed(_) => SignerVerdict::Failed,
-                    });
+                    record_verdict(&latch, &error);
                     Err(signer_failed(error))
                 }
             }

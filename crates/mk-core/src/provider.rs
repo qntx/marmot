@@ -2751,6 +2751,45 @@ impl StorageProvider for KvStorageProvider {
 mod tests {
     use super::*;
 
+    /// A host that accepts every batch and keeps nothing — the dedup
+    /// bound is read from the live store, not durable rows.
+    #[derive(Debug)]
+    struct SinkHost;
+
+    impl KvHost for SinkHost {
+        fn commit(&self, _batch: crate::kv::KvBatch) {}
+    }
+
+    /// The ingress dedup ring holds at most
+    /// [`INGRESS_DEDUP_MARKER_CAPACITY`] markers, evicting oldest-first
+    /// by insert sequence.
+    #[test]
+    fn ingress_dedup_ring_evicts_oldest() {
+        let provider = KvStorageProvider::open(Vec::new(), Arc::new(SinkHost)).expect("open");
+        let marker = |i: u64| {
+            let mut bytes = i.to_be_bytes().to_vec();
+            bytes.resize(32, 0);
+            MessageId::new(bytes)
+        };
+        for i in 0..=INGRESS_DEDUP_MARKER_CAPACITY as u64 {
+            provider
+                .put_ingress_dedup_marker(&marker(i))
+                .expect("marker");
+        }
+        let rows = provider.scan_rows(Table::IngressDedup, &[]).expect("scan");
+        assert_eq!(rows.len(), INGRESS_DEDUP_MARKER_CAPACITY);
+        assert!(
+            !provider.has_ingress_dedup_marker(&marker(0)).expect("has"),
+            "the oldest marker is evicted"
+        );
+        for i in [1, INGRESS_DEDUP_MARKER_CAPACITY as u64] {
+            assert!(
+                provider.has_ingress_dedup_marker(&marker(i)).expect("has"),
+                "marker {i} survives"
+            );
+        }
+    }
+
     /// `WithoutProcessedApplicationsThrough(at)` leaves out only the
     /// delivered applications at or below `at`: sqlite's arm keeps a
     /// Processed application while `openmls_epoch > at`, and branch

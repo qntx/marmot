@@ -963,6 +963,11 @@ const fn reply_fits(op: &crate::protocol::SignerOp, result: &SignerResult) -> bo
                 | crate::protocol::SignerOp::Nip44Decrypt { .. }
         ),
         SignerResult::Refused | SignerResult::Failed => true,
+        // Only a `nip44_decrypt` has a payload the signer can report
+        // undecryptable; on `sign_event`/`nip44_encrypt` it is nonsense.
+        SignerResult::InvalidPayload => {
+            matches!(op, crate::protocol::SignerOp::Nip44Decrypt { .. })
+        }
     }
 }
 
