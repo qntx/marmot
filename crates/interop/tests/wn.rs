@@ -1293,6 +1293,30 @@ async fn scenario17_second_device_signs_out() {
             break;
         }
         if Instant::now() > deadline {
+            // Investigation for the S17 convergence flake: re-ingest the
+            // whole group backlog in (created_at, id) order. Any event not
+            // reported Duplicate/OwnEcho was effectively unprocessed on a1;
+            // then a few settle rounds tell whether redelivery heals.
+            let backlog = fetch_group(&rig, &a1.route_hex(&gid)).await;
+            let reports = a1
+                .session
+                .ingest_batch(backlog)
+                .await
+                .expect("heal ingest");
+            eprintln!("[s17-diag] re-ingest reports:");
+            for report in &reports {
+                eprintln!("[s17-diag]   {} -> {:?}", report.event, report.outcome);
+            }
+            for _ in 0..4 {
+                let events = sync(&mut a1, &rig, &gid).await;
+                if events.iter().any(|event| {
+                    matches!(event, SessionEvent::MessageReceived { message, .. } if message.content.contains("s17-wn-replies"))
+                }) {
+                    eprintln!("[s17-diag] healed after in-order redelivery");
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(500)).await;
+            }
             let snapshot = a1.session.group(&gid).expect("group");
             let listed = wn_messages(&rig, &wn_gid, 600);
             panic!(
