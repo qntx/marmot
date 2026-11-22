@@ -329,8 +329,14 @@ internal `@qntx/*` ranges are `^<version>` in `dependencies`/
    `native.yml` iOS + Android release builds from cache-free sources
    with the exported-symbol gates and attestation, the wasm built twice
    and compared byte for byte, `check:size`/`check:generated`, three
-   `npm publish --provenance` jobs via `qntx/workflows`, then the GitHub
-   release whose notes gain the wasm/native/tarball sha256 table.
+   `npm publish --provenance` jobs, then the GitHub release whose notes
+   gain the wasm/native/tarball sha256 table. The publish and
+   attestation jobs are the only `id-token` holders and run only on
+   `v*.*.*` tag pushes inside the `npm-release` environment — the repo
+   must define that environment with a deployment policy admitting only
+   `v*.*.*` tags plus required reviewers, and each npm Trusted Publisher
+   is bound to the repository, `publish-npm.yml` and the `npm-release`
+   environment, so a token minted outside it is refused.
 
 Dry-run the pipeline from any branch:
 
@@ -344,8 +350,8 @@ The first release of a package that does not exist on npm yet: trusted
 publishing needs the package to exist, so an owner publishes the
 CI-built tarball from that run's `npm-pack-packages-<name>` artifact
 once (`npm publish <tgz> --access public`), then adds the Trusted
-Publisher (`qntx/marmot`, workflow `publish-npm.yml`). Nothing is built
-locally.
+Publisher (`qntx/marmot`, workflow `publish-npm.yml`, environment
+`npm-release`). Nothing is built locally.
 
 `scripts/check-version.ts` fails the lint gate when the internal `@qntx/*`
 ranges, the Cargo workspace version, member `version.workspace = true`
