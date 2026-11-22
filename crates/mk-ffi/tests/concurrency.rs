@@ -45,7 +45,7 @@ mod support;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use marmot_ffi::MkBridge;
+use marmot_ffi::{MkBridge, mk_bridge_free, mk_bridge_new};
 use mk_bridge::protocol::*;
 use mk_core::testing::LocalSigner;
 use support::*;
@@ -191,6 +191,43 @@ fn concurrent_callers_serialize_on_one_handle() {
     }
     member.free();
     other.free();
+}
+
+/// `free` racing a storm of callers on one handle: every call resolves
+/// its engine `Arc` through the registry before `free` removes it, so
+/// every answer is a well-formed `not_open`/`closed` envelope and the
+/// detached engine still releases the host context exactly once.
+#[test]
+fn free_racing_callers_answers_every_call() {
+    const THREADS: usize = 4;
+    const CALLS_PER_THREAD: usize = 25;
+
+    let (_state, releases, ctx) = host_ctx();
+    let vtable = vtable();
+    let handle = unsafe { mk_bridge_new(&vtable, ctx) };
+    assert!(!handle.is_null());
+    let addr = handle as usize;
+    let workers: Vec<_> = (0..THREADS)
+        .map(|_| {
+            std::thread::spawn(move || {
+                let envelope = call_envelope(SHARED_NOW, &Request::Groups(NoArgs {}));
+                let handle = addr as *mut MkBridge;
+                for _ in 0..CALLS_PER_THREAD {
+                    let kind = error_kind_of(&ffi_call(handle, &envelope));
+                    assert!(
+                        kind == "not_open" || kind == "closed",
+                        "unexpected answer: {kind}"
+                    );
+                }
+            })
+        })
+        .collect();
+    unsafe { mk_bridge_free(handle) };
+    for worker in workers {
+        worker.join().expect("worker");
+    }
+    wait_for_release(&releases);
+    assert_eq!(releases.load(Ordering::Relaxed), 1);
 }
 
 /// Create a group on `member` inviting `invitee`; return the group id.

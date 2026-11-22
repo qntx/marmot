@@ -14,8 +14,10 @@
  * - `mk_bridge_close` blocks until the engine thread ran the bridge's
  *   close and exited; `mk_bridge_free` never blocks — without a close
  *   it enqueues shutdown and detaches the thread, which still runs
- *   `release` exactly once. `free` runs at most once per handle; calls
- *   already in flight finish on the detached engine's state.
+ *   `release` exactly once. `free` may run more than once (repeats are
+ *   no-ops) and may run while calls are in flight: they finish on the
+ *   detached engine's state. A freed, unknown or forged handle answers
+ *   `not_open`, like NULL.
  * - A panicking job poisons only its handle: later calls answer an
  *   encoded `poisoned` envelope and `release` still runs once.
  */
@@ -32,10 +34,13 @@
  * One account-device bridge behind the C ABI. Opaque; create with
  * `mk_bridge_new`, destroy with `mk_bridge_free`.
  *
- * `open`/`call`/`drain` may be called from any thread — they serialize
- * on the handle's job channel. `mk_bridge_free` may run while calls
- * are in flight: every entry clones this `Arc` first, so the engine
- * state outlives the box until the last in-flight call returns.
+ * Handles are registry tokens, not pointers into anything dereferenceable:
+ * `open`/`call`/`drain` may be called from any thread — they serialize on
+ * the engine's job channel. `mk_bridge_free` may run while calls are in
+ * flight: every entry clones the engine `Arc` under the registry lock
+ * before doing any work, so a concurrent free cannot race it. A freed,
+ * unknown or double-freed handle answers `not_open` like null does;
+ * `close`/`free` on one are no-ops.
  */
 typedef struct MkBridge MkBridge;
 
@@ -137,28 +142,28 @@ void mk_bridge_drain(struct MkBridge *handle, struct MkBytes *out);
 
 /**
  * Close the session: blocks until the engine thread ran `Bridge::close`
- * and exited. Idempotent; null is a no-op. Afterwards `open`/`call`/
- * `drain` answer `closed` (or `poisoned` on a poisoned handle).
+ * and exited. Idempotent; a dead handle is a no-op. Afterwards
+ * `open`/`call`/`drain` answer `closed` (or `poisoned`).
  *
  * # Safety
  *
- * `handle` must come from `mk_bridge_new` and not have been freed.
+ * `handle` is never dereferenced; any value answers safely.
  */
 void mk_bridge_close(struct MkBridge *handle);
 
 /**
- * Destroy the handle. Never blocks; null is a no-op.
+ * Destroy the handle. Never blocks; null, freed and unknown handles are
+ * no-ops — `free` may run any number of times.
  *
  * Without a prior `mk_bridge_close` it enqueues close+shutdown and
- * detaches the engine thread, which still runs `release` once. `free`
- * may run at most once; calls already in flight keep the engine state
- * alive through their own `Arc` and finish (or answer `poisoned` if
- * their job lands behind the shutdown).
+ * detaches the engine thread, which still runs `release` once. Calls
+ * already in flight keep the engine state alive through their own `Arc`
+ * and finish (or answer `poisoned` if their job lands behind the
+ * shutdown); calls on the freed handle afterwards answer `not_open`.
  *
  * # Safety
  *
- * `handle` must come from `mk_bridge_new` and not have been freed;
- * `free` may run at most once.
+ * `handle` is never dereferenced; any value frees safely at most once.
  */
 void mk_bridge_free(struct MkBridge *handle);
 

@@ -1,4 +1,5 @@
 //! Handle lifecycle: use-after-close answers `closed`, double close is a
+//! no-op, freed and unknown handles answer `not_open`, double `free` is a
 //! no-op, `free` without `close` returns promptly even while a job runs
 //! on the engine thread, and `release` fires exactly once.
 //!
@@ -87,6 +88,80 @@ fn use_after_close_answers_closed() {
         mk_bridge_free(handle);
     }
     wait_for_release(&releases);
+}
+
+/// A freed handle is an unregistered token: `open`/`call`/`drain` answer
+/// `not_open`, and `close`/`free` on it are no-ops.
+#[test]
+fn calls_on_a_freed_handle_answer_not_open() {
+    let (_state, releases, ctx) = host_ctx();
+    let vtable = vtable();
+    let handle = unsafe { mk_bridge_new(&vtable, ctx) };
+    assert!(!handle.is_null());
+    unsafe { mk_bridge_free(handle) };
+    wait_for_release(&releases);
+
+    let mut out = MkBytes {
+        ptr: std::ptr::null_mut(),
+        len: 0,
+    };
+    let envelope = call_envelope(
+        Time {
+            unix_ms: 1_700_000_000_000,
+            monotonic_ms: 2_000,
+        },
+        &Request::Groups(NoArgs {}),
+    );
+    unsafe {
+        mk_bridge_call(handle, envelope.as_ptr(), envelope.len(), &mut out);
+        assert_eq!(error_kind_of(&take_bytes(out)), "not_open");
+        mk_bridge_open(handle, envelope.as_ptr(), envelope.len(), &mut out);
+        assert_eq!(error_kind_of(&take_bytes(out)), "not_open");
+        mk_bridge_drain(handle, &mut out);
+        assert_eq!(error_kind_of(&take_bytes(out)), "not_open");
+        mk_bridge_close(handle);
+        mk_bridge_free(handle);
+    }
+    assert_eq!(releases.load(Ordering::SeqCst), 1);
+}
+
+/// A second `mk_bridge_free` finds an empty registry slot and is a
+/// no-op; `release` still ran exactly once.
+#[test]
+fn double_free_is_noop() {
+    let (_state, releases, ctx) = host_ctx();
+    let vtable = vtable();
+    let handle = unsafe { mk_bridge_new(&vtable, ctx) };
+    assert!(!handle.is_null());
+    unsafe {
+        mk_bridge_free(handle);
+        mk_bridge_free(handle);
+    }
+    wait_for_release(&releases);
+    assert_eq!(releases.load(Ordering::SeqCst), 1);
+}
+
+/// A never-issued token behaves exactly like a freed one.
+#[test]
+fn unknown_handle_answers_not_open() {
+    let mut out = MkBytes {
+        ptr: std::ptr::null_mut(),
+        len: 0,
+    };
+    let envelope = call_envelope(
+        Time {
+            unix_ms: 1_700_000_000_000,
+            monotonic_ms: 2_000,
+        },
+        &Request::Groups(NoArgs {}),
+    );
+    let handle = usize::MAX as *mut marmot_ffi::MkBridge;
+    unsafe {
+        mk_bridge_call(handle, envelope.as_ptr(), envelope.len(), &mut out);
+        assert_eq!(error_kind_of(&take_bytes(out)), "not_open");
+        mk_bridge_close(handle);
+        mk_bridge_free(handle);
+    }
 }
 
 /// A second `mk_bridge_close` is a no-op.
