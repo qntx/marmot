@@ -12,6 +12,12 @@
   "awaiting_durability": {
     "type": "awaiting_durability"
   },
+  "confirm_rejoin": {
+    "group": "dead",
+    "offer": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "token": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "type": "confirm_rejoin"
+  },
   "create_group": {
     "admins": [
       "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
@@ -49,6 +55,10 @@
       "wss://relay.example"
     ],
     "type": "create_group"
+  },
+  "decline_rejoin": {
+    "offer": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "type": "decline_rejoin"
   },
   "disband": {
     "group": "dead",
@@ -160,6 +170,36 @@
       "wss://relay.example"
     ],
     "type": "publish_inbox_relays"
+  },
+  "readd_member": {
+    "account": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "group": "dead",
+    "invitees": [
+      {
+        "inbox_relays": [
+          "wss://relay.example"
+        ],
+        "key_package": {
+          "content": "hello",
+          "created_at": "1700000000",
+          "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "kind": 9,
+          "pubkey": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "sig": "55555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555",
+          "tags": [
+            [
+              "e",
+              "00"
+            ]
+          ]
+        }
+      }
+    ],
+    "type": "readd_member"
+  },
+  "rejoin_offers": {
+    "group": "dead",
+    "type": "rejoin_offers"
   },
   "remove_members": {
     "group": "dead",

@@ -14,20 +14,21 @@ pub(crate) mod ser;
 mod types;
 
 pub use request::{
-    AckDurableRequest, AcknowledgeMessagesRequest, CreateGroupRequest, DisbandRequest,
-    DiscardAttachmentRequest, EnableDisbandingRequest, EnsureKeyPackageRequest, ForgetGroupRequest,
-    GroupRequest, HistoryFetchedRequest, IngestRequest, InviteRequest, LeaveRequest, NoArgs,
-    OpenAttachmentRequest, PublishInboxRelaysRequest, RemoveMembersRequest, ReportPublishRequest,
-    Request, SealAttachmentRequest, SelectKeyPackagesRequest, SelfUpdateRequest, SendIntentRequest,
-    SendMediaRequest, SendMessageRequest, SetAdminRequest, SetGroupAvatarRequest,
-    SetRetentionRequest, SignOutRequest, SignerReplyRequest, SubmitProofRequest,
-    UpdateAppComponentsRequest, UpdateGroupProfileRequest,
+    AckDurableRequest, AcknowledgeMessagesRequest, ConfirmRejoinRequest, CreateGroupRequest,
+    DeclineRejoinRequest, DisbandRequest, DiscardAttachmentRequest, EnableDisbandingRequest,
+    EnsureKeyPackageRequest, ForgetGroupRequest, GroupRequest, HistoryFetchedRequest,
+    IngestRequest, InviteRequest, LeaveRequest, NoArgs, OpenAttachmentRequest,
+    PublishInboxRelaysRequest, ReaddMemberRequest, RejoinOffersRequest, RemoveMembersRequest,
+    ReportPublishRequest, Request, SealAttachmentRequest, SelectKeyPackagesRequest,
+    SelfUpdateRequest, SendIntentRequest, SendMediaRequest, SendMessageRequest, SetAdminRequest,
+    SetGroupAvatarRequest, SetRetentionRequest, SignOutRequest, SignerReplyRequest,
+    SubmitProofRequest, UpdateAppComponentsRequest, UpdateGroupProfileRequest,
 };
 pub use result::{
     AttachmentData, AwaitingDurabilityResult, GroupCreatedResult, GroupResult, GroupsResult,
     InboxRelaysResult, IngestedResult, KeyPackageStatusResult, KeyPackagesResult,
-    MessageSentResult, OpResult, OutboundResult, PublishResolutionResult, ReadyResult,
-    SealedAttachmentResult, SendOutcomeResult, SignOutResult, TickedResult,
+    MessageSentResult, OpResult, OutboundResult, PublishResolutionResult, ReaddResult, ReadyResult,
+    RejoinOffersResult, SealedAttachmentResult, SendOutcomeResult, SignOutResult, TickedResult,
 };
 pub use types::*;
 
@@ -48,7 +49,9 @@ pub const REQUEST_TYPES: &[&str] = &[
     "ack_durable",
     "acknowledge_messages",
     "awaiting_durability",
+    "confirm_rejoin",
     "create_group",
+    "decline_rejoin",
     "disband",
     "discard_attachment",
     "enable_disbanding",
@@ -63,6 +66,8 @@ pub const REQUEST_TYPES: &[&str] = &[
     "leave",
     "open_attachment",
     "publish_inbox_relays",
+    "readd_member",
+    "rejoin_offers",
     "remove_members",
     "report_publish",
     "seal_attachment",

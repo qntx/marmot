@@ -34,12 +34,14 @@ import type {
   OpResult,
   Outbound,
   PublishResolution,
+  ReaddOutcome,
+  RejoinOffer,
   RelayResult,
   SealedAttachmentResult,
   SendOutcome,
   SentMessage,
-  SignOutResult,
   SessionEvent,
+  SignOutResult,
   SignerOp,
   SignerReply,
   SignerResult,
@@ -582,6 +584,34 @@ export class Engine {
   /** Forget the group locally; the forgotten-group tombstone stays. */
   async forgetGroup(group: string): Promise<void> {
     return this.op({ type: "forget_group", group }, (r) => (r.type === "done" ? undefined : MISS));
+  }
+
+  /** The group's stored replacement-Welcome offers awaiting consent. */
+  async rejoinOffers(group: string): Promise<RejoinOffer[]> {
+    return this.op({ type: "rejoin_offers", group }, (r) =>
+      r.type === "rejoin_offers" ? r.offers : MISS,
+    );
+  }
+
+  /** Consent to a stored replacement Welcome — installs the new copy. */
+  async confirmRejoin(group: string, offer: string, token: string): Promise<void> {
+    return this.op({ type: "confirm_rejoin", group, offer, token }, (r) =>
+      r.type === "done" ? undefined : MISS,
+    );
+  }
+
+  /** Decline a stored replacement Welcome — retires the offer. */
+  async declineRejoin(offer: string): Promise<void> {
+    return this.op({ type: "decline_rejoin", offer }, (r) =>
+      r.type === "done" ? undefined : MISS,
+    );
+  }
+
+  /** Remove a stuck member account, then re-invite it once the removal confirms. */
+  async readdMember(group: string, account: string, invitees: Invitee[]): Promise<ReaddOutcome> {
+    return this.op({ type: "readd_member", group, account, invitees }, (r) =>
+      r.type === "readd" ? r.outcome : MISS,
+    );
   }
 
   /** Encrypt an attachment and pin it to the current media epoch. */

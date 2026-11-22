@@ -208,9 +208,24 @@
     "resolution": "complete",
     "type": "publish_resolution"
   },
+  "readd": {
+    "outcome": "removed",
+    "type": "readd"
+  },
   "ready": {
     "account": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
     "type": "ready"
+  },
+  "rejoin_offers": {
+    "offers": [
+      {
+        "author": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "epoch": "4",
+        "offer": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "token": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      }
+    ],
+    "type": "rejoin_offers"
   },
   "sealed_attachment": {
     "ciphertext": "99",

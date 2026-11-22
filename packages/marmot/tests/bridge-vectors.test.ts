@@ -19,6 +19,7 @@ import {
   decodeOpenResponseValue,
   decodeOutboundPurpose,
   decodePublishResolution,
+  decodeReaddOutcome,
   decodeRelayStatus,
   decodeRequest,
   decodeResponseValue,
@@ -60,6 +61,7 @@ import {
   OUTBOUND_PURPOSES,
   PROTOCOL_VERSION,
   PUBLISH_RESOLUTIONS,
+  READD_OUTCOME_TYPES,
   RELAY_STATUSES,
   REQUEST_TYPES,
   RESPONSE_TYPES,
@@ -146,6 +148,7 @@ const UNION_CASES = [
   caseOf("outbound_purpose", OUTBOUND_PURPOSES, decodeOutboundPurpose, (value) => value),
   caseOf("group_state", GROUP_STATES, decodeGroupState, (value) => value),
   caseOf("group_access", GROUP_ACCESSES, decodeGroupAccess, (value) => value),
+  caseOf("readd_outcome", READD_OUTCOME_TYPES, decodeReaddOutcome, (value) => value),
   caseOf("local_state", LOCAL_STATES, decodeLocalState, (value) => value),
   caseOf("publish_resolution", PUBLISH_RESOLUTIONS, decodePublishResolution, (value) => value),
 ];

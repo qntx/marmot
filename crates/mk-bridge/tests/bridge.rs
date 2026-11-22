@@ -375,6 +375,41 @@ async fn every_request_variant() {
         }))
         .await,
     );
+    mark!(
+        "rejoin_offers",
+        &a.call(Request::RejoinOffers(RejoinOffersRequest {
+            group: group.clone(),
+        }))
+        .await,
+    );
+    mark!(
+        "confirm_rejoin",
+        &a.call(Request::ConfirmRejoin(ConfirmRejoinRequest {
+            group: group.clone(),
+            offer: [0xAA; 32],
+            token: [0xBB; 32],
+        }))
+        .await,
+    );
+    mark!(
+        "decline_rejoin",
+        &a.call(Request::DeclineRejoin(DeclineRejoinRequest {
+            offer: [0xAA; 32],
+        }))
+        .await,
+    );
+    mark!(
+        "readd_member",
+        &a.call(Request::ReaddMember(ReaddMemberRequest {
+            group: group.clone(),
+            account: b.signer.account().0,
+            invitees: vec![Invitee {
+                key_package: key_package_of(&relay, &a.account_hex()),
+                inbox_relays: Vec::new(),
+            }],
+        }))
+        .await,
+    );
     // Protocol-v4 app surface requests against the live group.
     mark!(
         "send_intent",

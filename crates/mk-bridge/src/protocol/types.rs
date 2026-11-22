@@ -955,6 +955,59 @@ impl From<core::GroupAccess> for GroupAccess {
     }
 }
 
+/// A stored replacement-Welcome offer awaiting the recipient's consent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RejoinOffer {
+    /// The kind-1059 wrap id carrying the offer, hex.
+    #[serde(with = "hex_str")]
+    pub offer: [u8; 32],
+    /// The admin who authored the re-invite, 32-byte hex.
+    #[serde(with = "hex_str")]
+    pub author: [u8; 32],
+    /// The group epoch the Welcome installs, decimal string.
+    #[serde(with = "u64_str")]
+    pub epoch: u64,
+    /// The consent token, hex.
+    #[serde(with = "hex_str")]
+    pub token: [u8; 32],
+}
+
+impl From<core::RejoinOffer> for RejoinOffer {
+    fn from(offer: core::RejoinOffer) -> Self {
+        Self {
+            offer: offer.offer.0,
+            author: offer.author.0,
+            epoch: offer.epoch,
+            token: offer.token,
+        }
+    }
+}
+
+/// What `readd_member` staged.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReaddOutcome {
+    /// The account held a leaf: `RemoveMembers` staged; the Invite
+    /// follows once it confirms.
+    Removed,
+    /// The account held no leaf: the Invite staged directly.
+    Invited,
+    /// An `mk-core` outcome this wire version does not know.
+    Unmapped,
+}
+
+impl From<core::ReaddOutcome> for ReaddOutcome {
+    fn from(outcome: core::ReaddOutcome) -> Self {
+        match outcome {
+            core::ReaddOutcome::Removed => Self::Removed,
+            core::ReaddOutcome::Invited => Self::Invited,
+            // `ReaddOutcome` is `#[non_exhaustive]`.
+            _ => Self::Unmapped,
+        }
+    }
+}
+
 /// A convergence disposition (spec `foundation/errors.md` vocabulary).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1561,6 +1614,13 @@ pub enum SessionEvent {
         #[serde(with = "hex_bytes")]
         group: Vec<u8>,
     },
+    /// A stored replacement Welcome for the group needs the recipient's
+    /// consent — `rejoin_offers` names the pending offers.
+    RejoinOffered {
+        /// The group, hex.
+        #[serde(with = "hex_bytes")]
+        group: Vec<u8>,
+    },
     /// An outbound obligation reached a resolution checkpoint.
     PublishResolved {
         /// The outbound item, hex.
@@ -1720,6 +1780,7 @@ impl SessionEvent {
                 Self::GroupStallSuspected { group: group.0 }
             }
             core::SessionEvent::GroupStalled { group } => Self::GroupStalled { group: group.0 },
+            core::SessionEvent::RejoinOffered { group } => Self::RejoinOffered { group: group.0 },
             core::SessionEvent::PublishResolved {
                 outbound,
                 resolution,

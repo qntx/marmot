@@ -245,6 +245,15 @@ fn group_access_variants() {
 }
 
 #[test]
+fn readd_outcome_variants() {
+    check::<ReaddOutcome>(
+        "readd_outcome.json",
+        "type",
+        Value::String("\u{0}".to_owned()),
+    );
+}
+
+#[test]
 fn local_state_variants() {
     check::<LocalState>(
         "local_state.json",

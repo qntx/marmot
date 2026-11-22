@@ -906,6 +906,7 @@ export class Pump {
         case "group_state_changed":
         case "epoch_changed":
         case "group_unrecoverable":
+        case "rejoin_offered":
         case "group_state_invalidated":
         case "group_state_revalidated":
           this.reconcileFlag = true;

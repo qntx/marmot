@@ -147,6 +147,27 @@ export type Invitee = {
   inboxRelays: string[];
 };
 
+/** A stored replacement-Welcome offer awaiting the recipient's consent (`rejoin_offers`). */
+export type RejoinOffer = {
+  /** The kind-1059 wrap id carrying the offer, hex. */
+  offer: string;
+  /** The admin who authored the re-invite, hex. */
+  author: string;
+  /** The group epoch the Welcome installs. */
+  epoch: bigint;
+  /** The consent token, hex. */
+  token: string;
+};
+
+/** What `readd_member` staged. */
+export type ReaddOutcome = "removed" | "invited" | "unmapped";
+
+export const READD_OUTCOME_TYPES = ["removed", "invited", "unmapped"] as const;
+
+export type _ReaddOutcomeComplete = Complete<
+  Exclude<ReaddOutcome, (typeof READD_OUTCOME_TYPES)[number]>
+>;
+
 /** An app-component update. */
 export type ComponentUpdate = {
   componentId: number;
@@ -606,6 +627,7 @@ export type SessionEvent =
   | { type: "group_unrecoverable"; group: string }
   | { type: "group_stall_suspected"; group: string }
   | { type: "group_stalled"; group: string }
+  | { type: "rejoin_offered"; group: string }
   | { type: "publish_resolved"; outbound: string; resolution: PublishResolution }
   | { type: "app_event_dropped"; group: string; reason: DropReason }
   | { type: "key_package_rotated" }
@@ -632,6 +654,7 @@ export const SESSION_EVENT_TYPES = [
   "group_unrecoverable",
   "group_stall_suspected",
   "group_stalled",
+  "rejoin_offered",
   "publish_resolved",
   "app_event_dropped",
   "key_package_rotated",
@@ -780,6 +803,10 @@ export type BridgeRequest =
       /** The group whose invite requirements filter candidates; `undefined` = creation requirements. */
       group: string | undefined;
     }
+  | { type: "rejoin_offers"; group: string }
+  | { type: "confirm_rejoin"; group: string; offer: string; token: string }
+  | { type: "decline_rejoin"; offer: string }
+  | { type: "readd_member"; group: string; account: string; invitees: Invitee[] }
   | { type: "seal_attachment"; group: string; attachment: AttachmentInput }
   | {
       type: "send_media";
@@ -808,7 +835,9 @@ export const REQUEST_TYPES = [
   "ack_durable",
   "acknowledge_messages",
   "awaiting_durability",
+  "confirm_rejoin",
   "create_group",
+  "decline_rejoin",
   "disband",
   "discard_attachment",
   "enable_disbanding",
@@ -823,6 +852,8 @@ export const REQUEST_TYPES = [
   "leave",
   "open_attachment",
   "publish_inbox_relays",
+  "readd_member",
+  "rejoin_offers",
   "remove_members",
   "report_publish",
   "seal_attachment",
@@ -908,7 +939,9 @@ export type OpResult =
   | { type: "ticked"; nextWakeMs: bigint | undefined }
   | { type: "groups"; groups: GroupSnapshot[] }
   | { type: "group"; group: GroupSnapshot | undefined }
-  | { type: "key_packages"; events: NostrEvent[] };
+  | { type: "key_packages"; events: NostrEvent[] }
+  | { type: "rejoin_offers"; offers: RejoinOffer[] }
+  | { type: "readd"; outcome: ReaddOutcome };
 
 export const RESULT_TYPES = [
   "ready",
@@ -929,6 +962,8 @@ export const RESULT_TYPES = [
   "groups",
   "group",
   "key_packages",
+  "rejoin_offers",
+  "readd",
 ] as const;
 
 export type _OpResultComplete = Complete<Exclude<OpResult["type"], (typeof RESULT_TYPES)[number]>>;
@@ -961,6 +996,7 @@ export type PlainErrorKind =
   | "not_group_admin"
   | "not_open"
   | "poisoned"
+  | "rejoin_token_stale"
   | "reserved_app_event"
   | "send_rate_exceeded"
   | "signed_out"
@@ -1023,6 +1059,7 @@ export const ERROR_KINDS = [
   "poisoned",
   "proof_rejected",
   "protocol_version_mismatch",
+  "rejoin_token_stale",
   "reserved_app_event",
   "send_rate_exceeded",
   "signed_out",

@@ -40,6 +40,7 @@ const SESSION_RS: &[&str] = &[
     include_str!("../../mk-core/src/session.rs"),
     include_str!("../../mk-core/src/key_package_lifecycle.rs"),
     include_str!("../../mk-core/src/self_update.rs"),
+    include_str!("../../mk-core/src/rejoin.rs"),
 ];
 
 /// How a session method is surfaced over the bridge protocol.
@@ -126,6 +127,10 @@ const TABLE: &[(&str, &str, Mapping)] = &[
     ("Session", "ingest_batch", Request("ingest")),
     ("Session", "tick", Request("tick")),
     ("Session", "history_fetched", Request("history_fetched")),
+    ("Session", "rejoin_offers", Request("rejoin_offers")),
+    ("Session", "confirm_rejoin", Request("confirm_rejoin")),
+    ("Session", "decline_rejoin", Request("decline_rejoin")),
+    ("Session", "readd_member", Request("readd_member")),
     ("Session", "sign_out", Request("sign_out")),
     ("Session", "drain_events", Elsewhere("drain")),
     (

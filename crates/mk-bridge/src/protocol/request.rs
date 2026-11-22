@@ -355,6 +355,54 @@ pub struct SelectKeyPackagesRequest {
     pub group: Option<Vec<u8>>,
 }
 
+/// List the group's stored replacement-Welcome offers awaiting consent.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RejoinOffersRequest {
+    /// The group, hex.
+    #[serde(with = "hex_bytes")]
+    pub group: Vec<u8>,
+}
+
+/// Consent to a stored replacement Welcome (installs the new copy).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConfirmRejoinRequest {
+    /// The group, hex.
+    #[serde(with = "hex_bytes")]
+    pub group: Vec<u8>,
+    /// The offer's kind-1059 wrap id, hex.
+    #[serde(with = "hex_str")]
+    pub offer: [u8; 32],
+    /// The consent token the offer carried, hex.
+    #[serde(with = "hex_str")]
+    pub token: [u8; 32],
+}
+
+/// Decline a stored replacement Welcome (retires the offer).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeclineRejoinRequest {
+    /// The offer's kind-1059 wrap id, hex.
+    #[serde(with = "hex_str")]
+    pub offer: [u8; 32],
+}
+
+/// Remove a stuck member account, then re-invite it once the removal
+/// confirms (the admin's two-phase re-add).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReaddMemberRequest {
+    /// The group, hex.
+    #[serde(with = "hex_bytes")]
+    pub group: Vec<u8>,
+    /// The member account to re-add, 32-byte hex.
+    #[serde(with = "hex_str")]
+    pub account: [u8; 32],
+    /// The account's current `KeyPackage` invitees.
+    pub invitees: Vec<Invitee>,
+}
+
 /// A `call` request. The `"type"` tag must appear in
 /// [`crate::protocol::REQUEST_TYPES`] before decode; anything else answers
 /// `unsupported`.
@@ -433,4 +481,12 @@ pub enum Request {
     ForgetGroup(ForgetGroupRequest),
     /// Select invitee `KeyPackage` publications.
     SelectKeyPackages(SelectKeyPackagesRequest),
+    /// List the group's stored rejoin offers.
+    RejoinOffers(RejoinOffersRequest),
+    /// Consent to a stored replacement Welcome.
+    ConfirmRejoin(ConfirmRejoinRequest),
+    /// Decline a stored replacement Welcome.
+    DeclineRejoin(DeclineRejoinRequest),
+    /// Remove a stuck member and re-invite it on confirm.
+    ReaddMember(ReaddMemberRequest),
 }

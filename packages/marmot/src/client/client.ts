@@ -26,6 +26,8 @@ import type {
   KeyPackageStatusResult,
   SignOutResult,
   MediaReference,
+  ReaddOutcome,
+  RejoinOffer,
   SendOutcome,
   SentMessage,
 } from "../backend/protocol.ts";
@@ -355,6 +357,30 @@ export class MarmotClient {
 
   async selfUpdate(group: string): Promise<SendOutcome> {
     return this.op(async (engine) => groups.selfUpdate(engine, group));
+  }
+
+  /** The group's stored replacement-Welcome offers awaiting this device's consent. */
+  async rejoinOffers(group: string): Promise<RejoinOffer[]> {
+    return this.op(async (engine) => groups.rejoinOffers(engine, group));
+  }
+
+  /** Consent to a stored replacement Welcome — installs the new copy. */
+  async confirmRejoin(group: string, offer: string, token: string): Promise<void> {
+    return this.op(async (engine) => groups.confirmRejoin(engine, group, offer, token));
+  }
+
+  /** Decline a stored replacement Welcome — retires the offer. */
+  async declineRejoin(offer: string): Promise<void> {
+    return this.op(async (engine) => groups.declineRejoin(engine, offer));
+  }
+
+  /**
+   * Remove a stuck member account, then re-invite it once the removal confirms. `lookupRelays`
+   * feeds the invitee `KeyPackage` lookup exactly like `invite` callers get it.
+   */
+  async readdMember(group: string, account: string, lookupRelays: string[]): Promise<ReaddOutcome> {
+    const invitees = await this.lookupInvitees(account, lookupRelays, group);
+    return this.op(async (engine) => groups.readdMember(engine, group, account, invitees));
   }
 
   async updateGroupProfile(

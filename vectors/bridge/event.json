@@ -149,6 +149,10 @@
     "reason": "unknown_group",
     "type": "queued_intent_refused"
   },
+  "rejoin_offered": {
+    "group": "dead",
+    "type": "rejoin_offered"
+  },
   "self_updated": {
     "group": "dead",
     "type": "self_updated"

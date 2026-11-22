@@ -1336,4 +1336,23 @@ describe("malicious relay", () => {
     expect(changes).toStrictEqual(["group_stalled"]);
     await fixture.client.close();
   });
+
+  test("rejoin_offered reaches onGroupChange", async () => {
+    const script = freshScript();
+    script.groups = [snapshot()];
+    const fixture = await open(
+      script,
+      encodeClientState({ nip44Extended: true, cursors: {}, inbox: [] }),
+    );
+    await settle(fixture.timer, 5000);
+    const changes: string[] = [];
+    fixture.client.onGroupChange((event) => changes.push(event.type));
+    script.drains.push({
+      type: "events",
+      events: [{ type: "rejoin_offered", group: GROUP }],
+    });
+    await fixture.client.groups();
+    expect(changes).toStrictEqual(["rejoin_offered"]);
+    await fixture.client.close();
+  });
 });
