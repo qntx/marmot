@@ -682,6 +682,8 @@ export type KeyPackageInfo = {
 export type MemberSnapshot = {
   account: string;
   admin: boolean;
+  /** The account's leaf count — how many devices it holds. */
+  devices: number;
 };
 
 /** A UI-facing snapshot of one group. */

@@ -47,7 +47,8 @@
       "members": [
         {
           "account": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-          "admin": true
+          "admin": true,
+          "devices": 1
         }
       ],
       "name": "group",
@@ -95,7 +96,8 @@
         "members": [
           {
             "account": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-            "admin": true
+            "admin": true,
+            "devices": 2
           }
         ],
         "name": "group",

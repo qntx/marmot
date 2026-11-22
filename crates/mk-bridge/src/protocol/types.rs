@@ -1828,7 +1828,7 @@ impl From<core::key_package::KeyPackageInfo> for KeyPackageInfo {
     }
 }
 
-/// One member in a [`GroupSnapshot`].
+/// One member in a [`GroupSnapshot`]: one entry per account.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MemberSnapshot {
@@ -1837,6 +1837,8 @@ pub struct MemberSnapshot {
     pub account: [u8; 32],
     /// Whether the member is in the admin-policy set.
     pub admin: bool,
+    /// The account's leaf count — how many devices it holds.
+    pub devices: u32,
 }
 
 /// A UI-facing snapshot of one group.
@@ -1896,6 +1898,7 @@ impl From<core::GroupSnapshot> for GroupSnapshot {
                 .map(|member| MemberSnapshot {
                     account: member.account.0,
                     admin: member.admin,
+                    devices: member.devices,
                 })
                 .collect(),
             relays: snapshot.relays,

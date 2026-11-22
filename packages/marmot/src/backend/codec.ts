@@ -1233,18 +1233,19 @@ export function encodeSessionEvent(event: SessionEvent): Json {
   });
 }
 
-const MEMBER_KEYS = ["account", "admin"];
+const MEMBER_KEYS = ["account", "admin", "devices"];
 
 function decodeMember(value: unknown, path: string): MemberSnapshot {
   const o = rec(value, path, MEMBER_KEYS);
   return {
     account: hex32(field(o, "account", path), `${path}.account`),
     admin: bool(field(o, "admin", path), `${path}.admin`),
+    devices: uint(field(o, "devices", path), `${path}.devices`),
   };
 }
 
 function encodeMember(member: MemberSnapshot): Json {
-  return { account: member.account, admin: member.admin };
+  return { account: member.account, admin: member.admin, devices: member.devices };
 }
 
 const SNAPSHOT_KEYS = [

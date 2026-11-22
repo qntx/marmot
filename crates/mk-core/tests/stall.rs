@@ -479,6 +479,20 @@ mod stall_tests {
         assert_eq!(snap.state, GroupState::Removed);
         assert_eq!(snap.access, GroupAccess::RemovedDevice);
         assert_eq!(snapshot(&a1, &gid).access, GroupAccess::Active);
+        // Account-level aggregation: a1's live copy and a2's tombstone
+        // both list the account once, on its one remaining leaf.
+        let account = a1.session.account();
+        for snap in [&snapshot(&a1, &gid), &snap] {
+            assert_eq!(
+                snap.members
+                    .iter()
+                    .filter(|member| member.account == account)
+                    .map(|member| member.devices)
+                    .collect::<Vec<_>>(),
+                [1],
+                "one account entry on one leaf"
+            );
+        }
 
         // The admin then removes the whole account: a1 ends `Removed`.
         b.session

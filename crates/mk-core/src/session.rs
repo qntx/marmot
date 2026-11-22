@@ -888,6 +888,27 @@ const fn group_access(removed: RemovedScope, unrecoverable: bool, stalled: bool)
     }
 }
 
+/// Collapses a leaf-level roster into one snapshot member per account,
+/// first-appearance order, `devices` = the account's leaf count.
+fn aggregate_members(
+    leaves: impl IntoIterator<Item = [u8; 32]>,
+    admins: &[[u8; 32]],
+) -> Vec<MemberSnapshot> {
+    let mut members: Vec<MemberSnapshot> = Vec::new();
+    for bytes in leaves {
+        if let Some(member) = members.iter_mut().find(|member| member.account.0 == bytes) {
+            member.devices = member.devices.saturating_add(1);
+        } else {
+            members.push(MemberSnapshot {
+                account: AccountId(bytes),
+                admin: admins.contains(&bytes),
+                devices: 1,
+            });
+        }
+    }
+    members
+}
+
 /// The snapshot a disbanded copy can still answer: the durable record
 /// keeps name, epoch, and the former roster, but the engine deleted the
 /// live MLS state the member/component reads need.
@@ -899,17 +920,13 @@ fn disbanded_snapshot(id: &GroupId, record: &cgka_traits::group::Group) -> Group
         epoch: record.epoch.0,
         state: GroupState::Disbanded,
         access: GroupAccess::Active,
-        members: record
-            .members
-            .iter()
-            .filter_map(|member| {
-                let bytes: [u8; 32] = member.id.as_slice().try_into().ok()?;
-                Some(MemberSnapshot {
-                    account: AccountId(bytes),
-                    admin: false,
-                })
-            })
-            .collect(),
+        members: aggregate_members(
+            record
+                .members
+                .iter()
+                .filter_map(|member| member.id.as_slice().try_into().ok()),
+            &[],
+        ),
         relays: Vec::new(),
         nostr_group_id: [0; 32],
         own_account_admin: false,
@@ -922,13 +939,15 @@ fn disbanded_snapshot(id: &GroupId, record: &cgka_traits::group::Group) -> Group
     }
 }
 
-/// One member in a [`GroupSnapshot`].
+/// One member in a [`GroupSnapshot`]: one entry per account.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MemberSnapshot {
     /// The member's account.
     pub account: AccountId,
     /// Whether the member is in the admin-policy set.
     pub admin: bool,
+    /// The account's leaf count — how many devices it holds.
+    pub devices: u32,
 }
 
 /// A UI-facing snapshot of one group.
@@ -947,7 +966,7 @@ pub struct GroupSnapshot {
     /// Whether this device can still read the group; `Active` also marks
     /// a `Disbanded` snapshot (`state` carries the ending).
     pub access: GroupAccess,
-    /// Members (account + admin flag).
+    /// Members, one entry per account (leaf scope stays in `devices`).
     pub members: Vec<MemberSnapshot>,
     /// The group's Nostr routing relays.
     pub relays: Vec<String>,
@@ -3590,16 +3609,12 @@ impl Session {
             state,
             access,
             nostr_group_id,
-            members: members
-                .iter()
-                .filter_map(|member| {
-                    let bytes: [u8; 32] = member.id.as_slice().try_into().ok()?;
-                    Some(MemberSnapshot {
-                        account: AccountId(bytes),
-                        admin: admins.contains(&bytes),
-                    })
-                })
-                .collect(),
+            members: aggregate_members(
+                members
+                    .iter()
+                    .filter_map(|member| member.id.as_slice().try_into().ok()),
+                &admins,
+            ),
             relays,
             own_account_admin: admins.contains(&account.0),
             encrypted_media: self.media_policy(&gid)?,
