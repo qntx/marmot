@@ -73,7 +73,7 @@ async fn main() {
     };
 
     session
-        .publish_key_package(&["ws://localhost:7777".to_string()])
+        .ensure_key_package(&["ws://localhost:7777".to_string()])
         .await
         .expect("key package");
     if let Some(seq) = session.awaiting_durability() {

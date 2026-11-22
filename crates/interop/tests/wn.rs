@@ -1094,3 +1094,92 @@ async fn scenario6_stream_anchors() {
     rig.relay.shutdown();
     eprintln!("SCENARIO-6 PASS {:.1}s", start.elapsed().as_secs_f64());
 }
+
+// ---- scenario 19: consumed KeyPackage rotates ------------------------------
+
+/// First value of `event`'s `name` tag.
+fn tag_value<'a>(event: &'a mk_core::Event, name: &str) -> Option<&'a str> {
+    event
+        .tags
+        .iter()
+        .find(|tag| tag.first().map(String::as_str) == Some(name))
+        .and_then(|tag| tag.get(1))
+        .map(String::as_str)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs wn/wnd built from the upstream.json wn pin; see CONTRIBUTING"]
+async fn scenario19_consumed_key_package_rotates() {
+    let start = Instant::now();
+    let rig = Arc::new(rig("s19").await);
+    let mut a = open_member().await;
+    publish_identity(&mut a, &rig).await;
+    let a_hex = a.account_hex();
+    let a_npub = a.npub();
+
+    let first = fetch_key_package(&rig, &a_hex)
+        .await
+        .expect("first key package");
+    let first_d = tag_value(&first, "d").expect("d tag").to_owned();
+    let first_i = tag_value(&first, "i").map(str::to_owned);
+
+    // wn invites us; the join consumes our promoted KeyPackage.
+    let created = wn(
+        &rig.home,
+        &rig.socket,
+        Some(&rig.wn_npub),
+        &["groups", "create", "interop-19a", &a_npub],
+    );
+    let wn_gid = wn_group_id(&created);
+    let gid = hex_group(&wn_gid);
+    join_wn_group(&rig, &mut a, &gid).await;
+
+    // Within one tick the lifecycle publishes a replacement to the same
+    // slot: same `d`, newer `created_at`, different `i`.
+    let first_created = first.created_at;
+    let replacement = until_member(
+        &mut a,
+        |a| {
+            let rig = Arc::clone(&rig);
+            let gid = gid.clone();
+            let a_hex = a_hex.clone();
+            let first_d = first_d.clone();
+            let first_i = first_i.clone();
+            Box::pin(async move {
+                let _ = sync(&mut *a, &rig, &gid).await;
+                fetch(&rig, key_package_filter(&a_hex))
+                    .await
+                    .into_iter()
+                    .find(|event| {
+                        tag_value(event, "d") == Some(first_d.as_str())
+                            && event.created_at > first_created
+                            && tag_value(event, "i").map(str::to_owned) != first_i
+                    })
+            })
+        },
+        "same-slot KeyPackage replacement on the relay",
+        90_000,
+    )
+    .await;
+
+    // The replacement heads the slot, so wn's second invite selects it.
+    let newest = fetch_key_package(&rig, &a_hex)
+        .await
+        .expect("relay key package");
+    assert_eq!(newest.id, replacement.id, "the replacement heads the slot");
+    let created = wn(
+        &rig.home,
+        &rig.socket,
+        Some(&rig.wn_npub),
+        &["groups", "create", "interop-19b", &a_npub],
+    );
+    let wn_gid2 = wn_group_id(&created);
+    let gid2 = hex_group(&wn_gid2);
+    join_wn_group(&rig, &mut a, &gid2).await;
+
+    member_says(&rig, &mut a, &gid2, &wn_gid2, "s19-hello-from-mk-core").await;
+    wn_says(&rig, &mut a, &gid2, &wn_gid2, "s19-hello-from-wn").await;
+
+    rig.relay.shutdown();
+    eprintln!("SCENARIO-19 PASS {:.1}s", start.elapsed().as_secs_f64());
+}

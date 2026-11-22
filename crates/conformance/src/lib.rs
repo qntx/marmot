@@ -323,7 +323,7 @@ impl SessionSubject {
                 let client = subject.client_mut(label)?;
                 client
                     .session
-                    .publish_key_package(&[RELAY.to_owned()])
+                    .ensure_key_package(&[RELAY.to_owned()])
                     .await
                     .map_err(session_error)?;
                 client

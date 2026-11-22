@@ -1366,6 +1366,67 @@ async function run(): Promise<void> {
       }, "our snapshot disbanded");
     });
 
+    // S19 — our device consumed KeyPackage → rotation; wn re-invites.
+    await scenario("S19 consumed KeyPackage rotates; wn re-invites", async () => {
+      const [before] = served.relay
+        .events()
+        .filter((stored) => stored.kind === KEY_PACKAGE_KIND && stored.pubkey === signer.pubkey)
+        .toSorted((a, b) => b.created_at - a.created_at);
+      if (before === undefined) {
+        throw new Error("no KeyPackage on the relay");
+      }
+      const dTag = before.tags.find((tag) => tag[0] === "d")?.[1] ?? "";
+      const iTag = before.tags.find((tag) => tag[0] === "i")?.[1];
+
+      // The earlier joins consumed the publication — drive the lifecycle.
+      let at = Date.now();
+      await client.ensureKeyPackage();
+      const rotated = await waitFor(
+        () =>
+          served.relay
+            .events()
+            .filter(
+              (stored) =>
+                stored.kind === KEY_PACKAGE_KIND &&
+                stored.pubkey === signer.pubkey &&
+                (stored.tags.find((tag) => tag[0] === "d")?.[1] ?? "") === dTag &&
+                stored.created_at > before.created_at &&
+                (stored.tags.find((tag) => tag[0] === "i")?.[1] ?? undefined) !== iTag,
+            )
+            .toSorted((a, b) => b.created_at - a.created_at)[0],
+        "same-slot KeyPackage replacement on the relay",
+      );
+      log(`rotation: kind-30443 ${rotated.id} in slot ${dTag} (${secs(at)})`);
+
+      // wn's invite must select the replacement heading the slot.
+      at = Date.now();
+      const created = await wn(rig, ["groups", "create", "m3b-19", ourNpub], rig.wnNpub);
+      const wnGid = wnGroupId(created);
+      const ourGid = await waitFor(
+        () => invites.flatMap((event) => (event.type === "joined" ? [event.group] : [])).at(-1),
+        "our onInvite joined (second group)",
+      );
+      if (ourGid !== wnGid) {
+        throw new Error(`group id mismatch: ours ${ourGid} wn ${wnGid}`);
+      }
+      log(`joined ${ourGid} on the rotated KeyPackage (${secs(at)})`);
+
+      const wnText = `s19-wn-${Math.floor(Date.now() / 1000)}`;
+      await wn(rig, ["messages", "send", wnGid, wnText], rig.wnNpub);
+      await waitFor(
+        () =>
+          received.some((entry) => entry.group === ourGid && entry.message.content === wnText) ||
+          undefined,
+        `we receive wn message ${wnText}`,
+      );
+      const ourText = `s19-us-${Math.floor(Date.now() / 1000)}`;
+      await client.sendMessage(ourGid, { kind: CHAT_KIND, tags: [], content: ourText });
+      await waitFor(async () => {
+        const entries = await wnMessages(rig, wnGid);
+        return entries.some((entry) => entry.includes(ourText)) || undefined;
+      }, `wn messages list shows ${ourText}`);
+    });
+
     log(`NIP-11 documents served: ${served.documentsServed()}`);
     if (RELAY_SHAPE === "nip11" && served.documentsServed() === 0) {
       failures.push("relay shape: wnd never asked for the NIP-11 document");

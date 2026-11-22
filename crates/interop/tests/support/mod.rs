@@ -683,7 +683,7 @@ pub async fn flush(member: &mut Member, rig: &Rig) {
 pub async fn publish_identity(member: &mut Member, rig: &Rig) {
     member
         .session
-        .publish_key_package(std::slice::from_ref(&rig.url))
+        .ensure_key_package(std::slice::from_ref(&rig.url))
         .await
         .expect("key package");
     flush(member, rig).await;

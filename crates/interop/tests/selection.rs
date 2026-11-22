@@ -59,8 +59,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use mk_core::key_package::select_key_packages;
 use mk_core::testing::{LocalSigner, ManualClock, RecordingHost};
 use mk_core::{
-    AccountSigner, Clock, DestinationPolicy, Event, KvHost, Opened, Session, SessionConfig,
-    UnsignedEvent,
+    AccountSigner, DestinationPolicy, Event, KvHost, Opened, RelayResult, RelayStatus, Session,
+    SessionConfig, UnsignedEvent,
 };
 use nostr_directory::{DirectoryFreshness, select_key_packages_from_records};
 use transport_nostr::DirectoryRelayEventRecord;
@@ -115,15 +115,15 @@ struct Material {
 
 /// Open one device session over `signer` (fresh host = fresh device,
 /// distinct leaf signature key) and return its published kind-30443 event.
-async fn device_package(signer: &Arc<LocalSigner>) -> (Session, Event) {
-    let clock: Arc<dyn Clock> = Arc::new(ManualClock::new());
+async fn device_package(signer: &Arc<LocalSigner>) -> (Session, Arc<ManualClock>, Event) {
+    let clock = Arc::new(ManualClock::new());
     let host: Arc<dyn KvHost> = Arc::new(RecordingHost::new());
     let signer_cfg: Arc<dyn AccountSigner> = signer.clone();
     let opened = Session::open(SessionConfig {
         signer: Arc::clone(&signer_cfg),
         host,
         rows: Vec::new(),
-        clock,
+        clock: clock.clone(),
         destination_policy: DestinationPolicy {
             allow_loopback: true,
         },
@@ -141,20 +141,31 @@ async fn device_package(signer: &Arc<LocalSigner>) -> (Session, Event) {
         Opened::Ready(session) => *session,
     };
     session
-        .publish_key_package(&[RELAY.to_owned()])
+        .ensure_key_package(&[RELAY.to_owned()])
         .await
-        .expect("publish_key_package");
+        .expect("ensure_key_package");
     if let Some(seq) = session.awaiting_durability() {
         session.acknowledge_durable(seq);
     }
-    let event = session
+    let item = session
         .take_outbound()
         .expect("take_outbound")
         .into_iter()
         .find(|outbound| outbound.event.kind == 30_443)
-        .expect("key package outbound")
-        .event;
-    (session, event)
+        .expect("key package outbound");
+    // Accepted publication promotes the pending package so a later
+    // `ensure_key_package` can stage a replacement on the same device.
+    session
+        .report_publish(
+            &item.id,
+            &[RelayResult {
+                relay: RELAY.to_owned(),
+                status: RelayStatus::Accepted,
+            }],
+        )
+        .await
+        .expect("report_publish");
+    (session, clock, item.event)
 }
 
 /// The value of `event`'s first `d` tag, `""` when absent — the slot both
@@ -487,16 +498,20 @@ async fn selection_matches_mdk() {
     // publications share a leaf signature key.
     let mut packages = Vec::new();
     for _ in 0..3 {
-        let (_session, package) = device_package(&signer).await;
+        let (_session, _clock, package) = device_package(&signer).await;
         packages.push(package);
     }
-    let (session0, package0) = device_package(&signer).await;
+    let (session0, clock0, package0) = device_package(&signer).await;
     let mut session0 = session0;
     packages.push(package0);
+    // A same-slot replacement on one device: advance past the 6-7 day
+    // refresh so `ensure_key_package` stages a second publication sharing
+    // the device's leaf signature key.
+    clock0.advance(8 * DAY * 1_000);
     session0
-        .publish_key_package(&[RELAY.to_owned()])
+        .ensure_key_package(&[RELAY.to_owned()])
         .await
-        .expect("publish_key_package");
+        .expect("ensure_key_package");
     if let Some(seq) = session0.awaiting_durability() {
         session0.acknowledge_durable(seq);
     }
@@ -509,7 +524,7 @@ async fn selection_matches_mdk() {
             .expect("second key package")
             .event,
     );
-    let (_foreign_session, foreign) = device_package(&other).await;
+    let (_foreign_session, _foreign_clock, foreign) = device_package(&other).await;
     let material = Material {
         signer: signer.clone(),
         other: other.clone(),
