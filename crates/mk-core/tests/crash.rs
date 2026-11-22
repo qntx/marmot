@@ -1857,4 +1857,175 @@ mod crash {
             "the stalled flag survives the restart"
         );
     }
+
+    /// C17: `confirm_rejoin` and the two-phase `readd_member` survive
+    /// crash boundaries. A cut after `confirm_rejoin` leaves the old
+    /// copy intact or the new copy installed — never neither. The
+    /// durable `Readd` row bridges the removal's confirm to the Invite,
+    /// so cuts on either side of each boundary produce exactly one
+    /// Invite ever.
+    #[tokio::test(flavor = "current_thread")]
+    async fn restart_boundaries_rejoin() {
+        /// The P3b setup: `b` removes `a`'s account and re-invites it
+        /// while `a` still holds a stale active copy, so the
+        /// replacement Welcome stores as a consent offer.
+        async fn stale_offer() -> (FakeRelay, Member, Member, GroupId, mk_core::Event) {
+            let relay = FakeRelay::new();
+            let mut b = open_member().await;
+            let mut a = open_member().await;
+            publish_identity(&mut b, &relay, RELAY).await;
+            publish_identity(&mut a, &relay, RELAY).await;
+            let gid = group_with(&mut b, &relay, RELAY, &[&a], "crash-rejoin").await;
+            join_via_welcome(&mut a, &relay, RELAY).await;
+            sync_member(&mut b, &relay, RELAY, &gid).await;
+            sync_member(&mut a, &relay, RELAY, &gid).await;
+            b.session.self_update(&gid).await.expect("self_update");
+            flush(&mut b, &relay).await;
+            b.session
+                .remove_members(&gid, &[a.signer.account()])
+                .await
+                .expect("remove_members");
+            flush(&mut b, &relay).await;
+            let wraps_before: BTreeSet<EventId> = welcomes_for(&relay, RELAY, &a.account_hex())
+                .into_iter()
+                .map(|event| event.id)
+                .collect();
+            b.session
+                .invite(
+                    &gid,
+                    vec![Invitee {
+                        key_package: key_package_of(&relay, RELAY, &a.account_hex()),
+                        inbox_relays: inbox_relays_of(&relay, RELAY, &a.account_hex()),
+                    }],
+                )
+                .await
+                .expect("invite");
+            flush(&mut b, &relay).await;
+            let wrap = welcomes_for(&relay, RELAY, &a.account_hex())
+                .into_iter()
+                .find(|event| !wraps_before.contains(&event.id))
+                .expect("a fresh wrap");
+            (relay, b, a, gid, wrap)
+        }
+
+        // Boundary 1: a cut after `confirm_rejoin` — the engine replaces
+        // the copy inside its own transaction, so a reopen sees the new
+        // copy installed with the offer spent, and messaging resumes.
+        {
+            let (relay, mut b, mut a, gid, wrap) = Box::pin(stale_offer()).await;
+            let report = a.session.ingest(&wrap).await.expect("ingest wrap");
+            assert!(matches!(
+                report.outcome,
+                mk_core::InputOutcome::Local(mk_core::LocalState::RejoinConfirmationRequired)
+            ));
+            let offer = a.session.rejoin_offers(&gid).expect("offers")[0].clone();
+            a.session
+                .confirm_rejoin(&gid, &offer.offer, &offer.token)
+                .await
+                .expect("confirm_rejoin");
+            let mut a = reopen_member(&a).await;
+            let snapshot = a
+                .session
+                .group(&gid)
+                .expect("snapshot")
+                .expect("the group survives the cut — never neither copy");
+            assert_eq!(
+                snapshot.access,
+                mk_core::GroupAccess::Active,
+                "the replacement copy is installed"
+            );
+            assert!(
+                a.session
+                    .rejoin_offers(&gid)
+                    .expect("rejoin_offers")
+                    .is_empty(),
+                "the spent offer does not resurrect"
+            );
+            sync_member(&mut b, &relay, RELAY, &gid).await;
+            send_chat(&mut b, &relay, &gid, "post-cut").await;
+            let route = a.route_hex(&gid);
+            let drained = ingest_backlog(&mut a, &group_events(&relay, RELAY, &route)).await;
+            assert!(
+                drained.iter().any(|event| matches!(
+                    event,
+                    SessionEvent::MessageReceived { message, .. } if message.content == "post-cut"
+                )),
+                "the restarted copy reads the group: {drained:?}"
+            );
+        }
+
+        // Boundary 2: `readd_member` cuts. The row is written with the
+        // removal's staging, so reopening at any point before, at, or
+        // after the removal's confirm still yields exactly one Invite.
+        {
+            let relay = FakeRelay::new();
+            let mut b = open_member().await;
+            let mut a = open_member().await;
+            publish_identity(&mut b, &relay, RELAY).await;
+            publish_identity(&mut a, &relay, RELAY).await;
+            let gid = group_with(&mut b, &relay, RELAY, &[&a], "crash-readd").await;
+            join_via_welcome(&mut a, &relay, RELAY).await;
+            let invitees = vec![Invitee {
+                key_package: key_package_of(&relay, RELAY, &a.account_hex()),
+                inbox_relays: inbox_relays_of(&relay, RELAY, &a.account_hex()),
+            }];
+
+            // Cut: the removal + row are staged but never published.
+            let outcome = b
+                .session
+                .readd_member(&gid, a.signer.account(), invitees)
+                .await
+                .expect("readd_member");
+            assert!(matches!(outcome, mk_core::ReaddOutcome::Removed));
+            let mut b = reopen_member(&b).await;
+
+            // The queued intent regenerates byte-identically; a reopen
+            // between the removal's confirm and the Invite's staging
+            // (and again after) changes nothing.
+            let mut removal_seen = false;
+            for round in 0..8 {
+                b.clock.advance(2_000);
+                b.session.tick().await.expect("tick");
+                if let Some(seq) = b.session.awaiting_durability() {
+                    b.session.acknowledge_durable(seq);
+                }
+                let outbound = b.session.take_outbound().expect("take_outbound");
+                let commits = outbound
+                    .iter()
+                    .filter(|item| item.event.kind == 445)
+                    .count();
+                for item in outbound {
+                    let results = relay.publish(&item);
+                    b.session
+                        .report_publish(&item.id, &results)
+                        .await
+                        .expect("report_publish");
+                }
+                if commits > 0 && !removal_seen {
+                    removal_seen = true;
+                    // Cut: reopen right after the removal's confirm,
+                    // before the Invite could stage.
+                    b = reopen_member(&b).await;
+                }
+                let _ = round;
+            }
+            assert!(removal_seen, "the removal commit published");
+            let wraps = welcomes_for(&relay, RELAY, &a.account_hex());
+            assert_eq!(
+                wraps.len(),
+                2,
+                "the original wrap plus exactly one re-add wrap"
+            );
+
+            // Cut: reopen after the Invite staged — no second Invite.
+            let mut b = reopen_member(&b).await;
+            for _ in 0..4 {
+                b.clock.advance(2_000);
+                b.session.tick().await.expect("tick");
+                flush(&mut b, &relay).await;
+            }
+            let wraps = welcomes_for(&relay, RELAY, &a.account_hex());
+            assert_eq!(wraps.len(), 2, "exactly one Invite ever");
+        }
+    }
 }

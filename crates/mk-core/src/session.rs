@@ -466,6 +466,9 @@ fn open_session(mut session: Session) -> Result<Session, &'static str> {
             .map_err(|_| "lifecycle write")?;
     }
     session.reissue_stall_requests().map_err(|_| "stall rows")?;
+    session
+        .reissue_rejoin_offers()
+        .map_err(|_| "rejoin offers")?;
     Ok(session)
 }
 
@@ -593,6 +596,11 @@ pub enum SessionError {
     /// The pure media layer refused (typed, no payload echo).
     #[error("media: {0}")]
     Media(#[from] MediaError),
+    /// The consent token no longer names this group's local branch — the
+    /// epoch authenticator moved since the offer was read. List
+    /// [`Session::rejoin_offers`] again for the current token.
+    #[error("rejoin token stale")]
+    RejoinTokenStale,
 }
 
 pub(crate) fn session_engine_error(error: EngineError) -> SessionError {
@@ -1914,7 +1922,10 @@ impl Session {
 
     /// Validate an invitee's `KeyPackage` event, persist its inbox relays and
     /// produce the engine `KeyPackage`.
-    fn invitee_key_package(&self, invitee: &Invitee) -> Result<KeyPackage, SessionError> {
+    pub(crate) fn invitee_key_package(
+        &self,
+        invitee: &Invitee,
+    ) -> Result<KeyPackage, SessionError> {
         let info = key_package::key_package_info(&invitee.key_package)
             .map_err(|_| SessionError::InvalidInput("key package"))?;
         self.check_relays(&invitee.inbox_relays)?;
@@ -2271,7 +2282,14 @@ impl Session {
                     self.provider.delete_outbound_retry(id)?;
                 }
                 self.provider
-                    .del_row(crate::keys::Table::GroupStall, &[&group.0])
+                    .del_row(crate::keys::Table::GroupStall, &[&group.0])?;
+                for (row_key, _) in self
+                    .provider
+                    .scan_rows(crate::keys::Table::Readd, &[&group.0])?
+                {
+                    self.provider.store().delete(&row_key)?;
+                }
+                Ok(())
             })
             .map_err(SessionError::Storage)
     }
@@ -2985,6 +3003,11 @@ impl Session {
     pub async fn ingest(&mut self, event: &Event) -> Result<InputReport, SessionError> {
         let outcome = self.ingest_verified(event).await?;
         self.drive().await?;
+        if self.retry_rejoins().await? {
+            // A held offer installed on this copy's removal: the new
+            // copy's own convergence work settles in the same pass.
+            self.drive().await?;
+        }
         self.note_valid_state_bearing_inputs()?;
         Ok(InputReport {
             event: event.id,
@@ -3029,6 +3052,9 @@ impl Session {
             });
         }
         self.drive().await?;
+        if self.retry_rejoins().await? {
+            self.drive().await?;
+        }
         self.note_valid_state_bearing_inputs()?;
         Ok(reports)
     }
@@ -3086,7 +3112,11 @@ impl Session {
             // dedup marker is still the point of the ingest).
             savepoint.commit().map_err(SessionError::Storage)?;
             let outcome = result.map_err(session_engine_error)?;
-            return Ok(input_outcome(&outcome));
+            let input = input_outcome(&outcome);
+            if input == InputOutcome::Local(crate::events::LocalState::RejoinConfirmationRequired) {
+                self.note_rejoin_offer(&event.id)?;
+            }
+            return Ok(input);
         }
         let transport_group_id = match &message.envelope {
             TransportEnvelope::GroupMessage { transport_group_id } => {
@@ -3167,7 +3197,7 @@ impl Session {
     /// engine advance. The input settle uses the deterministic
     /// `until_settled` form so the injected session clock, not a wall-time
     /// budget, decides when a pass reports unfinished work.
-    async fn drive(&mut self) -> Result<(), SessionError> {
+    pub(crate) async fn drive(&mut self) -> Result<(), SessionError> {
         let mut groups = self.engine.drain_pending_convergence_groups();
         for group_id in self.engine.live_group_ids().map_err(session_engine_error)? {
             if !groups.contains(&group_id) && self.group_owes_advance(&group_id)? {
@@ -3248,6 +3278,13 @@ impl Session {
         // surface on the next `drain_events` and the earliest hold/sweep
         // deadline folds into the wake.
         fold(self.process_expiry_and_holds(self.now_ms())?, &mut next);
+        // D2: offers whose copy turned removed/unrecoverable install
+        // without consent; admin re-adds finish their second commit and
+        // fold a retry wake only while a transient error holds one.
+        self.retry_rejoins().await?;
+        if let Some(delay) = self.drive_readds().await? {
+            fold(Some(delay), &mut next);
+        }
         self.drive().await?;
         Ok(TickReport { next_wake_ms: next })
     }
@@ -3577,7 +3614,7 @@ impl Session {
     /// `NotGroupAdmin` when this account is not a current admin — the
     /// session-side gate for admin ops so a refused call stages nothing
     /// (the engine may validate a commit only after staging it).
-    fn require_admin(&self, group: &GroupId) -> Result<(), SessionError> {
+    pub(crate) fn require_admin(&self, group: &GroupId) -> Result<(), SessionError> {
         if !self
             .admin_set(&engine_gid(group))?
             .contains(&self.account().0)
@@ -3590,7 +3627,10 @@ impl Session {
     /// The admin-policy component decoded: a QUIC-varint count followed by
     /// that many sorted 32-byte member keys (cgka-engine
     /// `app_components::decode_admin_policy`).
-    fn admin_set(&self, group_id: &EngineGroupId) -> Result<Vec<[u8; 32]>, SessionError> {
+    pub(crate) fn admin_set(
+        &self,
+        group_id: &EngineGroupId,
+    ) -> Result<Vec<[u8; 32]>, SessionError> {
         let Some(bytes) = self
             .engine
             .app_component(group_id, GROUP_ADMIN_POLICY_COMPONENT_ID)

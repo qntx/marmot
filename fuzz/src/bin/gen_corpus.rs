@@ -293,6 +293,21 @@ async fn main() {
     }))
     .expect("stall row json");
     seed_rows.push((stall_key, stall_value));
+    // A D2 re-add intent row for a foreign account: `tick`'s
+    // drive_readds pass decodes it and re-derives whether the staged
+    // Invite is still owed.
+    let mut readd_key = vec![44u8]; // Table::Readd
+    readd_key.extend_from_slice(&(group.0.len() as u32).to_be_bytes());
+    readd_key.extend_from_slice(&group.0);
+    readd_key.extend_from_slice(&[0xaau8; 32]); // foreign account
+    let readd_value = serde_json::to_vec(&serde_json::json!({
+        "invitees": [{
+            "key_package": kp_json,
+            "inbox_relays": ["ws://localhost:7777"],
+        }],
+    }))
+    .expect("readd row json");
+    seed_rows.push((readd_key, readd_value));
     write(
         &corpus,
         "session_rows",

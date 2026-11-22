@@ -687,6 +687,13 @@ pub enum SessionEvent {
         /// The group.
         group: GroupId,
     },
+    /// A stored replacement Welcome needs the host's consent before the
+    /// engine may discard this device's still-active copy (D2): read the
+    /// offers with [`crate::Session::rejoin_offers`].
+    RejoinOffered {
+        /// The group.
+        group: GroupId,
+    },
     /// A pending `KeyPackage` replacement was promoted after a relay
     /// acknowledgement (D3); the previous current is retained for its
     /// grace period.

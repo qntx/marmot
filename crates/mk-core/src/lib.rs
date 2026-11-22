@@ -59,6 +59,7 @@ mod mls;
 mod outbox;
 mod pacing;
 mod provider;
+mod rejoin;
 mod self_update;
 mod semantics;
 mod ser;
@@ -82,6 +83,7 @@ pub use kv::{BatchCodecError, CommitSeq, KvBatch, KvHost, KvOp};
 pub use mls::KvOpenMlsStorage;
 pub use outbox::{Outbound, OutboundPurpose, PublishResolution, RelayResult, RelayStatus};
 pub use provider::{INGRESS_DEDUP_MARKER_CAPACITY, KvStorageProvider};
+pub use rejoin::{ReaddOutcome, RejoinOffer};
 pub use semantics::{DropReason, MessageIntent, Semantics};
 pub use session::OpenError as SessionOpenError;
 pub use session::{
