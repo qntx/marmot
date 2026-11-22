@@ -24,6 +24,7 @@ import type {
   GroupSnapshot,
   Invitee,
   KeyPackageStatusResult,
+  SignOutResult,
   MediaReference,
   SendOutcome,
   SentMessage,
@@ -233,6 +234,35 @@ export class MarmotClient {
       throw new MarmotError("no_relay_list");
     }
     return this.op(async (engine) => engine.ensureKeyPackage(write));
+  }
+
+  /**
+   * Sign this device out: withdraw the `KeyPackage` slot (kind-5 to the write set), leave every
+   * group this device is a non-admin member of and delete every `KeyPackage` bundle, in one durable
+   * transaction. `no_relay_list` when the lookup relays are missing or the list is empty. Admin
+   * groups this account alone administers stay in `keptAdminLeaves`.
+   */
+  async signOut(): Promise<SignOutResult> {
+    this.guard();
+    const safe = (this.options.lookupRelays ?? []).filter((relay) =>
+      safeRelayUrl(relay, this.allowLoopback),
+    );
+    let write: string[] | undefined;
+    try {
+      write = await writeRelaysOf(
+        this.options.relays,
+        this.options.timer,
+        this.account,
+        safe,
+        this.allowLoopback,
+      );
+    } catch (error) {
+      throw toMarmotError(error);
+    }
+    if (write === undefined || write.length === 0) {
+      throw new MarmotError("no_relay_list");
+    }
+    return this.op(async (engine) => engine.signOut(write));
   }
 
   /** The account `KeyPackage` slot's lifecycle standing. */

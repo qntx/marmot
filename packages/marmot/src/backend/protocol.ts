@@ -315,6 +315,7 @@ export type OutboundPurpose =
   | "welcome"
   | "key_package"
   | "key_package_republish"
+  | "key_package_deletion"
   | "inbox_relays"
   | "unmapped";
 
@@ -325,6 +326,7 @@ export const OUTBOUND_PURPOSES = [
   "welcome",
   "key_package",
   "key_package_republish",
+  "key_package_deletion",
   "inbox_relays",
   "unmapped",
 ] as const;
@@ -713,6 +715,7 @@ export type BridgeRequest =
   | { type: "report_publish"; id: string; results: RelayResult[] }
   | { type: "ensure_key_package"; writeRelays: string[] }
   | { type: "key_package_status" }
+  | { type: "sign_out"; writeRelays: string[] }
   | { type: "publish_inbox_relays"; relays: string[] }
   | {
       type: "create_group";
@@ -802,6 +805,7 @@ export const REQUEST_TYPES = [
   "set_admin",
   "set_group_avatar",
   "set_retention",
+  "sign_out",
   "signer_reply",
   "submit_proof",
   "take_outbound",
@@ -813,6 +817,14 @@ export const REQUEST_TYPES = [
 export type _BridgeRequestComplete = Complete<
   Exclude<BridgeRequest["type"], (typeof REQUEST_TYPES)[number]>
 >;
+
+/** `sign_out` result: which groups the device left and which admin groups it stays in. */
+export type SignOutResult = {
+  /** Groups the device left (`SelfRemove` committed or durable), hex each. */
+  left: string[];
+  /** Groups whose only admin leaf is this account's — the leaf stays, the host decides. */
+  keptAdminLeaves: string[];
+};
 
 /** `ensure_key_package`/`key_package_status` result: the slot's lifecycle standing. */
 export type KeyPackageStatusResult = {
@@ -856,6 +868,7 @@ export type OpResult =
       retained: number;
       nextDueMs: bigint | undefined;
     }
+  | { type: "sign_out"; left: string[]; keptAdminLeaves: string[] }
   | { type: "inbox_relays"; outboundId: string }
   | { type: "group_created"; group: GroupSnapshot }
   | { type: "send_outcome"; outcome: SendOutcome }
@@ -875,6 +888,7 @@ export const RESULT_TYPES = [
   "outbound",
   "publish_resolution",
   "key_package_status",
+  "sign_out",
   "inbox_relays",
   "group_created",
   "send_outcome",
@@ -920,6 +934,7 @@ export type PlainErrorKind =
   | "poisoned"
   | "reserved_app_event"
   | "send_rate_exceeded"
+  | "signed_out"
   | "storage"
   | "unknown_attachment"
   | "unknown_group"
@@ -981,6 +996,7 @@ export const ERROR_KINDS = [
   "protocol_version_mismatch",
   "reserved_app_event",
   "send_rate_exceeded",
+  "signed_out",
   "signer",
   "storage",
   "too_large",

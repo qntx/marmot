@@ -38,6 +38,7 @@ import type {
   SealedAttachmentResult,
   SendOutcome,
   SentMessage,
+  SignOutResult,
   SessionEvent,
   SignerOp,
   SignerReply,
@@ -418,6 +419,18 @@ export class Engine {
             nextDueMs: r.nextDueMs,
           }
         : MISS,
+    );
+  }
+
+  /**
+   * Withdraw the account `KeyPackage` slot (kind-5 to the write set), leave every group this device
+   * is a non-admin member of and delete every `KeyPackage` bundle — device sign-out. The
+   * withdrawal, the bundle deletion and the dropped `KeyPackage` outbox rows land in one store
+   * transaction; a repeat call never stages a second kind-5.
+   */
+  async signOut(writeRelays: string[]): Promise<SignOutResult> {
+    return this.op({ type: "sign_out", writeRelays }, (r) =>
+      r.type === "sign_out" ? { left: r.left, keptAdminLeaves: r.keptAdminLeaves } : MISS,
     );
   }
 

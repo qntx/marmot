@@ -1556,6 +1556,11 @@ export function decodeRequest(value: unknown, path = "request"): BridgeRequest {
       };
     case "key_package_status":
       return { type };
+    case "sign_out":
+      return {
+        type,
+        writeRelays: strList(field(o, "write_relays", path), `${path}.write_relays`),
+      };
     case "publish_inbox_relays":
       return { type, relays: strList(field(o, "relays", path), `${path}.relays`) };
     case "create_group":
@@ -1713,6 +1718,7 @@ export function encodeRequest(request: BridgeRequest): Json {
       write_relays: request.writeRelays,
     }),
     key_package_status: () => ({ type: "key_package_status" }),
+    sign_out: (request) => ({ type: "sign_out", write_relays: request.writeRelays }),
     publish_inbox_relays: (request) => ({ type: request.type, relays: request.relays }),
     create_group: (request) => ({
       type: "create_group",
@@ -1827,6 +1833,8 @@ export function decodeOpResult(value: unknown, path = "result"): OpResult {
     "pending",
     "retained",
     "next_due_ms",
+    "left",
+    "kept_admin_leaves",
     "outbound_id",
     "group",
     "groups",
@@ -1872,6 +1880,16 @@ export function decodeOpResult(value: unknown, path = "result"): OpResult {
         nextDueMs: optU64(o["next_due_ms"], `${path}.next_due_ms`),
       };
     }
+    case "sign_out":
+      return {
+        type,
+        left: arr(field(o, "left", path), `${path}.left`, (item, p) => hex32(item, p)),
+        keptAdminLeaves: arr(
+          field(o, "kept_admin_leaves", path),
+          `${path}.kept_admin_leaves`,
+          (item, p) => hex32(item, p),
+        ),
+      };
     case "inbox_relays":
       return {
         type,
@@ -1954,6 +1972,11 @@ export function encodeOpResult(result: OpResult): Json {
       pending: result.pending,
       retained: result.retained,
       next_due_ms: result.nextDueMs === undefined ? null : result.nextDueMs.toString(),
+    }),
+    sign_out: (result) => ({
+      type: "sign_out",
+      left: result.left,
+      kept_admin_leaves: result.keptAdminLeaves,
     }),
     inbox_relays: (result) => ({ type: "inbox_relays", outbound_id: result.outboundId }),
     group_created: (result) => ({

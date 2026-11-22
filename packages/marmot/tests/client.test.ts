@@ -249,6 +249,11 @@ function scriptedBackend(script: Script): {
                           nextDueMs: undefined,
                         },
                       };
+                    case "sign_out":
+                      return {
+                        type: "ok",
+                        result: { type: "sign_out", left: [], keptAdminLeaves: [] },
+                      };
                     case "publish_inbox_relays":
                       return {
                         type: "ok",
@@ -429,7 +434,12 @@ type Fixture = {
   subs: Array<{ relay: string; filters: RelayFilter[] }>;
 };
 
-async function open(script: Script, blob?: Uint8Array, sign?: Signer): Promise<Fixture> {
+async function open(
+  script: Script,
+  blob?: Uint8Array,
+  sign?: Signer,
+  lookupRelays?: string[],
+): Promise<Fixture> {
   const timer = manualTimer();
   const network = fakeRelay();
   const cursors = memoryCursorStore();
@@ -457,6 +467,7 @@ async function open(script: Script, blob?: Uint8Array, sign?: Signer): Promise<F
     timer,
     relays: port,
     allowLoopback: true,
+    ...(lookupRelays === undefined ? {} : { lookupRelays }),
   });
   return { client, script, timer, network, cursors, kv, clock, subs };
 }
@@ -718,6 +729,37 @@ describe("MarmotClient", () => {
       }),
     ).rejects.toMatchObject({ kind: "unsafe_relay" });
     expect(callsOf(fixture.script, "create_group")).toHaveLength(0);
+    await fixture.client.close();
+  });
+
+  test("signOut issues sign_out with the fetched write set", async () => {
+    const fixture = await open(freshScript(), undefined, undefined, [LOOKUP]);
+    // An authored NIP-65 list on the lookup relay: `read`-marked relays are
+    // excluded from the write set the request carries.
+    await fixture.network.port("peer").publish(
+      LOOKUP,
+      event({
+        id: "12".repeat(32),
+        pubkey: ACCOUNT,
+        kind: 10002,
+        tags: [
+          ["r", RELAY],
+          ["r", RELAY2, "read"],
+        ],
+      }),
+    );
+    const result = await fixture.client.signOut();
+    expect(result).toStrictEqual({ left: [], keptAdminLeaves: [] });
+    const calls = callsOf(fixture.script, "sign_out");
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({ type: "sign_out", writeRelays: [`${RELAY}/`] });
+    await fixture.client.close();
+  });
+
+  test("signOut maps a missing relay list to no_relay_list", async () => {
+    const fixture = await open(freshScript());
+    await expect(fixture.client.signOut()).rejects.toMatchObject({ kind: "no_relay_list" });
+    expect(callsOf(fixture.script, "sign_out")).toHaveLength(0);
     await fixture.client.close();
   });
 
