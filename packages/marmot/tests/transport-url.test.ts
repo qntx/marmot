@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vite-plus/test";
 
-import { safeRelayUrl } from "../src/transport/url.ts";
+import { safeMediaUrl, safeRelayUrl } from "../src/transport/url.ts";
 
 describe("safeRelayUrl — accepted without loopback", () => {
   const ok = [
@@ -160,5 +160,54 @@ describe("safeRelayUrl — size limits", () => {
   test("urls longer than 512 bytes refuse", () => {
     const long = `wss://${"a".repeat(500)}.example`;
     expect(safeRelayUrl(long, false)).toBe(false);
+  });
+});
+
+describe("safeMediaUrl", () => {
+  test("public https hosts pass without the flag", () => {
+    for (const url of [
+      "https://blossom.example/abc",
+      "https://blossom.example:8443/a.png",
+      "https://blossom.example/a.png?x=1",
+      "https://[2606:4700:4700::1111]/a.png",
+    ]) {
+      expect(safeMediaUrl(url, false)).toBe(true);
+    }
+  });
+
+  test("peer-supplied private, metadata and malformed URLs refuse", () => {
+    for (const url of [
+      "https://10.0.0.1/x",
+      "https://169.254.169.254/latest/meta-data",
+      "https://192.168.1.1/x",
+      "https://[fd00::1]/x",
+      "https://[::ffff:10.0.0.1]/x",
+      "https://[fe80::1]/x",
+      "https://user@blossom.example/x",
+      "https://blossom.example/x#frag",
+      "https://bad_underscore.example/x",
+      "https://blossom.example:0/x",
+      "https://blossom.example/x\n",
+      "http://blossom.example/x",
+      "wss://blossom.example",
+      "ftp://blossom.example/x",
+      "https://",
+      "",
+    ]) {
+      expect(safeMediaUrl(url, false)).toBe(false);
+      expect(safeMediaUrl(url, true)).toBe(false);
+    }
+  });
+
+  test("loopback hosts need the flag; http stays loopback-only", () => {
+    for (const url of ["https://127.0.0.1/x", "http://127.0.0.1:8080/x", "https://localhost/x"]) {
+      expect(safeMediaUrl(url, false)).toBe(false);
+      expect(safeMediaUrl(url, true)).toBe(true);
+    }
+  });
+
+  test("public https still passes under the flag; http public never does", () => {
+    expect(safeMediaUrl("https://blossom.example/abc", true)).toBe(true);
+    expect(safeMediaUrl("http://blossom.example/abc", true)).toBe(false);
   });
 });

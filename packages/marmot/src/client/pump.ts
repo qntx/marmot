@@ -29,6 +29,7 @@ import {
   groupCursorKey,
   inboxCursorKey,
   planSubscriptions,
+  safeMediaUrl,
   safeRelayUrl,
   wireEventBytes,
 } from "../transport/index.ts";
@@ -745,7 +746,10 @@ export class Pump {
     for (const event of events) {
       switch (event.type) {
         case "message_received":
-          batch.push({ group: event.group, message: event.message });
+          batch.push({
+            group: event.group,
+            message: this.filterAttachmentLocators(event.message),
+          });
           break;
         case "publish_resolved":
           this.emitDelivery({ outbound: event.outbound, resolution: event.resolution });
@@ -901,6 +905,30 @@ export class Pump {
         }
       })();
     });
+  }
+
+  /**
+   * Peer-supplied locators reach `onMessages` listeners verbatim: keep only the ones `safeMediaUrl`
+   * accepts. The attachment itself is never dropped — `openAttachment` authenticates against the
+   * reference hashes, which do not include the locators.
+   */
+  private filterAttachmentLocators(message: ReceivedMessage): ReceivedMessage {
+    return {
+      ...message,
+      attachments: message.attachments.map((attachment) =>
+        attachment.type === "ok"
+          ? {
+              ...attachment,
+              reference: {
+                ...attachment.reference,
+                locators: attachment.reference.locators.filter((locator) =>
+                  safeMediaUrl(locator.value, this.allowLoopback),
+                ),
+              },
+            }
+          : attachment,
+      ),
+    };
   }
 
   private emitGroupChange(event: GroupEvent): void {

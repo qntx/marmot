@@ -1,7 +1,11 @@
 /**
  * `MarmotClient` — the application surface: one `Engine` behind the `Pump`, typed errors, typed
  * events. Public ops run through the pump; relay lookups run outside it; every relay URL passes
- * `safeRelayUrl` before it can open a connection.
+ * `safeRelayUrl` before it can open a connection. Peer-supplied media locators on received messages
+ * are filtered through `safeMediaUrl` and a group avatar URL that fails it is dropped — hosts using
+ * `@qntx/marmot/backend` directly get the raw values and must apply `safeMediaUrl` (or
+ * `mk_core::media::Locator::destination` + `check_resolved_address` in Rust) before fetching;
+ * DNS-resolved addresses remain the host's check, same as relays.
  */
 
 import { Engine } from "../backend/engine.ts";
@@ -25,7 +29,7 @@ import type { InviteEvent } from "../invites/index.ts";
 import { lookupInvitees, writeRelaysOf } from "../keys/index.ts";
 import type { CursorStore, KvDriver } from "../storage/driver.ts";
 import type { RelayPort, Timer } from "../transport/index.ts";
-import { safeRelayUrl } from "../transport/index.ts";
+import { safeMediaUrl, safeRelayUrl } from "../transport/index.ts";
 import { MarmotError, toMarmotError } from "./errors.ts";
 import type { MarmotErrorKind } from "./errors.ts";
 import { Pump } from "./pump.ts";
@@ -240,7 +244,7 @@ export class MarmotClient {
         throw new MarmotError("unsafe_relay");
       }
     }
-    return this.op(async (engine) => groups.createGroup(engine, args));
+    return this.op(async (engine) => this.gateAvatar(await groups.createGroup(engine, args)));
   }
 
   async invite(group: string, invitees: Invitee[]): Promise<SendOutcome> {
@@ -401,10 +405,29 @@ export class MarmotClient {
   }
 
   async groups(): Promise<GroupSnapshot[]> {
-    return this.op(async (engine) => engine.groups());
+    return this.op(async (engine) => {
+      const snapshots = await engine.groups();
+      return snapshots.map((snapshot) => this.gateAvatar(snapshot));
+    });
   }
 
   async group(id: string): Promise<GroupSnapshot | undefined> {
-    return this.op(async (engine) => engine.group(id));
+    return this.op(async (engine) => {
+      const snapshot = await engine.group(id);
+      return snapshot === undefined ? undefined : this.gateAvatar(snapshot);
+    });
+  }
+
+  /**
+   * A peer-set avatar URL reaches the host verbatim from group state: return `avatar: undefined`
+   * when it fails `safeMediaUrl`, so a group cannot point the host at a private or metadata
+   * address.
+   */
+  private gateAvatar(snapshot: GroupSnapshot): GroupSnapshot {
+    const { avatar } = snapshot;
+    if (avatar === undefined || safeMediaUrl(avatar.url, this.allowLoopback)) {
+      return snapshot;
+    }
+    return { ...snapshot, avatar: undefined };
   }
 }

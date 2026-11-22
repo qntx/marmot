@@ -29,5 +29,6 @@ export {
   MAX_RELAYS,
   MAX_SUBSCRIPTIONS,
   nostrRelayPort,
+  safeMediaUrl,
   safeRelayUrl,
 } from "../transport/index.ts";

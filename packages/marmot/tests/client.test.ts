@@ -1414,6 +1414,84 @@ describe("MarmotClient", () => {
     await fixture.client.close();
   });
 
+  test("message_received keeps only locators that pass safeMediaUrl", async () => {
+    const script = freshScript();
+    const reference = {
+      locators: [
+        { kind: "url", value: "https://blossom.example/abc" },
+        { kind: "url", value: "http://10.0.0.1/x" },
+        { kind: "url", value: "https://169.254.169.254/y" },
+      ],
+      ciphertextSha256: "aa".repeat(32),
+      plaintextSha256: "bb".repeat(32),
+      nonce: "cc".repeat(12),
+      mediaType: "image/png",
+      filename: "a.png",
+      dim: undefined,
+      thumbhash: undefined,
+    };
+    const incoming = {
+      ...msg("14".repeat(32)),
+      attachments: [
+        { type: "ok" as const, reference },
+        { type: "rejected" as const, reason: "malformed_field" as const },
+      ],
+    };
+    script.drains.push(
+      { type: "events", events: [] },
+      { type: "events", events: [] },
+      {
+        type: "events",
+        events: [{ type: "message_received", group: GROUP, message: incoming }],
+      },
+    );
+    script.groups = [snapshot()];
+    const fixture = await open(script, encodeClientState({ cursors: {}, inbox: [RELAY] }));
+    await settle(fixture.timer, 5000);
+    const batches: Array<Array<{ attachments: unknown }>> = [];
+    fixture.client.onMessages(async (batch) => {
+      batches.push(batch.map((entry) => entry.message));
+      return Promise.resolve();
+    });
+    await fixture.network.port("peer").publish(RELAY, groupEvent());
+    await settle(fixture.timer, 5000);
+    // The attachment survives with only the safe locator; the rejected entry passes through.
+    expect(batches[0]?.[0]?.attachments).toStrictEqual([
+      {
+        type: "ok",
+        reference: {
+          ...reference,
+          locators: [{ kind: "url", value: "https://blossom.example/abc" }],
+        },
+      },
+      { type: "rejected", reason: "malformed_field" },
+    ]);
+    await fixture.client.close();
+  });
+
+  test("groups() drops an avatar whose URL fails safeMediaUrl", async () => {
+    const script = freshScript();
+    script.groups = [
+      {
+        ...snapshot(),
+        avatar: { url: "https://10.0.0.1/a.png", dim: undefined, thumbhash: undefined },
+      },
+      {
+        ...snapshot(),
+        id: "ee".repeat(32),
+        avatar: { url: "https://blossom.example/a.png", dim: undefined, thumbhash: undefined },
+      },
+    ];
+    const fixture = await open(script, encodeClientState({ cursors: {}, inbox: [] }));
+    const groupSnapshots = await fixture.client.groups();
+    const avatars = groupSnapshots.map((g) => g.avatar);
+    expect(avatars).toStrictEqual([
+      undefined,
+      { url: "https://blossom.example/a.png", dim: undefined, thumbhash: undefined },
+    ]);
+    await fixture.client.close();
+  });
+
   test("new bridge errors map to the new client kinds", async () => {
     const script = freshScript();
     script.errors["disband"] = "disbanding_not_enabled";
