@@ -1576,18 +1576,23 @@ async function run(): Promise<void> {
       }, `wn messages list shows ${ourText}`);
     });
 
-    // S20 (D2) — a third device of our account behind a censoring
-    // RelayPort: wn's rename commit never reaches it, three chats defer,
-    // the session suspects once, the Pump's one unfloored refetch still
-    // lacks the commit, and the copy reports `access: stalled`.
+    // S20 (D2) — two devices of our account, wn admin. A censoring
+    // RelayPort withholds wn's rename commit from device 1 only: three
+    // chats defer, the session suspects once, the Pump's one unfloored
+    // refetch still lacks the commit, and the copy reports
+    // `access: stalled` while device 2 stays active. wn then removes and
+    // re-invites the account: device 2's removed copy reinstalls from
+    // its new Welcome without consent, device 1's stalled copy gets a
+    // consent-required `rejoin_offered`, and after `confirmRejoin` both
+    // devices exchange messages with wn again.
     //
-    // The device creates the group and seats wn as an admin rather than
+    // Device 1 creates the group and seats wn as an admin rather than
     // joining a wn-created one: a Welcome-installed copy floors
-    // `local_copy_welcome_created_at`, and the pre-copy skew window
-    // swallows everything wn could emit on wall-clock time — a
-    // self-created copy has no such floor, so the withheld wn commit
+    // `local_copy_welcome_created_at`, and the five-minute post-Welcome
+    // skew window swallows everything wn could emit on wall-clock time —
+    // a self-created copy has no such floor, so the withheld wn commit
     // defers the chats for real.
-    await scenario("S20 stall detection", async () => {
+    await scenario("S20 stall detection + rejoin repair", async () => {
       const inner = nostrRelayPort(pool);
       // Two-stage drop: while `armed` every kind-445 event is withheld
       // and its id recorded — the rename's commit hits the live
@@ -1632,17 +1637,49 @@ async function run(): Promise<void> {
         lookupRelays: [url],
         allowLoopback: true,
       });
+      const backend4: Backend = await releaseBackend();
+      const client4 = await MarmotClient.open({
+        backend: backend4,
+        kv: memoryKv(),
+        cursors: memoryCursorStore(),
+        signer,
+        clock: {
+          now: () => ({
+            unixMs: BigInt(Date.now()),
+            monotonicMs: BigInt(Math.max(0, Date.now() - startMonotonic)),
+          }),
+        },
+        timer,
+        relays: nostrRelayPort(pool),
+        lookupRelays: [url],
+        allowLoopback: true,
+      });
       const invites3: InviteEvent[] = [];
       const changes3: GroupEvent[] = [];
+      const received3: ClientMessage[] = [];
       client3.onInvite((event) => {
         invites3.push(event);
       });
       client3.onGroupChange((event) => {
         changes3.push(event);
       });
-      // The count is relative: earlier scenarios may or may not have run
-      // under WN_ONLY filtering, so wait for one NEW package, not a
-      // third total.
+      client3.onMessages((batch) => {
+        received3.push(...batch);
+      });
+      const invites4: InviteEvent[] = [];
+      const changes4: GroupEvent[] = [];
+      const received4: ClientMessage[] = [];
+      client4.onInvite((event) => {
+        invites4.push(event);
+      });
+      client4.onGroupChange((event) => {
+        changes4.push(event);
+      });
+      client4.onMessages((batch) => {
+        received4.push(...batch);
+      });
+      // Relative counts: earlier scenarios may or may not have run under
+      // WN_ONLY filtering, so wait for NEW packages, not totals.
       const knownKps = new Set(
         served.relay
           .events()
@@ -1651,53 +1688,90 @@ async function run(): Promise<void> {
       );
       await client3.ensureKeyPackage();
       await client3.publishInboxRelays([url]);
-      await waitFor(
-        () =>
-          served.relay
-            .events()
-            .some(
-              (stored) =>
-                stored.kind === KEY_PACKAGE_KIND &&
-                stored.pubkey === signer.pubkey &&
-                !knownKps.has(stored.id),
-            ) || undefined,
-        "third device's KeyPackage on the relay",
-      );
+      await client4.ensureKeyPackage();
+      await client4.publishInboxRelays([url]);
+      const ourKps = await waitFor(() => {
+        const fresh = served.relay
+          .events()
+          .filter(
+            (stored) =>
+              stored.kind === KEY_PACKAGE_KIND &&
+              stored.pubkey === signer.pubkey &&
+              !knownKps.has(stored.id),
+          );
+        return fresh.length >= 2 ? fresh : undefined;
+      }, "both devices' KeyPackages on the relay");
 
       let at = Date.now();
-      const invitees3 = await client3.lookupInvitees(rig.wnPub, [url]);
-      if (invitees3.length === 0) {
+      const wnInvitees = await client3.lookupInvitees(rig.wnPub, [url]);
+      if (wnInvitees.length === 0) {
         throw new Error("lookupInvitees returned no key packages for m3b-20");
+      }
+      // The creator's own leaf is already a member, so only the second
+      // device's KeyPackage is an invitee — a Commit cannot add a leaf
+      // whose signature key duplicates the creator's (`d` slot tag).
+      const ownStatus = await client3.keyPackageStatus();
+      const ownSlot = ownStatus.slot;
+      const siblingKps = ourKps.filter(
+        (stored) => stored.tags.find((tag) => tag[0] === "d")?.[1] !== ownSlot,
+      );
+      if (siblingKps.length === 0) {
+        throw new Error("no sibling-device KeyPackage for m3b-20");
       }
       const snapshot3 = await client3.createGroup({
         name: "m3b-20",
         description: "",
         relays: [url],
-        invitees: invitees3,
+        invitees: [
+          ...wnInvitees,
+          ...siblingKps.map((stored) => ({
+            keyPackage: {
+              id: stored.id,
+              pubkey: stored.pubkey,
+              createdAt: BigInt(stored.created_at),
+              kind: stored.kind,
+              tags: stored.tags.map((tag) => [...tag]),
+              content: stored.content,
+              sig: stored.sig,
+            },
+            inboxRelays: [url],
+          })),
+        ],
         admins: [rig.wnPub],
       });
       const gid = snapshot3.id;
       const wnGid = gid;
+      // Device 2 installs its copy from its own founding wrap.
+      await waitFor(
+        () => invites4.some((event) => event.type === "joined" && event.group === gid) || undefined,
+        "device 4 joins via its founding wrap",
+      );
       await waitFor(async () => {
         const gids = await wnInviteGids(rig);
         return gids.includes(gid) || undefined;
       }, `wn groups invites shows ${gid}`);
       await wn(rig, ["groups", "accept", wnGid], rig.wnNpub);
-      await waitFor(async () => {
-        const roster = await client3.group(gid);
-        if (roster === undefined) {
-          return undefined;
-        }
-        return roster.members.some((member) => member.account === rig.wnPub) || undefined;
-      }, `wn member ${rig.wnNpub} in m3b-20 roster`);
+      for (const [label, member] of [
+        ["device 3", client3],
+        ["device 4", client4],
+      ] as const) {
+        // oxlint-disable-next-line no-await-in-loop -- sequential convergence waits
+        await waitFor(async () => {
+          const roster = await member.group(gid);
+          if (roster === undefined) {
+            return undefined;
+          }
+          return roster.members.some((entry) => entry.account === rig.wnPub) || undefined;
+        }, `${label} roster includes wn`);
+      }
       await sleep(2000);
       const route = snapshot3.nostrGroupId;
-      log(`device 3 created ${wnGid}; wn accepted as admin (${secs(at)})`);
+      log(`device 3 created ${wnGid} with wn admin; device 4 joined (${secs(at)})`);
 
-      // Arm the drop, then rename: the commit must never reach the live
-      // subscription. The relay-store read below only CONFIRMS the set —
-      // it stays nonempty and unchanged across two polls before the
-      // port is disarmed, so a slow publish cannot slip one through.
+      // Arm the drop, then rename: the commit must never reach device 1's
+      // live subscription. The relay-store read below only CONFIRMS the
+      // set — it stays nonempty and unchanged across two polls before
+      // the port is disarmed, so a slow publish cannot slip one through.
       at = Date.now();
       const seenIds = new Set(
         served.relay
@@ -1750,13 +1824,273 @@ async function run(): Promise<void> {
           undefined,
         "device 3 stalls after one refetch",
       );
-      const snapshots3 = await client3.groups();
-      const stalled3 = snapshots3.find((item) => item.id === gid);
+      const stalled3 = await client3.group(gid);
       if (stalled3?.access !== "stalled") {
         throw new Error(`device 3 access ${String(stalled3?.access)}, expected stalled`);
       }
-      log(`device 3 flagged stalled after one refetch (${secs(at)})`);
+      const healthy4 = await client4.group(gid);
+      if (healthy4?.access !== "active") {
+        throw new Error(`device 4 access ${String(healthy4?.access)}, expected active`);
+      }
+      log(`device 3 stalled after one refetch; device 4 active (${secs(at)})`);
+
+      // Repair: wn removes the whole account, then re-invites it. Device
+      // 4 must apply the removal before the re-add wraps reach it —
+      // arriving while it still held a leaf would park a consent offer.
+      at = Date.now();
+      await wn(rig, ["groups", "remove-members", wnGid, ourNpub], rig.wnNpub);
+      await waitFor(async () => {
+        const snapshot = await client4.group(gid);
+        return snapshot?.access === "removed" || snapshot?.access === "removed_device" || undefined;
+      }, "device 4 removed by wn");
+      await wn(rig, ["groups", "add-members", wnGid, ourNpub], rig.wnNpub);
+
+      // Device 4's removed copy reinstalls from its new Welcome on its
+      // own — no consent, no `rejoin_offered` across the whole repair.
+      await waitFor(async () => {
+        const snapshot = await client4.group(gid);
+        return snapshot?.access === "active" || undefined;
+      }, "device 4 auto-installs the re-add welcome");
+      if (changes4.some((event) => event.type === "rejoin_offered" && event.group === gid)) {
+        throw new Error("the healthy sibling saw a consent offer");
+      }
+      log(`device 4 reinstalled without consent (${secs(at)})`);
+
+      // Device 3's stalled copy cannot apply the removal commit, so the
+      // re-add wrap parks a consent-required offer on it.
+      await waitFor(
+        () =>
+          changes3.some((event) => event.type === "rejoin_offered" && event.group === gid) ||
+          undefined,
+        "device 3 rejoin offer",
+      );
+      const offers = await client3.rejoinOffers(gid);
+      if (offers.length !== 1) {
+        throw new Error(`device 3 holds ${offers.length} offers, expected 1`);
+      }
+      const [offer] = offers;
+      if (offer === undefined || offer.author !== rig.wnPub) {
+        throw new Error(`offer author ${String(offer?.author)}, expected ${rig.wnPub}`);
+      }
+      await client3.confirmRejoin(gid, offer.offer, offer.token);
+      await waitFor(async () => {
+        const snapshot = await client3.group(gid);
+        return snapshot?.access === "active" || undefined;
+      }, "device 3 active after confirmRejoin");
+      log(`device 3 confirmed the rejoin (${secs(at)})`);
+
+      // wn's next message reaches both devices at the repaired epoch; a
+      // message from each device reaches wn.
+      const wnText = `s20-wn-${Math.floor(Date.now() / 1000)}`;
+      await wn(rig, ["messages", "send", wnGid, wnText], rig.wnNpub);
+      await waitFor(
+        () =>
+          received3.some((entry) => entry.group === gid && entry.message.content === wnText) ||
+          undefined,
+        "device 3 reads wn after rejoin",
+      );
+      await waitFor(
+        () =>
+          received4.some((entry) => entry.group === gid && entry.message.content === wnText) ||
+          undefined,
+        "device 4 reads wn after rejoin",
+      );
+      for (const [label, member, text] of [
+        ["device 3", client3, `s20-d3-${Math.floor(Date.now() / 1000)}`],
+        ["device 4", client4, `s20-d4-${Math.floor(Date.now() / 1000)}`],
+      ] as const) {
+        // oxlint-disable-next-line no-await-in-loop -- sends are sequential by design
+        await member.sendMessage(gid, { kind: CHAT_KIND, tags: [], content: text });
+        // oxlint-disable-next-line no-await-in-loop -- sequential wn polls
+        await waitFor(async () => {
+          const entries = await wnMessages(rig, wnGid);
+          return entries.some((entry) => entry.includes(text)) || undefined;
+        }, `wn reads ${label}`);
+      }
       await client3.close();
+      await client4.close();
+    });
+
+    // S22 (D2) — we are the admin of a group holding a wn member. A
+    // publish-censoring RelayPort withholds one of our commits from the
+    // relay while still answering `accepted` — our epoch moves, wn never
+    // learns it, and a chat rides the withheld epoch that wn cannot
+    // read. `readdMember` stages the removal; its confirmation stages
+    // exactly one Invite; wn's stalled copy surfaces a consent-required
+    // offer through `groups recovery-status`; `confirm-rejoin` installs
+    // the replacement copy and the round trip recovers.
+    await scenario("S22 we re-add a stuck wn member", async () => {
+      let at = Date.now();
+      const inner = nostrRelayPort(pool);
+      // While `armed`, the FIRST kind-445 publish is reported `accepted`
+      // but never forwarded — the session's epoch moves on a commit the
+      // relay (and wn) never sees.
+      const drop = { armed: false, id: "" };
+      const censoringPort: RelayPort = {
+        publish: async (relay, event) => {
+          if (event.kind === 445 && drop.armed && drop.id === "") {
+            drop.id = event.id;
+            return "accepted";
+          }
+          return inner.publish(relay, event);
+        },
+        connect: async (relay) => inner.connect(relay),
+        subscribe: (relay, filters, handlers) => inner.subscribe(relay, filters, handlers),
+      };
+      const backend5: Backend = await releaseBackend();
+      const client5 = await MarmotClient.open({
+        backend: backend5,
+        kv: memoryKv(),
+        cursors: memoryCursorStore(),
+        signer,
+        clock: {
+          now: () => ({
+            unixMs: BigInt(Date.now()),
+            monotonicMs: BigInt(Math.max(0, Date.now() - startMonotonic)),
+          }),
+        },
+        timer,
+        relays: censoringPort,
+        lookupRelays: [url],
+        allowLoopback: true,
+      });
+      const invites5: InviteEvent[] = [];
+      const received5: ClientMessage[] = [];
+      client5.onInvite((event) => {
+        invites5.push(event);
+      });
+      client5.onMessages((batch) => {
+        received5.push(...batch);
+      });
+      const knownKps = new Set(
+        served.relay
+          .events()
+          .filter((stored) => stored.kind === KEY_PACKAGE_KIND && stored.pubkey === signer.pubkey)
+          .map((stored) => stored.id),
+      );
+      await client5.ensureKeyPackage();
+      await client5.publishInboxRelays([url]);
+      await waitFor(
+        () =>
+          served.relay
+            .events()
+            .some(
+              (stored) =>
+                stored.kind === KEY_PACKAGE_KIND &&
+                stored.pubkey === signer.pubkey &&
+                !knownKps.has(stored.id),
+            ) || undefined,
+        "admin device's KeyPackage on the relay",
+      );
+      const wnInvitees = await client5.lookupInvitees(rig.wnPub, [url]);
+      if (wnInvitees.length === 0) {
+        throw new Error("lookupInvitees returned no key packages for m3b-22");
+      }
+      const snapshot5 = await client5.createGroup({
+        name: "m3b-22",
+        description: "",
+        relays: [url],
+        invitees: wnInvitees,
+      });
+      const gid = snapshot5.id;
+      const wnGid = gid;
+      await waitFor(async () => {
+        const gids = await wnInviteGids(rig);
+        return gids.includes(gid) || undefined;
+      }, `wn groups invites shows ${gid}`);
+      await wn(rig, ["groups", "accept", wnGid], rig.wnNpub);
+      await waitFor(async () => {
+        const roster = await client5.group(gid);
+        if (roster === undefined) {
+          return undefined;
+        }
+        return roster.members.some((entry) => entry.account === rig.wnPub) || undefined;
+      }, "wn member in m3b-22 roster");
+      await sleep(2000);
+      log(`created ${wnGid} with wn member (${secs(at)})`);
+
+      // Withhold the rename's commit: armed just before the call, the
+      // port reports the publish accepted but never forwards the event.
+      at = Date.now();
+      drop.armed = true;
+      await client5.updateGroupProfile(gid, { name: "m3b-22-moved" });
+      await waitFor(() => drop.id !== "" || undefined, "rename commit withheld");
+      await client5.sendMessage(gid, { kind: CHAT_KIND, tags: [], content: "s22-unreadable" });
+      await sleep(4000);
+      log(`withheld one commit; wn is stuck (${secs(at)})`);
+
+      // Whatever wn does about being stuck (its kind-1159 recovery
+      // requests, if it issues them), our side stays inert: the route
+      // must gain no further events authored by our session.
+      const route5 = snapshot5.nostrGroupId;
+      const routeIds = () =>
+        new Set(
+          served.relay
+            .events()
+            .filter(
+              (stored) =>
+                stored.kind === 445 &&
+                stored.tags.some((tag) => tag[0] === "h" && tag[1] === route5),
+            )
+            .map((stored) => stored.id),
+        );
+      const baselineIds = routeIds();
+      await sleep(6000);
+      const gained = [...routeIds()].filter((id) => !baselineIds.has(id));
+      if (gained.length > 0) {
+        throw new Error(`a recovery request staged ${gained.length} event(s)`);
+      }
+
+      // Re-add the stuck account: `removed` — the Invite follows once
+      // the removal commit confirms.
+      const outcome = await client5.readdMember(gid, rig.wnPub, [url]);
+      if (outcome !== "removed") {
+        throw new Error(`readdMember outcome ${outcome}, expected removed`);
+      }
+
+      // wn's stalled copy holds the offer: `recovery-status` lists it
+      // with the token `confirm-rejoin` needs.
+      const offerInfo = await waitFor(async () => {
+        const reply = await wnTry(rig, ["groups", "recovery-status", wnGid], rig.wnNpub);
+        const offers = ptrArr(reply.parsed, "/result/rejoin_invitations");
+        const [first] = offers;
+        if (first === undefined) {
+          return undefined;
+        }
+        const welcomeId = ptrStr(first, "/welcome_id_hex");
+        const token = ptrStr(first, "/local_state_token");
+        return welcomeId !== undefined && token !== undefined ? { welcomeId, token } : undefined;
+      }, "wn rejoin offer in recovery-status");
+      await wn(
+        rig,
+        [
+          "groups",
+          "confirm-rejoin",
+          offerInfo.welcomeId,
+          "--local-state-token",
+          offerInfo.token,
+          "--confirm",
+        ],
+        rig.wnNpub,
+      );
+      log(`wn confirmed the rejoin (${secs(at)})`);
+
+      // The round trip recovers both ways.
+      const ourText = `s22-us-${Math.floor(Date.now() / 1000)}`;
+      await client5.sendMessage(gid, { kind: CHAT_KIND, tags: [], content: ourText });
+      await waitFor(async () => {
+        const entries = await wnMessages(rig, wnGid);
+        return entries.some((entry) => entry.includes(ourText)) || undefined;
+      }, "wn reads us after re-add");
+      const wnText = `s22-wn-${Math.floor(Date.now() / 1000)}`;
+      await wn(rig, ["messages", "send", wnGid, wnText], rig.wnNpub);
+      await waitFor(
+        () =>
+          received5.some((entry) => entry.group === gid && entry.message.content === wnText) ||
+          undefined,
+        "we read wn after re-add",
+      );
+      await client5.close();
     });
 
     // S21 — post-join self-update: the Pump reports history_fetched at

@@ -36,7 +36,7 @@ use std::time::{Duration, Instant};
 use mk_core::media::Locator;
 use mk_core::{
     AccountId, AppMessage, AttachmentInput, CreateGroup, GroupId, GroupState, Invitee,
-    MediaMessage, SessionEvent,
+    MediaMessage, RelayResult, RelayStatus, SessionEvent,
 };
 use serde_json::Value;
 use support::*;
@@ -1344,35 +1344,191 @@ async fn scenario21_post_join_self_update() {
     eprintln!("SCENARIO-21 PASS {:.1}s", start.elapsed().as_secs_f64());
 }
 
-// ---- scenario 20: stall detection ------------------------------------
+// ---- scenario 20: stall detection + consented repair ------------------
 
-/// S20 (D2): wn renames the group (a Commit) and sends three messages at
-/// the new epoch; the commit is dropped from our device's feed. Three
-/// deferred events suspect the stall once; one unfloored refetch that
-/// still lacks the commit leaves the counter full — `access: Stalled`.
+/// S20 (D2): wn is the admin of a group holding two devices of one
+/// account of ours. wn renames the group (one Commit) and sends three
+/// messages; the commit is withheld from device 1's feed only. Three
+/// deferred events suspect the stall once; one unfloored refetch still
+/// lacking the commit flags `access: Stalled` while device 2 stays
+/// `Active`. wn then removes and re-invites the account: device 2's
+/// removed copy reinstalls from its new Welcome without consent, device
+/// 1's stalled copy gets a consent-required `RejoinOffered`, and after
+/// `confirm_rejoin` both devices exchange messages with wn again.
 ///
-/// Our device creates the group and seats wn as an admin rather than
-/// joining a wn-created one: a copy installed through a Welcome keeps
-/// `local_copy_welcome_created_at`, and the stall counter's
+/// Our first device creates the group and seats wn as an admin rather
+/// than joining a wn-created one: a copy installed through a Welcome
+/// keeps `local_copy_welcome_created_at`, and the stall counter's
 /// `transport_message_predates_local_copy` filter drops every event
-/// inside the pre-copy clock-skew window — on wall-clock time nothing
-/// wn emits right after our join would ever count. A self-created copy
-/// has no Welcome floor, so the withheld wn commit defers the chats for
-/// real.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+/// inside the five-minute post-Welcome clock-skew window — on wall-clock
+/// time nothing wn emits during the test would ever count. A
+/// self-created copy has no Welcome floor, so the withheld wn commit
+/// defers the chats for real.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 #[ignore = "needs wn/wnd built from the upstream.json wn pin; see CONTRIBUTING"]
-async fn scenario20_stall_detection() {
+async fn scenario20_stall_and_repair() {
     let start = Instant::now();
     let rig = Arc::new(rig("s20").await);
-    let mut a = open_member().await;
-    publish_identity(&mut a, &rig).await;
 
+    // Two devices of one account; each holds a leaf of the group.
+    let signer = Arc::new(mk_core::testing::LocalSigner::from_secret([0x20; 32]).expect("secret"));
+    let mut a1 = open_member_with(Arc::clone(&signer)).await;
+    let mut a2 = open_member_with(signer).await;
+    publish_identity(&mut a1, &rig).await;
+    publish_identity(&mut a2, &rig).await;
+    let a_npub = a1.npub();
+    let a_hex = a1.account_hex();
+
+    // a1 founds the group with wn as an admin: the founding invitees are
+    // wn's KeyPackage plus one fresh KeyPackage per own device.
     let wn_account = AccountId::from_hex(&rig.wn_pub).expect("wn hex");
-    let gid = mk_group_with_wn(&rig, &mut a, "interop-20", vec![wn_account]).await;
+    let wn_kp = until(
+        || {
+            let rig = Arc::clone(&rig);
+            async move { fetch_key_package(&rig, &rig.wn_pub).await }
+        },
+        "wn key package on relay",
+        60_000,
+        1_500,
+    )
+    .await;
+    // a2's founding-invitee KeyPackage: the creator's own leaf is already
+    // a member, so only a2 needs an invitee. The relay can also hold a
+    // same-slot replacement (same leaf signature key — a Commit cannot
+    // add two leaves with one key), so select per `d` slot and drop a1's
+    // slot entirely.
+    let a1_slot = hex::encode(a1.session.key_package_status().expect("status").slot);
+    let a2_kp = until(
+        || {
+            let rig = Arc::clone(&rig);
+            let a_hex = a_hex.clone();
+            let a1_slot = a1_slot.clone();
+            async move {
+                let kps = fetch(&rig, key_package_filter(&a_hex)).await;
+                mk_core::key_package::select_key_packages(
+                    AccountId::from_hex(&a_hex).expect("hex"),
+                    &kps,
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .expect("clock")
+                        .as_secs(),
+                )
+                .into_iter()
+                .find(|event| tag_value(event, "d") != Some(a1_slot.as_str()))
+            }
+        },
+        "a2's KeyPackage on relay",
+        60_000,
+        1_500,
+    )
+    .await;
+    let mut invitees = vec![Invitee {
+        key_package: wn_kp,
+        inbox_relays: vec![rig.url.clone()],
+    }];
+    invitees.push(Invitee {
+        key_package: a2_kp,
+        inbox_relays: vec![rig.url.clone()],
+    });
+    let gid = a1
+        .session
+        .create_group(CreateGroup {
+            name: "interop-20".to_owned(),
+            description: String::new(),
+            relays: vec![rig.url.clone()],
+            invitees,
+            admins: vec![wn_account],
+            components: Vec::new(),
+        })
+        .await
+        .expect("create_group");
+    flush(&mut a1, &rig).await;
     let wn_gid = gid.to_string();
 
+    // a2 installs its copy from its own wrap of the founding invite.
+    let gid_a2 = gid.clone();
+    let account_hex2 = a_hex.clone();
+    until_member(
+        &mut a2,
+        |a| {
+            let gid = gid_a2.clone();
+            let account_hex = account_hex2.clone();
+            let rig = Arc::clone(&rig);
+            Box::pin(async move {
+                let wraps = fetch_welcomes(&rig, &account_hex).await;
+                let events = ingest(&mut *a, wraps).await;
+                events
+                    .iter()
+                    .any(|event| {
+                        matches!(event, SessionEvent::GroupJoined { group } if *group == gid)
+                    })
+                    .then_some(())
+            })
+        },
+        "a2 welcome join",
+        90_000,
+    )
+    .await;
+
+    // wn accepts the invite; the roster shows three leaves.
+    let found = until(
+        || {
+            let rig = Arc::clone(&rig);
+            async move { wn_invite_gid(&rig) }
+        },
+        "wn invite appears",
+        90_000,
+        1_500,
+    )
+    .await;
+    assert_eq!(found, wn_gid, "group id match");
+    wn(
+        &rig.home,
+        &rig.socket,
+        Some(&rig.wn_npub),
+        &["groups", "accept", &wn_gid],
+    );
+    let wn_gid_ref = wn_gid.clone();
+    until(
+        || {
+            let rig = Arc::clone(&rig);
+            let wn_gid = wn_gid_ref.clone();
+            async move { (wn_members(&rig, &wn_gid).len() >= 2).then_some(()) }
+        },
+        "wn roster shows both accounts",
+        90_000,
+        1_500,
+    )
+    .await;
+    sleep(Duration::from_millis(WND_SETTLE_MS)).await;
+
+    // Both devices converge on the {wn, A, A} roster.
+    for (i, member) in [&mut a1, &mut a2].into_iter().enumerate() {
+        let gid_ref = gid.clone();
+        let wn_pub = rig.wn_pub.clone();
+        until_member(
+            member,
+            |a| {
+                let gid = gid_ref.clone();
+                let wn_pub = wn_pub.clone();
+                let rig = Arc::clone(&rig);
+                Box::pin(async move {
+                    let _ = sync(&mut *a, &rig, &gid).await;
+                    a.roster(&gid).contains(&wn_pub).then_some(())
+                })
+            },
+            if i == 0 {
+                "a1 roster includes wn"
+            } else {
+                "a2 roster includes wn"
+            },
+            90_000,
+        )
+        .await;
+    }
+
     // Everything currently on the group route is already ingested.
-    let route = a.route_hex(&gid);
+    let route = a1.route_hex(&gid);
     let seen: std::collections::BTreeSet<mk_core::EventId> = fetch_group(&rig, &route)
         .await
         .into_iter()
@@ -1446,8 +1602,8 @@ async fn scenario20_stall_detection() {
     )
     .await;
 
-    // Exactly one suspicion across the whole feed.
-    let events = ingest(&mut a, without_commit).await;
+    // Exactly one suspicion across the withheld feed on device 1.
+    let events = ingest(&mut a1, without_commit).await;
     let suspected = events
         .iter()
         .filter(
@@ -1463,17 +1619,350 @@ async fn scenario20_stall_detection() {
         .into_iter()
         .filter(|event| !dropped.contains(&event.id))
         .collect();
-    let _ = ingest(&mut a, refetch).await;
-    a.session.history_fetched(&gid).expect("history_fetched");
-    let events = a.session.drain_events().expect("drain");
+    let _ = ingest(&mut a1, refetch).await;
+    a1.session.history_fetched(&gid).expect("history_fetched");
+    let events = a1.session.drain_events().expect("drain");
     let stalled = events
         .iter()
         .filter(|event| matches!(event, SessionEvent::GroupStalled { group } if *group == gid))
         .count();
     assert_eq!(stalled, 1, "one stalled event after the refetch");
-    let snapshot = a.session.group(&gid).expect("group").expect("snapshot");
+    let snapshot = a1.session.group(&gid).expect("group").expect("snapshot");
     assert_eq!(snapshot.access, mk_core::GroupAccess::Stalled);
+
+    // Device 2 followed the whole feed and stays Active.
+    let _ = sync(&mut a2, &rig, &gid).await;
+    let snapshot = a2.session.group(&gid).expect("group").expect("snapshot");
+    assert_eq!(snapshot.access, mk_core::GroupAccess::Active);
+
+    // Repair: wn removes the whole account, then re-invites it. Device 2
+    // must apply the removal before the re-add wraps reach it — arriving
+    // while it still held a leaf would park a consent-required offer.
+    wn(
+        &rig.home,
+        &rig.socket,
+        Some(&rig.wn_npub),
+        &["groups", "remove-members", &wn_gid, &a_npub],
+    );
+    let a2_events = Arc::new(std::sync::Mutex::new(Vec::<SessionEvent>::new()));
+    let gid_a2 = gid.clone();
+    let a2_events_ref = Arc::clone(&a2_events);
+    until_member(
+        &mut a2,
+        |a| {
+            let gid = gid_a2.clone();
+            let rig = Arc::clone(&rig);
+            let a2_events = Arc::clone(&a2_events_ref);
+            Box::pin(async move {
+                let events = sync(&mut *a, &rig, &gid).await;
+                a2_events.lock().expect("events").extend(events);
+                let removed = a.session.group(&gid).expect("group").is_some_and(|s| {
+                    matches!(
+                        s.access,
+                        mk_core::GroupAccess::Removed | mk_core::GroupAccess::RemovedDevice
+                    )
+                });
+                removed.then_some(())
+            })
+        },
+        "a2 removed by wn",
+        120_000,
+    )
+    .await;
+    wn(
+        &rig.home,
+        &rig.socket,
+        Some(&rig.wn_npub),
+        &["groups", "add-members", &wn_gid, &a_npub],
+    );
+
+    // Device 2's removed copy reinstalls from its new Welcome on its own —
+    // no consent, no `RejoinOffered` across the whole repair.
+    let gid_a2 = gid.clone();
+    let account_hex2 = a_hex.clone();
+    let a2_events_ref = Arc::clone(&a2_events);
+    until_member(
+        &mut a2,
+        |a| {
+            let gid = gid_a2.clone();
+            let account_hex = account_hex2.clone();
+            let rig = Arc::clone(&rig);
+            let a2_events = Arc::clone(&a2_events_ref);
+            Box::pin(async move {
+                let wraps = fetch_welcomes(&rig, &account_hex).await;
+                let events = ingest(&mut *a, wraps).await;
+                a2_events
+                    .lock()
+                    .expect("events")
+                    .extend(events.iter().cloned());
+                let joined = events.iter().any(
+                    |event| matches!(event, SessionEvent::GroupJoined { group } if *group == gid),
+                );
+                let active = a
+                    .session
+                    .group(&gid)
+                    .expect("group")
+                    .is_some_and(|s| s.access == mk_core::GroupAccess::Active);
+                (joined || active).then_some(())
+            })
+        },
+        "a2 auto-installs the re-add welcome",
+        120_000,
+    )
+    .await;
+    assert!(
+        !a2_events
+            .lock()
+            .expect("events")
+            .iter()
+            .any(|event| matches!(event, SessionEvent::RejoinOffered { .. })),
+        "a healthy sibling never sees a consent offer"
+    );
+    let snapshot = a2.session.group(&gid).expect("group").expect("snapshot");
+    assert_eq!(snapshot.access, mk_core::GroupAccess::Active);
+    flush(&mut a2, &rig).await;
+
+    // Device 1's stalled copy cannot apply the removal commit, so the
+    // re-add wrap parks a consent-required offer on it.
+    let gid_a1 = gid.clone();
+    let account_hex1 = a_hex.clone();
+    until_member(
+        &mut a1,
+        |a| {
+            let gid = gid_a1.clone();
+            let account_hex = account_hex1.clone();
+            let rig = Arc::clone(&rig);
+            Box::pin(async move {
+                let wraps = fetch_welcomes(&rig, &account_hex).await;
+                let events = ingest(&mut *a, wraps).await;
+                events
+                    .iter()
+                    .any(|event| {
+                        matches!(event, SessionEvent::RejoinOffered { group } if *group == gid)
+                    })
+                    .then_some(())
+            })
+        },
+        "a1 rejoin offer",
+        120_000,
+    )
+    .await;
+    let offers = a1.session.rejoin_offers(&gid).expect("rejoin_offers");
+    assert_eq!(offers.len(), 1, "one re-add offer for a1");
+    assert_eq!(offers[0].author, wn_account, "the admin authored it");
+    a1.session
+        .confirm_rejoin(&gid, &offers[0].offer, &offers[0].token)
+        .await
+        .expect("confirm_rejoin");
+    let events = a1.session.drain_events().expect("drain");
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, SessionEvent::GroupJoined { group } if *group == gid)),
+        "confirm installs the replacement copy"
+    );
+    let snapshot = a1.session.group(&gid).expect("group").expect("snapshot");
+    assert_eq!(snapshot.access, mk_core::GroupAccess::Active);
+    flush(&mut a1, &rig).await;
+
+    // wn's next message reaches both devices at the repaired epoch; a
+    // message from each device reaches wn.
+    wn_send(&rig, &wn_gid, "s20-after-rejoin");
+    let wanted = "s20-after-rejoin".to_owned();
+    for (i, member) in [&mut a1, &mut a2].into_iter().enumerate() {
+        let gid_ref = gid.clone();
+        let wanted = wanted.clone();
+        until_member(
+            member,
+            |a| {
+                let gid = gid_ref.clone();
+                let wanted = wanted.clone();
+                let rig = Arc::clone(&rig);
+                Box::pin(async move {
+                    let events = sync(&mut *a, &rig, &gid).await;
+                    received(&events)
+                        .iter()
+                        .any(|content| content.contains(&wanted))
+                        .then_some(())
+                })
+            },
+            if i == 0 {
+                "a1 reads wn after rejoin"
+            } else {
+                "a2 reads wn after rejoin"
+            },
+            90_000,
+        )
+        .await;
+    }
+    member_says(&rig, &mut a1, &gid, &wn_gid, "s20-d1-says").await;
+    member_says(&rig, &mut a2, &gid, &wn_gid, "s20-d2-says").await;
 
     rig.relay.shutdown();
     eprintln!("SCENARIO-20 PASS {:.1}s", start.elapsed().as_secs_f64());
+}
+
+// ---- scenario 22: the admin re-adds a stuck member --------------------
+
+/// S22 (D2): we are the admin of a group holding a wn member. One of our
+/// commits is withheld from the relay — our session hears `Accepted`
+/// while wn never learns the epoch — and a chat rides it that wn cannot
+/// read. `readd_member` stages the removal, the removal's confirmation
+/// stages exactly one Invite, and wn's stalled copy surfaces a
+/// consent-required rejoin offer through `groups recovery-status`;
+/// `confirm-rejoin` installs the replacement copy and the round trip
+/// recovers. Whatever wn publishes toward recovery on its own (kind-1159
+/// requests), our side must stage nothing in response.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs wn/wnd built from the upstream.json wn pin; see CONTRIBUTING"]
+async fn scenario22_readd_member() {
+    let start = Instant::now();
+    let rig = Arc::new(rig("s22").await);
+    let mut a = open_member().await;
+    publish_identity(&mut a, &rig).await;
+    let gid = mk_group_with_wn(&rig, &mut a, "interop-22", Vec::new()).await;
+    let wn_gid = gid.to_string();
+
+    // A rename is one self-contained commit at the new epoch. It never
+    // reaches the relay, but the session hears `Accepted` so the publish
+    // resolves and our epoch moves — wn is stuck behind it for good.
+    a.session
+        .update_group_profile(&gid, Some("interop-22-moved".to_owned()), None)
+        .await
+        .expect("rename");
+    if let Some(seq) = a.session.awaiting_durability() {
+        a.session.acknowledge_durable(seq);
+    }
+    let withheld = a.session.take_outbound().expect("take_outbound");
+    assert!(!withheld.is_empty(), "the rename stages an outbound commit");
+    for item in &withheld {
+        let results: Vec<RelayResult> = item
+            .relays
+            .iter()
+            .map(|relay| RelayResult {
+                relay: relay.clone(),
+                status: RelayStatus::Accepted,
+            })
+            .collect();
+        a.session
+            .report_publish(&item.id, &results)
+            .await
+            .expect("report_publish");
+    }
+    a.session
+        .send_message(&gid, chat("s22-unreadable"))
+        .await
+        .expect("chat");
+    flush(&mut a, &rig).await;
+
+    // Whatever wn does about being stuck (its kind-1159 recovery
+    // requests, if it issues them), our side stays inert: several
+    // catch-up passes must stage nothing.
+    for _ in 0..3 {
+        sleep(Duration::from_secs(2)).await;
+        let route = a.route_hex(&gid);
+        let backlog = fetch_group(&rig, &route).await;
+        let _ = ingest(&mut a, backlog).await;
+        a.session.tick().await.expect("tick");
+        let staged = a.session.take_outbound().expect("take_outbound");
+        assert!(
+            staged.is_empty(),
+            "a recovery request must stage nothing: {staged:?}"
+        );
+    }
+
+    // Re-add the stuck account: `Removed` — the Invite follows once the
+    // removal commit confirms.
+    let wn_account = AccountId::from_hex(&rig.wn_pub).expect("wn hex");
+    let wn_kp = until(
+        || {
+            let rig = Arc::clone(&rig);
+            async move { fetch_key_package(&rig, &rig.wn_pub).await }
+        },
+        "wn key package on relay",
+        60_000,
+        1_500,
+    )
+    .await;
+    let outcome = a
+        .session
+        .readd_member(
+            &gid,
+            wn_account,
+            vec![Invitee {
+                key_package: wn_kp,
+                inbox_relays: vec![rig.url.clone()],
+            }],
+        )
+        .await
+        .expect("readd_member");
+    assert!(
+        matches!(outcome, mk_core::ReaddOutcome::Removed),
+        "wn still holds a leaf: {outcome:?}"
+    );
+    // Ticks drive the removal to confirmation and stage the one Invite;
+    // flushes publish both to the relay and wn's inbox.
+    for _ in 0..8 {
+        flush(&mut a, &rig).await;
+        a.session.tick().await.expect("tick");
+        flush(&mut a, &rig).await;
+    }
+
+    // wn's stalled copy holds the offer: `recovery-status` lists it with
+    // the token `confirm-rejoin` needs.
+    let wn_gid_ref = wn_gid.clone();
+    let (welcome_id, token) = until(
+        || {
+            let rig = Arc::clone(&rig);
+            let wn_gid = wn_gid_ref.clone();
+            async move {
+                let (ok, parsed) = wn_try(
+                    &rig.home,
+                    &rig.socket,
+                    Some(&rig.wn_npub),
+                    &["groups", "recovery-status", &wn_gid],
+                );
+                if !ok {
+                    return None;
+                }
+                let offers = parsed
+                    .pointer("/result/rejoin_invitations")
+                    .and_then(Value::as_array)?;
+                let offer = offers.first()?;
+                let welcome_id = offer
+                    .pointer("/welcome_id_hex")
+                    .and_then(Value::as_str)?
+                    .to_owned();
+                let token = offer
+                    .pointer("/local_state_token")
+                    .and_then(Value::as_str)?
+                    .to_owned();
+                Some((welcome_id, token))
+            }
+        },
+        "wn rejoin offer in recovery-status",
+        120_000,
+        2_000,
+    )
+    .await;
+    wn(
+        &rig.home,
+        &rig.socket,
+        Some(&rig.wn_npub),
+        &[
+            "groups",
+            "confirm-rejoin",
+            &welcome_id,
+            "--local-state-token",
+            &token,
+            "--confirm",
+        ],
+    );
+
+    // The round trip recovers: wn reads our next message and we read wn's.
+    member_says(&rig, &mut a, &gid, &wn_gid, "s22-after-readd").await;
+    wn_says(&rig, &mut a, &gid, &wn_gid, "s22-wn-replies").await;
+
+    rig.relay.shutdown();
+    eprintln!("SCENARIO-22 PASS {:.1}s", start.elapsed().as_secs_f64());
 }
