@@ -1262,6 +1262,62 @@ describe("malicious relay", () => {
     await fixture.client.close();
   });
 
+  test("a historyFetched queued before the suspicion is dropped", async () => {
+    const script = freshScript();
+    script.groups = [snapshot([RELAY])];
+    const fixture = await open(
+      script,
+      encodeClientState({
+        nip44Extended: true,
+        cursors: { [groupCursorKey(ROUTE, RELAY)]: 1000 },
+        inbox: [],
+      }),
+    );
+    await settle(fixture.timer, 5000);
+    const sub = mustSub(groupSubs(fixture.network));
+    const history = (): BridgeRequest[] =>
+      script.calls.filter((call) => call.type === "history_fetched");
+
+    // Park one ingest on the op queue so the EOSE's historyFetched job
+    // waits behind it — the position a suspicion lands in mid-flight.
+    const gates: IngestGate[] = [];
+    script.ingestGate = async () => {
+      await new Promise<void>((resolve, reject) => {
+        gates.push({
+          ok: resolve,
+          fail: () => {
+            reject(new Error("ingest down"));
+          },
+        });
+      });
+    };
+    push(sub, groupEvent(1500n));
+    await settle(fixture.timer, 25);
+    pushEose(sub);
+    await settle(fixture.timer, 0);
+
+    // The parked ingest's own drain delivers the suspicion: the queued
+    // report is stale by the time it runs and must be skipped.
+    script.drains.push({
+      type: "events",
+      events: [{ type: "group_stall_suspected", group: GROUP }],
+    });
+    popGate(gates).ok();
+    await settle(fixture.timer, 25);
+    expect(history()).toHaveLength(0);
+
+    // The reopened subs' EOSE is the only report that lands.
+    const reopened = groupSubs(fixture.network).filter((entry) => entry.open);
+    expect(reopened.length).toBeGreaterThan(0);
+    for (const entry of reopened) {
+      expect(entry.filters[0]?.since).toBeUndefined();
+    }
+    pushEose(mustSub(reopened));
+    await settle(fixture.timer, 25);
+    expect(history()).toStrictEqual([{ type: "history_fetched", group: GROUP }]);
+    await fixture.client.close();
+  });
+
   test("group_stalled reaches onGroupChange", async () => {
     const script = freshScript();
     script.groups = [snapshot()];
