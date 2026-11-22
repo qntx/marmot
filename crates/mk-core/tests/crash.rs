@@ -668,6 +668,7 @@ mod crash {
                             description: String::new(),
                             relays: vec![RELAY.to_owned()],
                             invitees: invites,
+                            own_devices: Vec::new(),
                             admins: admin_accounts,
                             components: Vec::new(),
                         })
@@ -1562,6 +1563,7 @@ mod crash {
                     description: String::new(),
                     relays: vec![RELAY.to_owned()],
                     invitees,
+                    own_devices: Vec::new(),
                     admins: Vec::new(),
                     components: Vec::new(),
                 })
@@ -1656,6 +1658,7 @@ mod crash {
                 description: String::new(),
                 relays: vec![RELAY.to_owned()],
                 invitees,
+                own_devices: Vec::new(),
                 admins: Vec::new(),
                 components: Vec::new(),
             })
@@ -1767,6 +1770,7 @@ mod crash {
                     description: String::new(),
                     relays: vec![RELAY.to_owned()],
                     invitees,
+                    own_devices: Vec::new(),
                     admins: Vec::new(),
                     components: Vec::new(),
                 })

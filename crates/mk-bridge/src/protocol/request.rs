@@ -87,6 +87,8 @@ pub struct CreateGroupRequest {
     pub relays: Vec<String>,
     /// Founding invitees (the creator is always a member).
     pub invitees: Vec<Invitee>,
+    /// Founding invitees for this account's other devices.
+    pub own_devices: Vec<Invitee>,
     /// Additional founding admins besides the creator, 32-byte hex each.
     #[serde(with = "hex_str_seq")]
     pub admins: Vec<[u8; 32]>,

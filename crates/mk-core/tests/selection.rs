@@ -556,6 +556,7 @@ async fn group_requirements() {
             description: String::new(),
             relays: vec![RELAY.to_owned()],
             invitees: Vec::new(),
+            own_devices: Vec::new(),
             admins: Vec::new(),
             components: Vec::new(),
         })

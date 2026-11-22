@@ -676,8 +676,15 @@ pub struct CreateGroup {
     pub description: String,
     /// The group's Nostr relays (canonical routing component).
     pub relays: Vec<String>,
-    /// Founding invitees (the creator is always a member).
+    /// Founding invitees (the creator is always a member). A
+    /// `KeyPackage` authored by this account is refused — sibling
+    /// devices belong in `own_devices`.
     pub invitees: Vec<Invitee>,
+    /// Founding invitees for this account's other devices: each
+    /// `KeyPackage` must be authored by this account, address a different
+    /// `d` slot than this device's, and not be this device's own current
+    /// or pending publication.
+    pub own_devices: Vec<Invitee>,
     /// Additional founding admins besides the creator.
     pub admins: Vec<AccountId>,
     /// Additional initial app components (e.g. an encrypted-media policy and
@@ -1914,8 +1921,54 @@ impl Session {
             component_id: update.component_id,
             data: update.data.clone(),
         }));
-        let mut members = Vec::with_capacity(req.invitees.len());
+        // Sibling devices of this account are founding members through
+        // `own_devices`; a same-account KeyPackage anywhere else can
+        // never add a leaf — refuse before anything stages.
+        let account = self.account();
         for invitee in &req.invitees {
+            if invitee.key_package.pubkey == account {
+                return Err(SessionError::InvalidInput("own account"));
+            }
+        }
+        let lifecycle = self
+            .provider
+            .key_package_lifecycle()
+            .map_err(SessionError::Storage)?;
+        let own_slot = lifecycle
+            .as_ref()
+            .map(|lc| lc.stable_slot_id.as_str())
+            .unwrap_or_default();
+        let mut own_ids: std::collections::BTreeSet<[u8; 32]> = std::collections::BTreeSet::new();
+        for id in lifecycle
+            .as_ref()
+            .and_then(|lc| lc.authored_event_id.as_ref())
+            .into_iter()
+            .chain(
+                lifecycle
+                    .as_ref()
+                    .and_then(|lc| lc.pending_replacement.as_ref())
+                    .and_then(|pending| pending.signed_event.as_ref())
+                    .map(|artifact| &artifact.id),
+            )
+        {
+            if let Ok(bytes) = <[u8; 32]>::try_from(id.as_slice()) {
+                own_ids.insert(bytes);
+            }
+        }
+        for invitee in &req.own_devices {
+            let event = &invitee.key_package;
+            let sibling_slot = event
+                .tags
+                .iter()
+                .find(|tag| tag.first().map(String::as_str) == Some(key_package::D_TAG))
+                .and_then(|tag| tag.get(1))
+                .is_some_and(|value| value.as_str() != own_slot);
+            if event.pubkey != account || !sibling_slot || own_ids.contains(&event.id.0) {
+                return Err(SessionError::InvalidInput("own device"));
+            }
+        }
+        let mut members = Vec::with_capacity(req.invitees.len() + req.own_devices.len());
+        for invitee in req.invitees.iter().chain(&req.own_devices) {
             members.push(self.invitee_key_package(invitee)?);
         }
         let (group_id, result) = self
@@ -1929,7 +1982,7 @@ impl Session {
                 initial_admins: req
                     .admins
                     .iter()
-                    .map(|account| MemberId::new(account.0.to_vec()))
+                    .map(|admin| MemberId::new(admin.0.to_vec()))
                     .collect(),
             })
             .await
@@ -1970,6 +2023,14 @@ impl Session {
         invitees: Vec<Invitee>,
     ) -> Result<SendOutcome, SessionError> {
         self.require_admin(group)?;
+        // A same-account Add is never committed after founding: a
+        // sibling device joins via `own_devices` or an admin re-invite
+        // of the whole account, and the engine's refusal is untyped.
+        for invitee in &invitees {
+            if invitee.key_package.pubkey == self.account() {
+                return Err(SessionError::InvalidInput("own account"));
+            }
+        }
         let key_packages = invitees
             .iter()
             .map(|invitee| self.invitee_key_package(invitee))

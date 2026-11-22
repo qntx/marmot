@@ -1562,6 +1562,7 @@ export function decodeRequest(value: unknown, path = "request"): BridgeRequest {
     "name",
     "description",
     "invitees",
+    "own_devices",
     "admins",
     "components",
     "group",
@@ -1621,6 +1622,7 @@ export function decodeRequest(value: unknown, path = "request"): BridgeRequest {
         description: str(field(o, "description", path), `${path}.description`),
         relays: strList(field(o, "relays", path), `${path}.relays`),
         invitees: arr(field(o, "invitees", path), `${path}.invitees`, decodeInvitee),
+        own_devices: arr(field(o, "own_devices", path), `${path}.own_devices`, decodeInvitee),
         admins: arr(field(o, "admins", path), `${path}.admins`, (item, p) => hex32(item, p)),
         components: arr(field(o, "components", path), `${path}.components`, decodeComponentUpdate),
       };
@@ -1795,6 +1797,7 @@ export function encodeRequest(request: BridgeRequest): Json {
       description: request.description ?? null,
       relays: request.relays,
       invitees: request.invitees.map(encodeInvitee),
+      own_devices: request.own_devices.map(encodeInvitee),
       admins: request.admins,
       components: request.components.map(encodeComponentUpdate),
     }),

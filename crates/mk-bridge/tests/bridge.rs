@@ -151,6 +151,7 @@ async fn every_request_variant() {
                 key_package: key_package_of(&relay, &b.account_hex()),
                 inbox_relays: vec![RELAY.to_owned()],
             }],
+            own_devices: Vec::new(),
             admins: Vec::new(),
             components: vec![media_component()],
         }))
@@ -546,6 +547,7 @@ async fn full_flow() {
                 key_package: key_package_of(&relay, &b.account_hex()),
                 inbox_relays: vec![RELAY.to_owned()],
             }],
+            own_devices: Vec::new(),
             admins: Vec::new(),
             components: Vec::new(),
         }))
@@ -752,6 +754,7 @@ async fn durability_gate() {
             description: String::new(),
             relays: vec![RELAY.to_owned()],
             invitees: Vec::new(),
+            own_devices: Vec::new(),
             admins: Vec::new(),
             components: Vec::new(),
         }))
@@ -991,6 +994,7 @@ async fn signer_refusal() {
                     key_package: key_package_of(&relay, &b.account_hex()),
                     inbox_relays: vec![RELAY.to_owned()],
                 }],
+                own_devices: Vec::new(),
                 admins: Vec::new(),
                 components: Vec::new(),
             }))
@@ -1101,6 +1105,7 @@ async fn signer_invalid_payload() {
                 key_package: key_package_of(&relay, &b.account_hex()),
                 inbox_relays: vec![RELAY.to_owned()],
             }],
+            own_devices: Vec::new(),
             admins: Vec::new(),
             components: Vec::new(),
         }))
@@ -1196,6 +1201,7 @@ async fn ingest_order_invariance() {
             description: String::new(),
             relays: vec![RELAY.to_owned()],
             invitees,
+            own_devices: Vec::new(),
             admins: Vec::new(),
             components: Vec::new(),
         }))
@@ -1420,6 +1426,7 @@ async fn protocol_errors() {
         description: "x".to_owned(),
         relays: vec![RELAY.to_owned()],
         invitees: Vec::new(),
+        own_devices: Vec::new(),
         admins: Vec::new(),
         components: Vec::new(),
     }));
@@ -1495,6 +1502,7 @@ async fn run_scenario(
                             key_package: b_key_package.clone(),
                             inbox_relays: vec![RELAY.to_owned()],
                         }],
+                        own_devices: Vec::new(),
                         admins: Vec::new(),
                         components: Vec::new(),
                     }))
@@ -1725,6 +1733,7 @@ async fn crash_consistency() {
             description: String::new(),
             relays: vec![RELAY.to_owned()],
             invitees,
+            own_devices: Vec::new(),
             admins: Vec::new(),
             components: Vec::new(),
         }))
@@ -1884,6 +1893,7 @@ async fn app_surface() {
                 key_package: key_package_of(&relay, &b.account_hex()),
                 inbox_relays: vec![RELAY.to_owned()],
             }],
+            own_devices: Vec::new(),
             admins: Vec::new(),
             components: Vec::new(),
         }))
@@ -2163,6 +2173,7 @@ async fn app_surface() {
             description: String::new(),
             relays: vec![RELAY.to_owned()],
             invitees: Vec::new(),
+            own_devices: Vec::new(),
             admins: Vec::new(),
             components: Vec::new(),
         }))
@@ -2234,6 +2245,7 @@ async fn held_edit_releases_as_edit() {
                 key_package: key_package_of(&relay, &b.account_hex()),
                 inbox_relays: vec![RELAY.to_owned()],
             }],
+            own_devices: Vec::new(),
             admins: Vec::new(),
             components: Vec::new(),
         }))
@@ -2345,6 +2357,7 @@ async fn send_pacing_rate_exceeded() {
             description: String::new(),
             relays: vec![RELAY.to_owned()],
             invitees: Vec::new(),
+            own_devices: Vec::new(),
             admins: Vec::new(),
             components: Vec::new(),
         }))
@@ -2403,6 +2416,7 @@ async fn bridge_debug_redacts_pending_data() {
             description: "d".to_owned(),
             relays: vec![RELAY.to_owned()],
             invitees: Vec::new(),
+            own_devices: Vec::new(),
             admins: Vec::new(),
             components: vec![media_component()],
         }))
@@ -2463,6 +2477,7 @@ async fn select_key_packages_over_the_wire() {
             description: String::new(),
             relays: vec![RELAY.to_owned()],
             invitees: Vec::new(),
+            own_devices: Vec::new(),
             admins: Vec::new(),
             components: Vec::new(),
         }))
@@ -2617,6 +2632,7 @@ async fn group_stall_over_the_wire() {
                 key_package: key_package_of(&relay, &a.account_hex()),
                 inbox_relays: vec![RELAY.to_owned()],
             }],
+            own_devices: Vec::new(),
             admins: Vec::new(),
             components: Vec::new(),
         }))

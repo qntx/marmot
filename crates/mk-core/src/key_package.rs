@@ -42,7 +42,7 @@ pub const KEY_PACKAGE_MAX_FUTURE_SKEW_SECS: u64 = 5 * 60;
 /// Largest accepted `client` tag value, in bytes (NIP-89 client name).
 pub const CLIENT_NAME_MAX_BYTES: usize = 64;
 
-const D_TAG: &str = "d";
+pub(crate) const D_TAG: &str = "d";
 const IDENTITY_TAG: &str = "i";
 const CLIENT_TAG: &str = "client";
 const MLS_PROTOCOL_VERSION_TAG: &str = "mls_protocol_version";

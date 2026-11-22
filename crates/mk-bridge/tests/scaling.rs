@@ -101,6 +101,7 @@ async fn send_time_is_bounded_against_history() {
                 key_package: key_package_of(&relay, &b.account_hex()),
                 inbox_relays: vec![RELAY.to_owned()],
             }],
+            own_devices: Vec::new(),
             admins: Vec::new(),
             components: Vec::new(),
         }))
@@ -165,6 +166,7 @@ async fn large_group_first_and_200_sends_stage() {
                     inbox_relays: vec![RELAY.to_owned()],
                 })
                 .collect(),
+            own_devices: Vec::new(),
             admins: Vec::new(),
             components: Vec::new(),
         }))

@@ -1199,6 +1199,11 @@ fn op_create_group_args(args: CreateGroupRequest) -> impl FnOnce(Box<Session>) -
         description: args.description,
         relays: args.relays,
         invitees: args.invitees.into_iter().map(core::Invitee::from).collect(),
+        own_devices: args
+            .own_devices
+            .into_iter()
+            .map(core::Invitee::from)
+            .collect(),
         admins: args.admins.iter().map(|id| core::AccountId(*id)).collect(),
         components: args
             .components

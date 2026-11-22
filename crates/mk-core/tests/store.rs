@@ -1380,6 +1380,7 @@ mod indexed_queries {
                     key_package: key_package_of(&relay, RELAY, &b.account_hex()),
                     inbox_relays: inbox_relays_of(&relay, RELAY, &b.account_hex()),
                 }],
+                own_devices: Vec::new(),
                 admins: Vec::new(),
                 components: Vec::new(),
             })

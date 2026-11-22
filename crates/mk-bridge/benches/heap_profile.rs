@@ -76,6 +76,7 @@ async fn setup_pair() -> (FakeRelay, Member<CompactHost>, Member<CompactHost>, V
                 key_package: key_package_of(&relay, &b.account_hex()),
                 inbox_relays: vec![RELAY.to_owned()],
             }],
+            own_devices: Vec::new(),
             admins: Vec::new(),
             components: Vec::new(),
         }))

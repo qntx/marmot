@@ -441,6 +441,7 @@ async function open(
   blob?: Uint8Array,
   sign?: Signer,
   lookupRelays?: string[],
+  seed?: (network: ReturnType<typeof fakeRelay>) => Promise<void>,
 ): Promise<Fixture> {
   const timer = manualTimer();
   const network = fakeRelay();
@@ -450,6 +451,9 @@ async function open(
   const subs: Array<{ relay: string; filters: RelayFilter[] }> = [];
   if (blob !== undefined) {
     await cursors.save(blob);
+  }
+  if (seed !== undefined) {
+    await seed(network);
   }
   const inner = network.port("c");
   const port: RelayPort = {
@@ -721,6 +725,47 @@ describe("MarmotClient", () => {
     fixture.timer.tick(5001);
     await settle(fixture.timer, 5000);
     expect(fixture.network.openSubscriptions("c")).toBe(2);
+    await fixture.client.close();
+  });
+
+  test("createGroup passes sibling slots as own_devices", async () => {
+    const seed = async (network: ReturnType<typeof fakeRelay>): Promise<void> => {
+      const peer = network.port("peer");
+      const mk = (id: string, kind: number, tags: string[][]) => {
+        const item = {
+          id,
+          pubkey: ACCOUNT,
+          createdAt: 1000n,
+          kind,
+          tags,
+          content: "",
+          sig: "5".repeat(128),
+        };
+        markVerified(item);
+        return item;
+      };
+      // Write set on the lookup relays; the slot's sibling publications
+      // on the (normalized) write relay; inbox relays for the Welcome.
+      await peer.publish(LOOKUP, mk("12".repeat(32), 10002, [["r", RELAY]]));
+      await peer.publish(LOOKUP, mk("14".repeat(32), 10050, [["relay", RELAY2]]));
+      await peer.publish(`${RELAY}/`, mk("15".repeat(32), 30443, [["d", "11".repeat(32)]]));
+      await peer.publish(`${RELAY}/`, mk("16".repeat(32), 30443, [["d", "22".repeat(32)]]));
+    };
+    const fixture = await open(freshScript(), undefined, undefined, [LOOKUP], seed);
+    await settle(fixture.timer, 5000);
+    await fixture.client.createGroup({
+      name: "g",
+      description: "",
+      relays: [RELAY],
+      invitees: [],
+      admins: [],
+      components: [],
+    });
+    const calls = callsOf(fixture.script, "create_group");
+    expect(calls).toHaveLength(1);
+    const ownDevices = (calls[0] as { own_devices?: Array<{ keyPackage: { id: string } }> })
+      .own_devices;
+    expect(ownDevices?.map((invitee) => invitee.keyPackage.id)).toStrictEqual(["16".repeat(32)]);
     await fixture.client.close();
   });
 

@@ -243,6 +243,7 @@ fn create_group_with(member: &mut Member, relay: &mut FakeRelay, invitee: &Membe
             key_package,
             inbox_relays: vec![RELAY.to_owned()],
         }],
+        own_devices: vec![],
         admins: vec![],
         components: vec![],
     }));

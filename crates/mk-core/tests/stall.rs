@@ -413,6 +413,7 @@ mod stall_tests {
                 description: String::new(),
                 relays: vec![RELAY.to_owned()],
                 invitees: vec![invitee(a1_kp), invitee(a2_kp)],
+                own_devices: Vec::new(),
                 admins: Vec::new(),
                 components: Vec::new(),
             })

@@ -775,6 +775,7 @@ export type BridgeRequest =
       description: string;
       relays: string[];
       invitees: Invitee[];
+      own_devices: Invitee[];
       admins: string[];
       components: ComponentUpdate[];
     }

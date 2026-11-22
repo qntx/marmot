@@ -94,6 +94,7 @@ mod app_surface_tests {
                 description: String::new(),
                 relays: vec![RELAY.to_owned()],
                 invitees: invites,
+                own_devices: Vec::new(),
                 admins: admins.to_vec(),
                 components,
             })

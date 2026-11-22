@@ -327,13 +327,40 @@ export class MarmotClient {
     throw new MarmotError(kind);
   }
 
-  async createGroup(args: CreateGroupArgs): Promise<GroupSnapshot> {
+  async createGroup(
+    args: CreateGroupArgs & { includeOwnDevices?: boolean },
+  ): Promise<GroupSnapshot> {
     for (const relay of args.relays) {
       if (!safeRelayUrl(relay, this.allowLoopback)) {
         throw new MarmotError("unsafe_relay");
       }
     }
-    return this.op(async (engine) => this.gateAvatar(await groups.createGroup(engine, args)));
+    const { includeOwnDevices = true, ...rest } = args;
+    let ownDevices = rest.ownDevices ?? [];
+    const lookupRelays = this.options.lookupRelays ?? [];
+    if (includeOwnDevices && lookupRelays.length > 0) {
+      // Sibling slots found the group with us — a MAY: any lookup
+      // failure simply founds without own devices.
+      try {
+        const status = await this.keyPackageStatus();
+        const invitees = await this.lookupInvitees(this.account, lookupRelays);
+        ownDevices = invitees.filter(
+          (invitee) => invitee.keyPackage.tags.find((tag) => tag[0] === "d")?.[1] !== status.slot,
+        );
+      } catch (error) {
+        const tolerated =
+          error instanceof MarmotError &&
+          (error.kind === "no_relay_list" ||
+            error.kind === "no_key_package" ||
+            error.kind === "no_inbox_relays");
+        if (!tolerated) {
+          throw error;
+        }
+      }
+    }
+    return this.op(async (engine) =>
+      this.gateAvatar(await groups.createGroup(engine, { ...rest, ownDevices })),
+    );
   }
 
   async invite(group: string, invitees: Invitee[]): Promise<SendOutcome> {

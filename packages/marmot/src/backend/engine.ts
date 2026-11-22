@@ -464,6 +464,7 @@ export class Engine {
     description: string;
     relays: string[];
     invitees?: Invitee[];
+    ownDevices?: Invitee[];
     admins?: string[];
     components?: ComponentUpdate[];
   }): Promise<GroupSnapshot> {
@@ -474,6 +475,7 @@ export class Engine {
         description: args.description,
         relays: args.relays,
         invitees: args.invitees ?? [],
+        own_devices: args.ownDevices ?? [],
         admins: args.admins ?? [],
         components: args.components ?? [],
       },

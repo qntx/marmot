@@ -92,6 +92,7 @@ mod flow_tests {
                 description: String::new(),
                 relays: vec![RELAY.to_owned()],
                 invitees: invites,
+                own_devices: Vec::new(),
                 admins: admins.to_vec(),
                 components: Vec::new(),
             })
@@ -837,6 +838,7 @@ mod flow_tests {
                 description: String::new(),
                 relays: vec![RELAY.to_owned()],
                 invitees: Vec::new(),
+                own_devices: Vec::new(),
                 admins: Vec::new(),
                 components: Vec::new(),
             })
@@ -894,6 +896,7 @@ mod flow_tests {
                 description: String::new(),
                 relays: vec![RELAY.to_owned()],
                 invitees: Vec::new(),
+                own_devices: Vec::new(),
                 admins: Vec::new(),
                 components: Vec::new(),
             })
@@ -1166,6 +1169,7 @@ mod flow_tests {
                         inbox_relays: inbox_relays_of(&relay, RELAY, &member.account_hex()),
                     })
                     .collect(),
+                own_devices: Vec::new(),
                 admins: Vec::new(),
                 components: Vec::new(),
             })
@@ -1821,6 +1825,7 @@ mod flow_tests {
                     key_package: key_package_of(&relay, RELAY, &b.account_hex()),
                     inbox_relays: inbox_relays_of(&relay, RELAY, &b.account_hex()),
                 }],
+                own_devices: Vec::new(),
                 admins: Vec::new(),
                 components: Vec::new(),
             })
@@ -2150,6 +2155,118 @@ mod flow_tests {
             snapshot(&a, &gid).epoch,
             snapshot(&b, &gid).epoch,
             "both sides land on the post-commit epoch"
+        );
+    }
+
+    #[tokio::test]
+    async fn founding_includes_own_devices() {
+        let relay = FakeRelay::new();
+        let signer: Arc<dyn AccountSigner> =
+            Arc::new(mk_core::testing::LocalSigner::from_secret([9u8; 32]).expect("signer"));
+        let mut a1 = open_member_with(Arc::clone(&signer)).await;
+        let mut a2 = open_member_with(Arc::clone(&signer)).await;
+        let mut a3 = open_member_with(signer).await;
+        let mut b = open_member().await;
+        publish_identity(&mut a1, &relay, RELAY).await;
+        publish_identity(&mut a2, &relay, RELAY).await;
+        publish_identity(&mut a3, &relay, RELAY).await;
+        publish_identity(&mut b, &relay, RELAY).await;
+        let account_hex = a1.account_hex();
+        let slot_of = |member: &Member| {
+            hex::encode(member.session.key_package_status().expect("status").slot)
+        };
+        let kp_of = |slot: &str| -> mk_core::Event {
+            relay
+                .fetch(RELAY, {
+                    let wanted = account_hex.clone();
+                    move |event| event.kind == 30_443 && event.pubkey.to_hex() == wanted
+                })
+                .into_iter()
+                .find(|event| {
+                    event
+                        .tags
+                        .iter()
+                        .find(|tag| tag.first().map(String::as_str) == Some("d"))
+                        .and_then(|tag| tag.get(1))
+                        .map(String::as_str)
+                        == Some(slot)
+                })
+                .expect("key package for slot")
+        };
+        let a1_kp = kp_of(&slot_of(&a1));
+        let a2_kp = kp_of(&slot_of(&a2));
+        let a3_kp = kp_of(&slot_of(&a3));
+        let b_kp = key_package_of(&relay, RELAY, &b.account_hex());
+        let invitee = |key_package: mk_core::Event| Invitee {
+            key_package,
+            inbox_relays: vec![RELAY.to_owned()],
+        };
+        let create = |invitees: Vec<Invitee>, own_devices: Vec<Invitee>| CreateGroup {
+            name: "multi-device".to_owned(),
+            description: String::new(),
+            relays: vec![RELAY.to_owned()],
+            invitees,
+            own_devices,
+            admins: Vec::new(),
+            components: Vec::new(),
+        };
+
+        // A same-account KeyPackage in `invitees` is refused before
+        // anything stages, and so is this device's own slot in
+        // `own_devices`.
+        let error = a1
+            .session
+            .create_group(create(
+                vec![invitee(b_kp.clone()), invitee(a2_kp.clone())],
+                Vec::new(),
+            ))
+            .await
+            .unwrap_err();
+        assert!(matches!(error, SessionError::InvalidInput(_)));
+        let own_slot_error = a1
+            .session
+            .create_group(create(
+                vec![invitee(b_kp.clone())],
+                vec![invitee(a1_kp.clone())],
+            ))
+            .await
+            .unwrap_err();
+        assert!(matches!(own_slot_error, SessionError::InvalidInput(_)));
+        assert!(
+            a1.session.take_outbound().expect("outbound").is_empty(),
+            "refused creates stage nothing"
+        );
+
+        // Founding with the sibling slot: a2 joins from its own Welcome
+        // and the roster aggregates the account's two leaves.
+        let gid = a1
+            .session
+            .create_group(create(vec![invitee(b_kp)], vec![invitee(a2_kp)]))
+            .await
+            .expect("create_group");
+        flush(&mut a1, &relay).await;
+        join_via_welcome(&mut a2, &relay).await;
+        let account = a1.session.account();
+        assert_eq!(
+            snapshot(&a1, &gid)
+                .members
+                .iter()
+                .find(|member| member.account == account)
+                .map(|member| member.devices),
+            Some(2)
+        );
+
+        // A third same-account device cannot be invited after founding;
+        // the refusal stages nothing.
+        let invite_error = a1
+            .session
+            .invite(&gid, vec![invitee(a3_kp)])
+            .await
+            .unwrap_err();
+        assert!(matches!(invite_error, SessionError::InvalidInput(_)));
+        assert!(
+            a1.session.take_outbound().expect("outbound").is_empty(),
+            "refused invite stages nothing"
         );
     }
 }

@@ -77,6 +77,7 @@ fn deferred_peel_flow() {
             key_package,
             inbox_relays: vec![RELAY.to_owned()],
         }],
+        own_devices: vec![],
         admins: vec![],
         components: vec![],
     }));

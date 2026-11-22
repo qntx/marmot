@@ -195,6 +195,7 @@ fn create_and_join(relay: &mut FakeRelay, alice: &mut Member, bob: &mut Member) 
             key_package,
             inbox_relays: vec![RELAY.to_owned()],
         }],
+        own_devices: vec![],
         admins: vec![],
         components: vec![],
     }));
