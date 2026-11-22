@@ -1283,7 +1283,7 @@ async fn scenario17_second_device_signs_out() {
     // `wn_says` inline so a timeout dumps the divergence a racing
     // SelfRemove auto-commit may have left (fork convergence state).
     wn_send(&rig, &wn_gid, "s17-wn-replies");
-    let deadline = Instant::now() + Duration::from_millis(90_000);
+    let deadline = Instant::now() + Duration::from_secs(90);
     loop {
         let events = sync(&mut a1, &rig, &gid).await;
         let got = events.iter().any(|event| {
@@ -1315,7 +1315,7 @@ async fn scenario17_second_device_signs_out() {
                     eprintln!("[s17-diag] healed after in-order redelivery");
                     break;
                 }
-                tokio::time::sleep(Duration::from_millis(500)).await;
+                sleep(Duration::from_millis(500)).await;
             }
             let snapshot = a1.session.group(&gid).expect("group");
             let listed = wn_messages(&rig, &wn_gid, 600);
@@ -1324,7 +1324,7 @@ async fn scenario17_second_device_signs_out() {
                  wn messages={listed:?}"
             );
         }
-        tokio::time::sleep(Duration::from_millis(800)).await;
+        sleep(Duration::from_millis(800)).await;
     }
 
     rig.relay.shutdown();

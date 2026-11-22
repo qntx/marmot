@@ -18,6 +18,11 @@
     clippy::doc_markdown,
     clippy::excessive_nesting,
     clippy::too_many_lines,
+    clippy::print_stderr,
+    clippy::cognitive_complexity,
+    clippy::missing_assert_message,
+    clippy::large_futures,
+    clippy::shadow_unrelated,
     reason = "test code"
 )]
 
