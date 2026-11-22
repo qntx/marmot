@@ -3,7 +3,7 @@
 use mk_core as core;
 use serde::{Deserialize, Serialize};
 
-use super::ser::{hex_bytes, hex_str, opt_u64_str};
+use super::ser::{hex_bytes, hex_bytes_seq, hex_str, opt_u64_str};
 use super::types::{
     Event, GroupSnapshot, InputReport, KeyPackageInfo, Outbound, PublishResolution, SendOutcome,
     SentEvent,
@@ -41,6 +41,21 @@ pub struct OutboundResult {
 pub struct PublishResolutionResult {
     /// The resolution the session computed.
     pub resolution: PublishResolution,
+}
+
+/// `sign_out` result: which groups the device left and which admin
+/// groups it stays in (the account's only admin leaf cannot `SelfRemove`
+/// without orphaning the group — the host is told to decide).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SignOutResult {
+    /// Groups the device left (`SelfRemove` committed or durable),
+    /// hex each.
+    #[serde(with = "hex_bytes_seq")]
+    pub left: Vec<Vec<u8>>,
+    /// Groups whose admin leaf stays, hex each.
+    #[serde(with = "hex_bytes_seq")]
+    pub kept_admin_leaves: Vec<Vec<u8>>,
 }
 
 /// `ensure_key_package`/`key_package_status` result: the account
@@ -181,6 +196,8 @@ pub enum OpResult {
     PublishResolution(PublishResolutionResult),
     /// `ensure_key_package`/`key_package_status`.
     KeyPackageStatus(KeyPackageStatusResult),
+    /// `sign_out`.
+    SignOut(SignOutResult),
     /// `publish_inbox_relays`.
     InboxRelays(InboxRelaysResult),
     /// `create_group`.
@@ -203,6 +220,19 @@ pub enum OpResult {
     Group(GroupResult),
     /// `select_key_packages`.
     KeyPackages(KeyPackagesResult),
+}
+
+impl From<core::SignOutReport> for SignOutResult {
+    fn from(report: core::SignOutReport) -> Self {
+        Self {
+            left: report.left.into_iter().map(|id| id.0).collect(),
+            kept_admin_leaves: report
+                .kept_admin_leaves
+                .into_iter()
+                .map(|id| id.0)
+                .collect(),
+        }
+    }
 }
 
 impl From<core::KeyPackageStatus> for KeyPackageStatusResult {

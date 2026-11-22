@@ -117,6 +117,9 @@
   "send_rate_exceeded": {
     "kind": "send_rate_exceeded"
   },
+  "signed_out": {
+    "kind": "signed_out"
+  },
   "signer": {
     "kind": "signer",
     "reason": "refused"

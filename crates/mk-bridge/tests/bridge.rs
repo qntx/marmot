@@ -2471,3 +2471,75 @@ async fn select_key_packages_over_the_wire() {
     };
     assert!(selected.events.is_empty(), "covered slot selects nothing");
 }
+
+/// `sign_out` returns the group lists, queues exactly one kind-5 outbound
+/// and leaves the session answering `signed_out` to a later ensure.
+#[tokio::test(flavor = "current_thread")]
+async fn sign_out_withdraws_the_slot() {
+    let mut relay = FakeRelay::new();
+    let mut a = Member::new();
+    a.open().await;
+    a.publish_identity(&mut relay).await;
+
+    let response = a
+        .call(Request::SignOut(SignOutRequest {
+            write_relays: vec![RELAY.to_owned()],
+        }))
+        .await;
+    let OpResult::SignOut(sign_out) = ok_result(response) else {
+        panic!("sign_out")
+    };
+    assert!(sign_out.left.is_empty() && sign_out.kept_admin_leaves.is_empty());
+    a.ack_all().await;
+    let Response::Ok { result } = a.call(Request::TakeOutbound(NoArgs {})).await else {
+        panic!("take_outbound")
+    };
+    let OpResult::Outbound(OutboundResult { items }) = *result else {
+        panic!("outbound")
+    };
+    assert_eq!(items.len(), 1, "only the kind-5 is queued: {items:?}");
+    let deletion = &items[0];
+    assert_eq!(deletion.purpose, OutboundPurpose::KeyPackageDeletion);
+    assert_eq!(deletion.event.kind, 5);
+    let a_tags = deletion
+        .event
+        .tags
+        .iter()
+        .filter(|tag| tag.first().map(String::as_str) == Some("a"))
+        .count();
+    assert_eq!(a_tags, 1, "one a tag names the slot");
+    let k_tags: Vec<_> = deletion
+        .event
+        .tags
+        .iter()
+        .filter(|tag| tag.first().map(String::as_str) == Some("k"))
+        .collect();
+    assert_eq!(k_tags.len(), 1, "one k tag");
+    assert_eq!(k_tags[0].get(1).map(String::as_str), Some("30443"));
+
+    // A withdrawn slot refuses new publications.
+    let response = a
+        .call(Request::EnsureKeyPackage(EnsureKeyPackageRequest {
+            write_relays: vec![RELAY.to_owned()],
+        }))
+        .await;
+    assert_eq!(error_kind(&response), "signed_out");
+
+    // A repeat sign-out stages no second kind-5.
+    let response = a
+        .call(Request::SignOut(SignOutRequest {
+            write_relays: vec![RELAY.to_owned()],
+        }))
+        .await;
+    let OpResult::SignOut(again) = ok_result(response) else {
+        panic!("idempotent sign_out")
+    };
+    assert_eq!(again.left, Vec::<Vec<u8>>::new());
+    let Response::Ok { result } = a.call(Request::TakeOutbound(NoArgs {})).await else {
+        panic!("take_outbound")
+    };
+    let OpResult::Outbound(OutboundResult { items }) = *result else {
+        panic!("outbound")
+    };
+    assert!(items.is_empty(), "nothing new is staged: {items:?}");
+}

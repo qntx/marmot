@@ -274,6 +274,12 @@
     "seconds": "60",
     "type": "set_retention"
   },
+  "sign_out": {
+    "type": "sign_out",
+    "write_relays": [
+      "wss://a.example"
+    ]
+  },
   "signer_reply": {
     "replies": [
       {

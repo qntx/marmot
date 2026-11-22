@@ -20,14 +20,14 @@ pub use request::{
     PublishInboxRelaysRequest, RemoveMembersRequest, ReportPublishRequest, Request,
     SealAttachmentRequest, SelectKeyPackagesRequest, SelfUpdateRequest, SendIntentRequest,
     SendMediaRequest, SendMessageRequest, SetAdminRequest, SetGroupAvatarRequest,
-    SetRetentionRequest, SignerReplyRequest, SubmitProofRequest, UpdateAppComponentsRequest,
-    UpdateGroupProfileRequest,
+    SetRetentionRequest, SignOutRequest, SignerReplyRequest, SubmitProofRequest,
+    UpdateAppComponentsRequest, UpdateGroupProfileRequest,
 };
 pub use result::{
     AttachmentData, AwaitingDurabilityResult, GroupCreatedResult, GroupResult, GroupsResult,
     InboxRelaysResult, IngestedResult, KeyPackageStatusResult, KeyPackagesResult,
     MessageSentResult, OpResult, OutboundResult, PublishResolutionResult, ReadyResult,
-    SealedAttachmentResult, SendOutcomeResult, TickedResult,
+    SealedAttachmentResult, SendOutcomeResult, SignOutResult, TickedResult,
 };
 pub use types::*;
 
@@ -73,6 +73,7 @@ pub const REQUEST_TYPES: &[&str] = &[
     "set_admin",
     "set_group_avatar",
     "set_retention",
+    "sign_out",
     "signer_reply",
     "submit_proof",
     "take_outbound",

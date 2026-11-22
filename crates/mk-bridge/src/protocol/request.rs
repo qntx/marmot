@@ -58,6 +58,15 @@ pub struct EnsureKeyPackageRequest {
     pub write_relays: Vec<String>,
 }
 
+/// Withdraw the account's `KeyPackage` slot and leave every group this
+/// device is a non-admin member of (device sign-out).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SignOutRequest {
+    /// The account's NIP-65 write relay set.
+    pub write_relays: Vec<String>,
+}
+
 /// Build, sign and stage the account's kind-10050 inbox relay list.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -356,6 +365,8 @@ pub enum Request {
     EnsureKeyPackage(EnsureKeyPackageRequest),
     /// Read the account `KeyPackage` slot's lifecycle standing.
     KeyPackageStatus(NoArgs),
+    /// Withdraw the `KeyPackage` slot and leave member groups.
+    SignOut(SignOutRequest),
     /// Stage the account inbox relay list.
     PublishInboxRelays(PublishInboxRelaysRequest),
     /// Create a group.

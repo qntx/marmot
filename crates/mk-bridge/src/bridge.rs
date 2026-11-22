@@ -26,9 +26,9 @@ use crate::protocol::{
     RemoveMembersRequest, ReportPublishRequest, Request, Response, SealAttachmentRequest,
     SealedAttachmentResult, SelectKeyPackagesRequest, SelfUpdateRequest, SendIntentRequest,
     SendMediaRequest, SendMessageRequest, SendOutcomeResult, SetAdminRequest,
-    SetGroupAvatarRequest, SetRetentionRequest, SignerReply, SignerRequest, SignerResult,
-    TickedResult, UpdateAppComponentsRequest, UpdateGroupProfileRequest, decode, encode, invalid,
-    reason_label,
+    SetGroupAvatarRequest, SetRetentionRequest, SignOutRequest, SignerReply, SignerRequest,
+    SignerResult, TickedResult, UpdateAppComponentsRequest, UpdateGroupProfileRequest, decode,
+    encode, invalid, reason_label,
 };
 use crate::rows::decode_rows;
 use crate::signer::{QueueSigner, SignerState};
@@ -347,6 +347,7 @@ impl<H: Host> Bridge<H> {
             Request::ReportPublish(args) => self.run(op_report_publish(args), Vec::new()),
             Request::EnsureKeyPackage(args) => self.run(op_ensure_key_package(args), Vec::new()),
             Request::KeyPackageStatus(_) => self.key_package_status(),
+            Request::SignOut(args) => self.run(op_sign_out(args), Vec::new()),
             Request::PublishInboxRelays(args) => {
                 self.run(op_publish_inbox_relays(args), Vec::new())
             }
@@ -838,6 +839,20 @@ fn op_ensure_key_package(args: EnsureKeyPackageRequest) -> impl FnOnce(Box<Sessi
             (
                 session,
                 status.map(|status| OpResult::KeyPackageStatus(status.into())),
+            )
+        })
+    }
+}
+
+/// `sign_out` as an operation future: one sign-out pass, the same
+/// suspension contract as `ensure_key_package`.
+fn op_sign_out(args: SignOutRequest) -> impl FnOnce(Box<Session>) -> OpFuture {
+    move |mut session| {
+        Box::pin(async move {
+            let report = session.sign_out(&args.write_relays).await;
+            (
+                session,
+                report.map(|report| OpResult::SignOut(report.into())),
             )
         })
     }
