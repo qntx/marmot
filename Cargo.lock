@@ -2036,7 +2036,7 @@ checksum = "c505b3e17ed6b70a7ed2e67fbb2c560ee327353556120d6e72f5232b6880d536"
 
 [[package]]
 name = "mk-bridge"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "dhat",
  "hex",
@@ -2050,7 +2050,7 @@ dependencies = [
 
 [[package]]
 name = "mk-core"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "base64",
  "cgka-engine",
@@ -2077,7 +2077,7 @@ dependencies = [
 
 [[package]]
 name = "mk-ffi"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "cbindgen",
  "hex",
@@ -2089,7 +2089,7 @@ dependencies = [
 
 [[package]]
 name = "mk-wasm"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "js-sys",
  "mk-bridge",
