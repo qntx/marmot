@@ -226,9 +226,9 @@ jobs:
   interop-known-upstream:
     needs: [wn, wasm]
     runs-on: ubuntu-24.04
-    # 20 full test:interop runs; S21's post-join quiet window and jitter
-    # add about a minute to each.
-    timeout-minutes: 90
+    # 20 runs of the three scenarios the summary counts (S1-S3); the full
+    # suite belongs to interop-wasm.
+    timeout-minutes: 45
     permissions:
       contents: read
     defaults:
@@ -257,6 +257,7 @@ jobs:
           WN_BIN: ${{ runner.temp }}/wn-bin/wn
           WND_BIN: ${{ runner.temp }}/wn-bin/wnd
           INTEROP_RELAY: bare
+          WN_ONLY: S1,S2,S3
           RUNS: "20"
         run: |
           # Runs fail by design here: count them instead of stopping (the

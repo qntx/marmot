@@ -649,8 +649,9 @@ async function run(): Promise<void> {
     const s1 = { wnGid: "", ourGid: "" };
 
     async function scenario(name: string, runScenario: () => Promise<void>): Promise<void> {
-      const only = process.env["WN_ONLY"];
-      if (only !== undefined && !name.includes(only)) {
+      // WN_ONLY is a comma-separated list of scenario ids ("S1,S2,S3").
+      const only = process.env["WN_ONLY"]?.split(",");
+      if (only !== undefined && !only.includes(name.slice(0, name.indexOf(" ")))) {
         return;
       }
       const start = Date.now();
