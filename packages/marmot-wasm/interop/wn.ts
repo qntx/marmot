@@ -258,6 +258,22 @@ async function spawnWn(tag: string, relayUrl: string): Promise<WnHome> {
   return entry;
 }
 
+/**
+ * Reap a scenario-spawned `wnd`: SIGKILL, then drop the home. A live child process holds the event
+ * loop open, so every spawn path — success or failure — must pass through here.
+ */
+async function killWn(entry: WnHome): Promise<void> {
+  if (entry.wnd.exitCode === null && !entry.wnd.killed) {
+    entry.wnd.kill("SIGKILL");
+  }
+  await waitFor(
+    () => entry.wnd.exitCode !== null || entry.wnd.signalCode !== null || undefined,
+    "extra wnd exit",
+    10_000,
+  ).catch(() => undefined);
+  rmSync(entry.home, { recursive: true, force: true });
+}
+
 /** `wn` invocation with `input` piped to stdin — `login --nsec-stdin`. */
 async function wnStdin(
   rig: { home: string; socket: string },
@@ -1724,277 +1740,285 @@ async function run(): Promise<void> {
         lookupRelays: [url],
         allowLoopback: true,
       });
-      const backend4: Backend = await releaseBackend();
-      const client4 = await MarmotClient.open({
-        backend: backend4,
-        kv: memoryKv(),
-        cursors: memoryCursorStore(),
-        signer,
-        clock: {
-          now: () => ({
-            unixMs: BigInt(Date.now()),
-            monotonicMs: BigInt(Math.max(0, Date.now() - startMonotonic)),
-          }),
-        },
-        timer,
-        relays: nostrRelayPort(pool),
-        lookupRelays: [url],
-        allowLoopback: true,
-      });
-      const invites3: InviteEvent[] = [];
-      const changes3: GroupEvent[] = [];
-      const received3: ClientMessage[] = [];
-      client3.onInvite((event) => {
-        invites3.push(event);
-      });
-      client3.onGroupChange((event) => {
-        changes3.push(event);
-      });
-      client3.onMessages((batch) => {
-        received3.push(...batch);
-      });
-      const invites4: InviteEvent[] = [];
-      const changes4: GroupEvent[] = [];
-      const received4: ClientMessage[] = [];
-      client4.onInvite((event) => {
-        invites4.push(event);
-      });
-      client4.onGroupChange((event) => {
-        changes4.push(event);
-      });
-      client4.onMessages((batch) => {
-        received4.push(...batch);
-      });
-      // Relative counts: earlier scenarios may or may not have run under
-      // WN_ONLY filtering, so wait for NEW packages, not totals.
-      const knownKps = new Set(
-        served.relay
-          .events()
-          .filter((stored) => stored.kind === KEY_PACKAGE_KIND && stored.pubkey === signer.pubkey)
-          .map((stored) => stored.id),
-      );
-      await client3.ensureKeyPackage();
-      await client3.publishInboxRelays([url]);
-      await client4.ensureKeyPackage();
-      await client4.publishInboxRelays([url]);
-      const ourKps = await waitFor(() => {
-        const fresh = served.relay
-          .events()
-          .filter(
-            (stored) =>
-              stored.kind === KEY_PACKAGE_KIND &&
-              stored.pubkey === signer.pubkey &&
-              !knownKps.has(stored.id),
-          );
-        return fresh.length >= 2 ? fresh : undefined;
-      }, "both devices' KeyPackages on the relay");
-
-      let at = Date.now();
-      const wnInvitees = await client3.lookupInvitees(rig.wnPub, [url]);
-      if (wnInvitees.length === 0) {
-        throw new Error("lookupInvitees returned no key packages for m3b-20");
-      }
-      // The creator's own leaf is already a member, so only the second
-      // device's KeyPackage is an invitee — a Commit cannot add a leaf
-      // whose signature key duplicates the creator's (`d` slot tag).
-      const ownStatus = await client3.keyPackageStatus();
-      const ownSlot = ownStatus.slot;
-      const siblingKps = ourKps.filter(
-        (stored) => stored.tags.find((tag) => tag[0] === "d")?.[1] !== ownSlot,
-      );
-      if (siblingKps.length === 0) {
-        throw new Error("no sibling-device KeyPackage for m3b-20");
-      }
-      const snapshot3 = await client3.createGroup({
-        name: "m3b-20",
-        description: "",
-        relays: [url],
-        invitees: wnInvitees,
-        includeOwnDevices: false,
-        ownDevices: siblingKps.map((stored) => ({
-          keyPackage: {
-            id: stored.id,
-            pubkey: stored.pubkey,
-            createdAt: BigInt(stored.created_at),
-            kind: stored.kind,
-            tags: stored.tags.map((tag) => [...tag]),
-            content: stored.content,
-            sig: stored.sig,
+      let client4: MarmotClient | undefined;
+      try {
+        const backend4: Backend = await releaseBackend();
+        client4 = await MarmotClient.open({
+          backend: backend4,
+          kv: memoryKv(),
+          cursors: memoryCursorStore(),
+          signer,
+          clock: {
+            now: () => ({
+              unixMs: BigInt(Date.now()),
+              monotonicMs: BigInt(Math.max(0, Date.now() - startMonotonic)),
+            }),
           },
-          inboxRelays: [url],
-        })),
-        admins: [rig.wnPub],
-      });
-      const gid = snapshot3.id;
-      const wnGid = gid;
-      // Device 2 installs its copy from its own founding wrap.
-      await waitFor(
-        () => invites4.some((event) => event.type === "joined" && event.group === gid) || undefined,
-        "device 4 joins via its founding wrap",
-      );
-      await waitFor(async () => {
-        const gids = await wnInviteGids(rig);
-        return gids.includes(gid) || undefined;
-      }, `wn groups invites shows ${gid}`);
-      await wn(rig, ["groups", "accept", wnGid], rig.wnNpub);
-      for (const [label, member] of [
-        ["device 3", client3],
-        ["device 4", client4],
-      ] as const) {
-        // oxlint-disable-next-line no-await-in-loop -- sequential convergence waits
-        await waitFor(async () => {
-          const roster = await member.group(gid);
-          if (roster === undefined) {
-            return undefined;
-          }
-          return roster.members.some((entry) => entry.account === rig.wnPub) || undefined;
-        }, `${label} roster includes wn`);
-      }
-      await sleep(2000);
-      const route = snapshot3.nostrGroupId;
-      log(`device 3 created ${wnGid} with wn admin; device 4 joined (${secs(at)})`);
+          timer,
+          relays: nostrRelayPort(pool),
+          lookupRelays: [url],
+          allowLoopback: true,
+        });
+        const invites3: InviteEvent[] = [];
+        const changes3: GroupEvent[] = [];
+        const received3: ClientMessage[] = [];
+        client3.onInvite((event) => {
+          invites3.push(event);
+        });
+        client3.onGroupChange((event) => {
+          changes3.push(event);
+        });
+        client3.onMessages((batch) => {
+          received3.push(...batch);
+        });
+        const invites4: InviteEvent[] = [];
+        const changes4: GroupEvent[] = [];
+        const received4: ClientMessage[] = [];
+        client4.onInvite((event) => {
+          invites4.push(event);
+        });
+        client4.onGroupChange((event) => {
+          changes4.push(event);
+        });
+        client4.onMessages((batch) => {
+          received4.push(...batch);
+        });
+        // Relative counts: earlier scenarios may or may not have run under
+        // WN_ONLY filtering, so wait for NEW packages, not totals.
+        const knownKps = new Set(
+          served.relay
+            .events()
+            .filter((stored) => stored.kind === KEY_PACKAGE_KIND && stored.pubkey === signer.pubkey)
+            .map((stored) => stored.id),
+        );
+        await client3.ensureKeyPackage();
+        await client3.publishInboxRelays([url]);
+        await client4.ensureKeyPackage();
+        await client4.publishInboxRelays([url]);
+        const ourKps = await waitFor(() => {
+          const fresh = served.relay
+            .events()
+            .filter(
+              (stored) =>
+                stored.kind === KEY_PACKAGE_KIND &&
+                stored.pubkey === signer.pubkey &&
+                !knownKps.has(stored.id),
+            );
+          return fresh.length >= 2 ? fresh : undefined;
+        }, "both devices' KeyPackages on the relay");
 
-      // Arm the drop, then rename: the commit must never reach device 1's
-      // live subscription. The relay-store read below only CONFIRMS the
-      // set — it stays nonempty and unchanged across two polls before
-      // the port is disarmed, so a slow publish cannot slip one through.
-      at = Date.now();
-      const seenIds = new Set(
-        served.relay
-          .events()
-          .filter(
-            (stored) =>
-              stored.kind === 445 && stored.tags.some((tag) => tag[0] === "h" && tag[1] === route),
-          )
-          .map((stored) => stored.id),
-      );
-      drop.armed = true;
-      await wn(rig, ["groups", "rename", wnGid, "m3b-20-renamed"], rig.wnNpub);
-      let lastIds = "";
-      const newIds = await waitFor(() => {
-        const ids = served.relay
-          .events()
-          .filter(
-            (stored) =>
-              stored.kind === 445 &&
-              !seenIds.has(stored.id) &&
-              stored.tags.some((tag) => tag[0] === "h" && tag[1] === route),
-          )
-          .map((stored) => stored.id)
-          .toSorted()
-          .join(",");
-        if (ids !== "" && ids === lastIds) {
-          return new Set(ids.split(","));
+        let at = Date.now();
+        const wnInvitees = await client3.lookupInvitees(rig.wnPub, [url]);
+        if (wnInvitees.length === 0) {
+          throw new Error("lookupInvitees returned no key packages for m3b-20");
         }
-        lastIds = ids;
-        return undefined;
-      }, "wn's rename commit on the route");
-      for (const id of newIds) {
-        drop.ids.add(id);
-      }
-      drop.armed = false;
-      if (drop.ids.size === 0) {
-        throw new Error("the censoring port captured no commit to withhold");
-      }
-      for (const text of ["s20-m0", "s20-m1", "s20-m2"]) {
-        // oxlint-disable-next-line no-await-in-loop -- sends are sequential by design
-        await wn(rig, ["messages", "send", wnGid, text], rig.wnNpub);
-      }
-
-      // Three deferred events suspect once; the Pump's unfloored replay
-      // still lacks the dropped commit, so `history_fetched` flags the
-      // copy stalled — exactly one refetch deep.
-      await waitFor(
-        () =>
-          changes3.some((event) => event.group === gid && event.type === "group_stalled") ||
-          undefined,
-        "device 3 stalls after one refetch",
-      );
-      const stalled3 = await client3.group(gid);
-      if (stalled3?.access !== "stalled") {
-        throw new Error(`device 3 access ${String(stalled3?.access)}, expected stalled`);
-      }
-      const healthy4 = await client4.group(gid);
-      if (healthy4?.access !== "active") {
-        throw new Error(`device 4 access ${String(healthy4?.access)}, expected active`);
-      }
-      log(`device 3 stalled after one refetch; device 4 active (${secs(at)})`);
-
-      // Repair: wn removes the whole account, then re-invites it. Device
-      // 4 must apply the removal before the re-add wraps reach it —
-      // arriving while it still held a leaf would park a consent offer.
-      at = Date.now();
-      await wn(rig, ["groups", "remove-members", wnGid, ourNpub], rig.wnNpub);
-      await waitFor(async () => {
-        const snapshot = await client4.group(gid);
-        return snapshot?.access === "removed" || snapshot?.access === "removed_device" || undefined;
-      }, "device 4 removed by wn");
-      await wn(rig, ["groups", "add-members", wnGid, ourNpub], rig.wnNpub);
-
-      // Device 4's removed copy reinstalls from its new Welcome on its
-      // own — no consent, no `rejoin_offered` across the whole repair.
-      await waitFor(async () => {
-        const snapshot = await client4.group(gid);
-        return snapshot?.access === "active" || undefined;
-      }, "device 4 auto-installs the re-add welcome");
-      if (changes4.some((event) => event.type === "rejoin_offered" && event.group === gid)) {
-        throw new Error("the healthy sibling saw a consent offer");
-      }
-      log(`device 4 reinstalled without consent (${secs(at)})`);
-
-      // Device 3's stalled copy cannot apply the removal commit, so the
-      // re-add wrap parks a consent-required offer on it.
-      await waitFor(
-        () =>
-          changes3.some((event) => event.type === "rejoin_offered" && event.group === gid) ||
-          undefined,
-        "device 3 rejoin offer",
-      );
-      const offers = await client3.rejoinOffers(gid);
-      if (offers.length !== 1) {
-        throw new Error(`device 3 holds ${offers.length} offers, expected 1`);
-      }
-      const [offer] = offers;
-      if (offer === undefined || offer.author !== rig.wnPub) {
-        throw new Error(`offer author ${String(offer?.author)}, expected ${rig.wnPub}`);
-      }
-      await client3.confirmRejoin(gid, offer.offer, offer.token);
-      await waitFor(async () => {
-        const snapshot = await client3.group(gid);
-        return snapshot?.access === "active" || undefined;
-      }, "device 3 active after confirmRejoin");
-      log(`device 3 confirmed the rejoin (${secs(at)})`);
-
-      // wn's next message reaches both devices at the repaired epoch; a
-      // message from each device reaches wn.
-      const wnText = `s20-wn-${Math.floor(Date.now() / 1000)}`;
-      await wn(rig, ["messages", "send", wnGid, wnText], rig.wnNpub);
-      await waitFor(
-        () =>
-          received3.some((entry) => entry.group === gid && entry.message.content === wnText) ||
-          undefined,
-        "device 3 reads wn after rejoin",
-      );
-      await waitFor(
-        () =>
-          received4.some((entry) => entry.group === gid && entry.message.content === wnText) ||
-          undefined,
-        "device 4 reads wn after rejoin",
-      );
-      for (const [label, member, text] of [
-        ["device 3", client3, `s20-d3-${Math.floor(Date.now() / 1000)}`],
-        ["device 4", client4, `s20-d4-${Math.floor(Date.now() / 1000)}`],
-      ] as const) {
-        // oxlint-disable-next-line no-await-in-loop -- sends are sequential by design
-        await member.sendMessage(gid, { kind: CHAT_KIND, tags: [], content: text });
-        // oxlint-disable-next-line no-await-in-loop -- sequential wn polls
+        // The creator's own leaf is already a member, so only the second
+        // device's KeyPackage is an invitee — a Commit cannot add a leaf
+        // whose signature key duplicates the creator's (`d` slot tag).
+        const ownStatus = await client3.keyPackageStatus();
+        const ownSlot = ownStatus.slot;
+        const siblingKps = ourKps.filter(
+          (stored) => stored.tags.find((tag) => tag[0] === "d")?.[1] !== ownSlot,
+        );
+        if (siblingKps.length === 0) {
+          throw new Error("no sibling-device KeyPackage for m3b-20");
+        }
+        const snapshot3 = await client3.createGroup({
+          name: "m3b-20",
+          description: "",
+          relays: [url],
+          invitees: wnInvitees,
+          includeOwnDevices: false,
+          ownDevices: siblingKps.map((stored) => ({
+            keyPackage: {
+              id: stored.id,
+              pubkey: stored.pubkey,
+              createdAt: BigInt(stored.created_at),
+              kind: stored.kind,
+              tags: stored.tags.map((tag) => [...tag]),
+              content: stored.content,
+              sig: stored.sig,
+            },
+            inboxRelays: [url],
+          })),
+          admins: [rig.wnPub],
+        });
+        const gid = snapshot3.id;
+        const wnGid = gid;
+        // Device 2 installs its copy from its own founding wrap.
+        await waitFor(
+          () =>
+            invites4.some((event) => event.type === "joined" && event.group === gid) || undefined,
+          "device 4 joins via its founding wrap",
+        );
         await waitFor(async () => {
-          const entries = await wnMessages(rig, wnGid);
-          return entries.some((entry) => entry.includes(text)) || undefined;
-        }, `wn reads ${label}`);
+          const gids = await wnInviteGids(rig);
+          return gids.includes(gid) || undefined;
+        }, `wn groups invites shows ${gid}`);
+        await wn(rig, ["groups", "accept", wnGid], rig.wnNpub);
+        for (const [label, member] of [
+          ["device 3", client3],
+          ["device 4", client4],
+        ] as const) {
+          // oxlint-disable-next-line no-await-in-loop -- sequential convergence waits
+          await waitFor(async () => {
+            const roster = await member.group(gid);
+            if (roster === undefined) {
+              return undefined;
+            }
+            return roster.members.some((entry) => entry.account === rig.wnPub) || undefined;
+          }, `${label} roster includes wn`);
+        }
+        await sleep(2000);
+        const route = snapshot3.nostrGroupId;
+        log(`device 3 created ${wnGid} with wn admin; device 4 joined (${secs(at)})`);
+
+        // Arm the drop, then rename: the commit must never reach device 1's
+        // live subscription. The relay-store read below only CONFIRMS the
+        // set — it stays nonempty and unchanged across two polls before
+        // the port is disarmed, so a slow publish cannot slip one through.
+        at = Date.now();
+        const seenIds = new Set(
+          served.relay
+            .events()
+            .filter(
+              (stored) =>
+                stored.kind === 445 &&
+                stored.tags.some((tag) => tag[0] === "h" && tag[1] === route),
+            )
+            .map((stored) => stored.id),
+        );
+        drop.armed = true;
+        await wn(rig, ["groups", "rename", wnGid, "m3b-20-renamed"], rig.wnNpub);
+        let lastIds = "";
+        const newIds = await waitFor(() => {
+          const ids = served.relay
+            .events()
+            .filter(
+              (stored) =>
+                stored.kind === 445 &&
+                !seenIds.has(stored.id) &&
+                stored.tags.some((tag) => tag[0] === "h" && tag[1] === route),
+            )
+            .map((stored) => stored.id)
+            .toSorted()
+            .join(",");
+          if (ids !== "" && ids === lastIds) {
+            return new Set(ids.split(","));
+          }
+          lastIds = ids;
+          return undefined;
+        }, "wn's rename commit on the route");
+        for (const id of newIds) {
+          drop.ids.add(id);
+        }
+        drop.armed = false;
+        if (drop.ids.size === 0) {
+          throw new Error("the censoring port captured no commit to withhold");
+        }
+        for (const text of ["s20-m0", "s20-m1", "s20-m2"]) {
+          // oxlint-disable-next-line no-await-in-loop -- sends are sequential by design
+          await wn(rig, ["messages", "send", wnGid, text], rig.wnNpub);
+        }
+
+        // Three deferred events suspect once; the Pump's unfloored replay
+        // still lacks the dropped commit, so `history_fetched` flags the
+        // copy stalled — exactly one refetch deep.
+        await waitFor(
+          () =>
+            changes3.some((event) => event.group === gid && event.type === "group_stalled") ||
+            undefined,
+          "device 3 stalls after one refetch",
+        );
+        const stalled3 = await client3.group(gid);
+        if (stalled3?.access !== "stalled") {
+          throw new Error(`device 3 access ${String(stalled3?.access)}, expected stalled`);
+        }
+        const healthy4 = await client4.group(gid);
+        if (healthy4?.access !== "active") {
+          throw new Error(`device 4 access ${String(healthy4?.access)}, expected active`);
+        }
+        log(`device 3 stalled after one refetch; device 4 active (${secs(at)})`);
+
+        // Repair: wn removes the whole account, then re-invites it. Device
+        // 4 must apply the removal before the re-add wraps reach it —
+        // arriving while it still held a leaf would park a consent offer.
+        at = Date.now();
+        await wn(rig, ["groups", "remove-members", wnGid, ourNpub], rig.wnNpub);
+        await waitFor(async () => {
+          const snapshot = await client4?.group(gid);
+          return (
+            snapshot?.access === "removed" || snapshot?.access === "removed_device" || undefined
+          );
+        }, "device 4 removed by wn");
+        await wn(rig, ["groups", "add-members", wnGid, ourNpub], rig.wnNpub);
+
+        // Device 4's removed copy reinstalls from its new Welcome on its
+        // own — no consent, no `rejoin_offered` across the whole repair.
+        await waitFor(async () => {
+          const snapshot = await client4?.group(gid);
+          return snapshot?.access === "active" || undefined;
+        }, "device 4 auto-installs the re-add welcome");
+        if (changes4.some((event) => event.type === "rejoin_offered" && event.group === gid)) {
+          throw new Error("the healthy sibling saw a consent offer");
+        }
+        log(`device 4 reinstalled without consent (${secs(at)})`);
+
+        // Device 3's stalled copy cannot apply the removal commit, so the
+        // re-add wrap parks a consent-required offer on it.
+        await waitFor(
+          () =>
+            changes3.some((event) => event.type === "rejoin_offered" && event.group === gid) ||
+            undefined,
+          "device 3 rejoin offer",
+        );
+        const offers = await client3.rejoinOffers(gid);
+        if (offers.length !== 1) {
+          throw new Error(`device 3 holds ${offers.length} offers, expected 1`);
+        }
+        const [offer] = offers;
+        if (offer === undefined || offer.author !== rig.wnPub) {
+          throw new Error(`offer author ${String(offer?.author)}, expected ${rig.wnPub}`);
+        }
+        await client3.confirmRejoin(gid, offer.offer, offer.token);
+        await waitFor(async () => {
+          const snapshot = await client3.group(gid);
+          return snapshot?.access === "active" || undefined;
+        }, "device 3 active after confirmRejoin");
+        log(`device 3 confirmed the rejoin (${secs(at)})`);
+
+        // wn's next message reaches both devices at the repaired epoch; a
+        // message from each device reaches wn.
+        const wnText = `s20-wn-${Math.floor(Date.now() / 1000)}`;
+        await wn(rig, ["messages", "send", wnGid, wnText], rig.wnNpub);
+        await waitFor(
+          () =>
+            received3.some((entry) => entry.group === gid && entry.message.content === wnText) ||
+            undefined,
+          "device 3 reads wn after rejoin",
+        );
+        await waitFor(
+          () =>
+            received4.some((entry) => entry.group === gid && entry.message.content === wnText) ||
+            undefined,
+          "device 4 reads wn after rejoin",
+        );
+        for (const [label, member, text] of [
+          ["device 3", client3, `s20-d3-${Math.floor(Date.now() / 1000)}`],
+          ["device 4", client4, `s20-d4-${Math.floor(Date.now() / 1000)}`],
+        ] as const) {
+          // oxlint-disable-next-line no-await-in-loop -- sends are sequential by design
+          await member.sendMessage(gid, { kind: CHAT_KIND, tags: [], content: text });
+          // oxlint-disable-next-line no-await-in-loop -- sequential wn polls
+          await waitFor(async () => {
+            const entries = await wnMessages(rig, wnGid);
+            return entries.some((entry) => entry.includes(text)) || undefined;
+          }, `wn reads ${label}`);
+        }
+      } finally {
+        await client3.close();
+        await client4?.close();
       }
-      await client3.close();
-      await client4.close();
     });
 
     // S22 (D2) — we are the admin of a group holding a wn member. A
@@ -2040,143 +2064,146 @@ async function run(): Promise<void> {
         lookupRelays: [url],
         allowLoopback: true,
       });
-      const invites5: InviteEvent[] = [];
-      const received5: ClientMessage[] = [];
-      client5.onInvite((event) => {
-        invites5.push(event);
-      });
-      client5.onMessages((batch) => {
-        received5.push(...batch);
-      });
-      const knownKps = new Set(
-        served.relay
-          .events()
-          .filter((stored) => stored.kind === KEY_PACKAGE_KIND && stored.pubkey === signer.pubkey)
-          .map((stored) => stored.id),
-      );
-      await client5.ensureKeyPackage();
-      await client5.publishInboxRelays([url]);
-      await waitFor(
-        () =>
+      try {
+        const invites5: InviteEvent[] = [];
+        const received5: ClientMessage[] = [];
+        client5.onInvite((event) => {
+          invites5.push(event);
+        });
+        client5.onMessages((batch) => {
+          received5.push(...batch);
+        });
+        const knownKps = new Set(
           served.relay
             .events()
-            .some(
-              (stored) =>
-                stored.kind === KEY_PACKAGE_KIND &&
-                stored.pubkey === signer.pubkey &&
-                !knownKps.has(stored.id),
-            ) || undefined,
-        "admin device's KeyPackage on the relay",
-      );
-      const wnInvitees = await client5.lookupInvitees(rig.wnPub, [url]);
-      if (wnInvitees.length === 0) {
-        throw new Error("lookupInvitees returned no key packages for m3b-22");
-      }
-      const snapshot5 = await client5.createGroup({
-        name: "m3b-22",
-        description: "",
-        relays: [url],
-        invitees: wnInvitees,
-      });
-      const gid = snapshot5.id;
-      const wnGid = gid;
-      await waitFor(async () => {
-        const gids = await wnInviteGids(rig);
-        return gids.includes(gid) || undefined;
-      }, `wn groups invites shows ${gid}`);
-      await wn(rig, ["groups", "accept", wnGid], rig.wnNpub);
-      await waitFor(async () => {
-        const roster = await client5.group(gid);
-        if (roster === undefined) {
-          return undefined;
-        }
-        return roster.members.some((entry) => entry.account === rig.wnPub) || undefined;
-      }, "wn member in m3b-22 roster");
-      await sleep(2000);
-      log(`created ${wnGid} with wn member (${secs(at)})`);
-
-      // Withhold the rename's commit: armed just before the call, the
-      // port reports the publish accepted but never forwards the event.
-      at = Date.now();
-      drop.armed = true;
-      await client5.updateGroupProfile(gid, { name: "m3b-22-moved" });
-      await waitFor(() => drop.id !== "" || undefined, "rename commit withheld");
-      await client5.sendMessage(gid, { kind: CHAT_KIND, tags: [], content: "s22-unreadable" });
-      await sleep(4000);
-      log(`withheld one commit; wn is stuck (${secs(at)})`);
-
-      // Whatever wn does about being stuck (its kind-1159 recovery
-      // requests, if it issues them), our side stays inert: the route
-      // must gain no further events authored by our session.
-      const route5 = snapshot5.nostrGroupId;
-      const routeIds = () =>
-        new Set(
-          served.relay
-            .events()
-            .filter(
-              (stored) =>
-                stored.kind === 445 &&
-                stored.tags.some((tag) => tag[0] === "h" && tag[1] === route5),
-            )
+            .filter((stored) => stored.kind === KEY_PACKAGE_KIND && stored.pubkey === signer.pubkey)
             .map((stored) => stored.id),
         );
-      const baselineIds = routeIds();
-      await sleep(6000);
-      const gained = [...routeIds()].filter((id) => !baselineIds.has(id));
-      if (gained.length > 0) {
-        throw new Error(`a recovery request staged ${gained.length} event(s)`);
-      }
-
-      // Re-add the stuck account: `removed` — the Invite follows once
-      // the removal commit confirms.
-      const outcome = await client5.readdMember(gid, rig.wnPub, [url]);
-      if (outcome !== "removed") {
-        throw new Error(`readdMember outcome ${outcome}, expected removed`);
-      }
-
-      // wn's stalled copy holds the offer: `recovery-status` lists it
-      // with the token `confirm-rejoin` needs.
-      const offerInfo = await waitFor(async () => {
-        const reply = await wnTry(rig, ["groups", "recovery-status", wnGid], rig.wnNpub);
-        const offers = ptrArr(reply.parsed, "/result/rejoin_invitations");
-        const [first] = offers;
-        if (first === undefined) {
-          return undefined;
+        await client5.ensureKeyPackage();
+        await client5.publishInboxRelays([url]);
+        await waitFor(
+          () =>
+            served.relay
+              .events()
+              .some(
+                (stored) =>
+                  stored.kind === KEY_PACKAGE_KIND &&
+                  stored.pubkey === signer.pubkey &&
+                  !knownKps.has(stored.id),
+              ) || undefined,
+          "admin device's KeyPackage on the relay",
+        );
+        const wnInvitees = await client5.lookupInvitees(rig.wnPub, [url]);
+        if (wnInvitees.length === 0) {
+          throw new Error("lookupInvitees returned no key packages for m3b-22");
         }
-        const welcomeId = ptrStr(first, "/welcome_id_hex");
-        const token = ptrStr(first, "/local_state_token");
-        return welcomeId !== undefined && token !== undefined ? { welcomeId, token } : undefined;
-      }, "wn rejoin offer in recovery-status");
-      await wn(
-        rig,
-        [
-          "groups",
-          "confirm-rejoin",
-          offerInfo.welcomeId,
-          "--local-state-token",
-          offerInfo.token,
-          "--confirm",
-        ],
-        rig.wnNpub,
-      );
-      log(`wn confirmed the rejoin (${secs(at)})`);
+        const snapshot5 = await client5.createGroup({
+          name: "m3b-22",
+          description: "",
+          relays: [url],
+          invitees: wnInvitees,
+        });
+        const gid = snapshot5.id;
+        const wnGid = gid;
+        await waitFor(async () => {
+          const gids = await wnInviteGids(rig);
+          return gids.includes(gid) || undefined;
+        }, `wn groups invites shows ${gid}`);
+        await wn(rig, ["groups", "accept", wnGid], rig.wnNpub);
+        await waitFor(async () => {
+          const roster = await client5.group(gid);
+          if (roster === undefined) {
+            return undefined;
+          }
+          return roster.members.some((entry) => entry.account === rig.wnPub) || undefined;
+        }, "wn member in m3b-22 roster");
+        await sleep(2000);
+        log(`created ${wnGid} with wn member (${secs(at)})`);
 
-      // The round trip recovers both ways.
-      const ourText = `s22-us-${Math.floor(Date.now() / 1000)}`;
-      await client5.sendMessage(gid, { kind: CHAT_KIND, tags: [], content: ourText });
-      await waitFor(async () => {
-        const entries = await wnMessages(rig, wnGid);
-        return entries.some((entry) => entry.includes(ourText)) || undefined;
-      }, "wn reads us after re-add");
-      const wnText = `s22-wn-${Math.floor(Date.now() / 1000)}`;
-      await wn(rig, ["messages", "send", wnGid, wnText], rig.wnNpub);
-      await waitFor(
-        () =>
-          received5.some((entry) => entry.group === gid && entry.message.content === wnText) ||
-          undefined,
-        "we read wn after re-add",
-      );
-      await client5.close();
+        // Withhold the rename's commit: armed just before the call, the
+        // port reports the publish accepted but never forwards the event.
+        at = Date.now();
+        drop.armed = true;
+        await client5.updateGroupProfile(gid, { name: "m3b-22-moved" });
+        await waitFor(() => drop.id !== "" || undefined, "rename commit withheld");
+        await client5.sendMessage(gid, { kind: CHAT_KIND, tags: [], content: "s22-unreadable" });
+        await sleep(4000);
+        log(`withheld one commit; wn is stuck (${secs(at)})`);
+
+        // Whatever wn does about being stuck (its kind-1159 recovery
+        // requests, if it issues them), our side stays inert: the route
+        // must gain no further events authored by our session.
+        const route5 = snapshot5.nostrGroupId;
+        const routeIds = () =>
+          new Set(
+            served.relay
+              .events()
+              .filter(
+                (stored) =>
+                  stored.kind === 445 &&
+                  stored.tags.some((tag) => tag[0] === "h" && tag[1] === route5),
+              )
+              .map((stored) => stored.id),
+          );
+        const baselineIds = routeIds();
+        await sleep(6000);
+        const gained = [...routeIds()].filter((id) => !baselineIds.has(id));
+        if (gained.length > 0) {
+          throw new Error(`a recovery request staged ${gained.length} event(s)`);
+        }
+
+        // Re-add the stuck account: `removed` — the Invite follows once
+        // the removal commit confirms.
+        const outcome = await client5.readdMember(gid, rig.wnPub, [url]);
+        if (outcome !== "removed") {
+          throw new Error(`readdMember outcome ${outcome}, expected removed`);
+        }
+
+        // wn's stalled copy holds the offer: `recovery-status` lists it
+        // with the token `confirm-rejoin` needs.
+        const offerInfo = await waitFor(async () => {
+          const reply = await wnTry(rig, ["groups", "recovery-status", wnGid], rig.wnNpub);
+          const offers = ptrArr(reply.parsed, "/result/rejoin_invitations");
+          const [first] = offers;
+          if (first === undefined) {
+            return undefined;
+          }
+          const welcomeId = ptrStr(first, "/welcome_id_hex");
+          const token = ptrStr(first, "/local_state_token");
+          return welcomeId !== undefined && token !== undefined ? { welcomeId, token } : undefined;
+        }, "wn rejoin offer in recovery-status");
+        await wn(
+          rig,
+          [
+            "groups",
+            "confirm-rejoin",
+            offerInfo.welcomeId,
+            "--local-state-token",
+            offerInfo.token,
+            "--confirm",
+          ],
+          rig.wnNpub,
+        );
+        log(`wn confirmed the rejoin (${secs(at)})`);
+
+        // The round trip recovers both ways.
+        const ourText = `s22-us-${Math.floor(Date.now() / 1000)}`;
+        await client5.sendMessage(gid, { kind: CHAT_KIND, tags: [], content: ourText });
+        await waitFor(async () => {
+          const entries = await wnMessages(rig, wnGid);
+          return entries.some((entry) => entry.includes(ourText)) || undefined;
+        }, "wn reads us after re-add");
+        const wnText = `s22-wn-${Math.floor(Date.now() / 1000)}`;
+        await wn(rig, ["messages", "send", wnGid, wnText], rig.wnNpub);
+        await waitFor(
+          () =>
+            received5.some((entry) => entry.group === gid && entry.message.content === wnText) ||
+            undefined,
+          "we read wn after re-add",
+        );
+      } finally {
+        await client5.close();
+      }
     });
 
     // S21 — post-join self-update: the Pump reports history_fetched at
@@ -2225,7 +2252,9 @@ async function run(): Promise<void> {
     });
 
     /** A sibling mk device of our account (same signer, fresh stores). */
-    const openSibling = async (): Promise<{
+    const openSibling = async (
+      deviceSigner = signer,
+    ): Promise<{
       mk: MarmotClient;
       invites: InviteEvent[];
       changes: GroupEvent[];
@@ -2236,7 +2265,7 @@ async function run(): Promise<void> {
         backend: backendN,
         kv: memoryKv(),
         cursors: memoryCursorStore(),
-        signer,
+        signer: deviceSigner,
         clock: {
           now: () => ({
             unixMs: BigInt(Date.now()),
@@ -2264,65 +2293,83 @@ async function run(): Promise<void> {
     };
 
     // S14 — wn invites an account holding one wn device (a second wnd
-    // home on our nsec) and one mk device; both join, the account shows
-    // devices 2, messages flow both ways from both devices.
+    // home on the same nsec) and one mk device; both join, the account
+    // shows devices 2, messages flow both ways from both devices.
+    // A fresh secret keeps the leaf count exact: the shared signer's
+    // older slots would be invited too and inflate `devices`.
     await scenario("S14 wn invites our wn sibling + mk device", async () => {
+      const secret14 = generateSecretKey();
+      const signer14 = testSigner(secret14);
+      const npub14 = npubEncode(signer14.pubkey);
       const wn2 = await spawnWn("s14", url);
-      await wnStdin(wn2, ["login", "--nsec-stdin"], nsecEncode(secret));
-      const a2npub = await wnAccountNpub(wn2);
-      if (a2npub !== ourNpub) {
-        throw new Error(`wn sibling npub ${a2npub} != ours ${ourNpub}`);
-      }
-      await wn(wn2, ["keys", "publish"], a2npub);
-
-      const created = await wn(rig, ["groups", "create", "m3b-14", ourNpub], rig.wnNpub);
-      const wnGid = wnGroupId(created);
-      const gid = await waitFor(
-        () =>
-          invites.flatMap((event) =>
-            event.type === "joined" && event.group === wnGid ? [event.group] : [],
-          )[0],
-        "mk device joined",
-      );
-      await waitFor(async () => {
-        const reply = await wnTry(wn2, ["groups", "invites"], a2npub);
-        if (reply.ok && JSON.stringify(reply.parsed).includes(wnGid)) {
-          await wn(wn2, ["groups", "accept", wnGid], a2npub);
-          return true;
-        }
-        return undefined;
-      }, "wn sibling accepts the invite");
-
-      await waitFor(
-        async () => {
-          const snap = await client.group(gid);
-          const member = snap?.members.find((entry) => entry.account === signer.pubkey);
-          // `devices` counts every slot the wn admin invited — earlier
-          // scenarios left more of this account's KeyPackages on the
-          // relay, so assert the aggregate grew past our own leaf.
-          return (member?.devices ?? 0) >= 2 || undefined;
-        },
-        "our account aggregates the sibling's leaf",
-        180_000,
-      );
-
-      await client.sendMessage(gid, { kind: CHAT_KIND, tags: [], content: "s14-mk-to-wn" });
-      await waitFor(async () => {
-        const list = await wnTry(
-          wn2,
-          ["messages", "list", wnGid, "--limit", String(WN_MESSAGE_LIMIT)],
-          a2npub,
+      const device = await openSibling(signer14);
+      try {
+        await pool.publish(
+          [url],
+          finalizeEvent(
+            {
+              kind: RELAY_LIST_KIND,
+              created_at: Math.floor(Date.now() / 1000),
+              tags: [["r", url]],
+              content: "",
+            },
+            secret14,
+          ),
         );
-        return (list.ok && JSON.stringify(list.parsed).includes("s14-mk-to-wn")) || undefined;
-      }, "wn sibling lists our message");
-      await wn(wn2, ["messages", "send", wnGid, "s14-sibling-to-mk"], a2npub);
-      await waitFor(
-        () =>
-          received.some(
-            (entry) => entry.group === gid && entry.message.content === "s14-sibling-to-mk",
-          ) || undefined,
-        "mk decodes the sibling's message",
-      );
+        await wnStdin(wn2, ["login", "--nsec-stdin"], nsecEncode(secret14));
+        const a2npub = await wnAccountNpub(wn2);
+        if (a2npub !== npub14) {
+          throw new Error(`wn sibling npub ${a2npub} != ours ${npub14}`);
+        }
+        await wn(wn2, ["keys", "publish"], a2npub);
+        await device.mk.ensureKeyPackage();
+        await device.mk.publishInboxRelays([url]);
+
+        const created = await wn(rig, ["groups", "create", "m3b-14", npub14], rig.wnNpub);
+        const wnGid = wnGroupId(created);
+        const gid = await waitFor(
+          () =>
+            device.invites.flatMap((event) =>
+              event.type === "joined" && event.group === wnGid ? [event.group] : [],
+            )[0],
+          "mk device joined",
+        );
+        await waitFor(async () => {
+          const reply = await wnTry(wn2, ["groups", "invites"], a2npub);
+          if (reply.ok && JSON.stringify(reply.parsed).includes(wnGid)) {
+            await wn(wn2, ["groups", "accept", wnGid], a2npub);
+            return true;
+          }
+          return undefined;
+        }, "wn sibling accepts the invite");
+
+        await waitFor(async () => {
+          const snap = await device.mk.group(gid);
+          const member = snap?.members.find((entry) => entry.account === signer14.pubkey);
+          return member?.devices === 2 || undefined;
+        }, "our account shows devices == 2");
+
+        await device.mk.sendMessage(gid, { kind: CHAT_KIND, tags: [], content: "s14-mk-to-wn" });
+        await waitFor(async () => {
+          const list = await wnTry(
+            wn2,
+            ["messages", "list", wnGid, "--limit", String(WN_MESSAGE_LIMIT)],
+            a2npub,
+          );
+          return (list.ok && JSON.stringify(list.parsed).includes("s14-mk-to-wn")) || undefined;
+        }, "wn sibling lists our message");
+        await wn(wn2, ["messages", "send", wnGid, "s14-sibling-to-mk"], a2npub);
+        await waitFor(
+          () =>
+            device.received2.some(
+              (entry) => entry.group === gid && entry.message.content === "s14-sibling-to-mk",
+            ) || undefined,
+          "mk decodes the sibling's message",
+        );
+      } finally {
+        await device.mk.close();
+        await killWn(wn2);
+      }
     });
 
     // S15 — we invite an account holding two wn devices (two wnd homes
@@ -2332,253 +2379,274 @@ async function run(): Promise<void> {
       const nsec15 = generateSecretKey();
       const npub15 = npubEncode(getPublicKey(nsec15));
       const wn1 = await spawnWn("s15-d1", url);
-      await wnStdin(wn1, ["login", "--nsec-stdin"], nsecEncode(nsec15));
-      const npub1 = await wnAccountNpub(wn1);
-      if (npub1 !== npub15) {
-        throw new Error(`wn device 1 npub ${npub1} != ${npub15}`);
-      }
-      await wn(wn1, ["keys", "publish"], npub15);
-
       const wn2 = await spawnWn("s15-d2", url);
-      await wnStdin(wn2, ["login", "--nsec-stdin"], nsecEncode(nsec15));
-      await wn(wn2, ["keys", "publish"], npub15);
-      // The link flow is a SHOULD in the design: run it when the CLI
-      // cooperates; an unlinked second installation also counts.
-      let linked = false;
-      const start = await wnTry(wn2, ["devices", "link", "start"], npub15);
-      if (start.ok) {
-        let prompt: string | undefined;
-        try {
-          prompt = await waitFor(
-            async () => {
-              const status = await wnTry(wn1, ["devices", "link", "status"], npub15);
-              if (!status.ok) {
-                return undefined;
-              }
-              const text = JSON.stringify(status.parsed);
-              const found = /"prompt_?id"\s*:\s*"([^"]+)"/.exec(text);
-              return found?.[1];
-            },
-            "link prompt on the existing device",
-            30_000,
-          );
-        } catch (error) {
-          log(
-            `link prompt never appeared: ${error instanceof Error ? error.message : String(error)}`,
-          );
+      try {
+        await wnStdin(wn1, ["login", "--nsec-stdin"], nsecEncode(nsec15));
+        const npub1 = await wnAccountNpub(wn1);
+        if (npub1 !== npub15) {
+          throw new Error(`wn device 1 npub ${npub1} != ${npub15}`);
         }
-        const matched =
-          prompt === undefined
-            ? { ok: false, raw: "no prompt" }
-            : await wnTry(wn2, ["devices", "link", "confirm-match"], npub15);
-        if (matched.ok && prompt !== undefined) {
-          const approved = await wnTry(
-            wn1,
-            ["devices", "link", "approve", prompt, "--label", "second"],
-            npub15,
-          );
-          linked = approved.ok;
-          if (!approved.ok) {
-            log(`link approve refused: ${approved.raw}`);
+        await wn(wn1, ["keys", "publish"], npub15);
+
+        await wnStdin(wn2, ["login", "--nsec-stdin"], nsecEncode(nsec15));
+        await wn(wn2, ["keys", "publish"], npub15);
+        // The link flow is a SHOULD in the design: run it when the CLI
+        // cooperates; an unlinked second installation also counts.
+        let linked = false;
+        const start = await wnTry(wn2, ["devices", "link", "start"], npub15);
+        if (start.ok) {
+          let prompt: string | undefined;
+          try {
+            prompt = await waitFor(
+              async () => {
+                const status = await wnTry(wn1, ["devices", "link", "status"], npub15);
+                if (!status.ok) {
+                  return undefined;
+                }
+                const text = JSON.stringify(status.parsed);
+                const found = /"prompt_?id"\s*:\s*"([^"]+)"/.exec(text);
+                return found?.[1];
+              },
+              "link prompt on the existing device",
+              30_000,
+            );
+          } catch (error) {
+            log(
+              `link prompt never appeared: ${error instanceof Error ? error.message : String(error)}`,
+            );
+          }
+          const matched =
+            prompt === undefined
+              ? { ok: false, raw: "no prompt" }
+              : await wnTry(wn2, ["devices", "link", "confirm-match"], npub15);
+          if (matched.ok && prompt !== undefined) {
+            const approved = await wnTry(
+              wn1,
+              ["devices", "link", "approve", prompt, "--label", "second"],
+              npub15,
+            );
+            linked = approved.ok;
+            if (!approved.ok) {
+              log(`link approve refused: ${approved.raw}`);
+            }
+          } else {
+            log(`link confirm-match refused: ${matched.raw}`);
           }
         } else {
-          log(`link confirm-match refused: ${matched.raw}`);
+          log(`link start refused: ${start.raw}`);
         }
-      } else {
-        log(`link start refused: ${start.raw}`);
-      }
-      log(`S15 second wn device ${linked ? "linked" : "unlinked"}`);
+        log(`S15 second wn device ${linked ? "linked" : "unlinked"}`);
 
-      // Both devices' KeyPackages land as invitees; both accept and
-      // list the chat.
-      const kps = await client.lookupInvitees(getPublicKey(nsec15), [url]);
-      log(`S15 invitees: ${kps.length} (${kps.map((i) => i.keyPackage.id.slice(0, 8)).join(",")})`);
-      // Let both wnd workers open the account's inbox subscription
-      // before the Welcomes publish — a wrap older than the `since`
-      // cursor is never replayed to them.
-      await sleep(5000);
-      const created = await client.createGroup({
-        name: "m3b-15",
-        description: "",
-        relays: [url],
-        invitees: kps,
-        admins: [],
-        components: [],
-      });
-      const gid = created.id;
-      // A Welcome lands as a pending invite; when the devices are
-      // linked, the first device's accept fans the joined chat out to
-      // its sibling through the device group, so the sibling may go
-      // straight to `chats list` without an invite of its own.
-      for (const home of [wn1, wn2]) {
-        // oxlint-disable-next-line no-await-in-loop -- device 2's fan-out follows device 1's join
-        await waitFor(
-          async () => {
-            const chats = await wnTry(home, ["chats", "list"], npub15);
-            if (chats.ok && JSON.stringify(chats.parsed).includes(gid)) {
-              return true;
-            }
-            const reply = await wnTry(home, ["groups", "invites"], npub15);
-            if (reply.ok && JSON.stringify(reply.parsed).includes(gid)) {
-              await wn(home, ["groups", "accept", gid], npub15);
-              await wnTry(home, ["sync"], npub15);
-            }
-            return undefined;
-          },
-          `wn device joins and lists ${gid.slice(0, 8)}`,
+        // Both devices' KeyPackages land as invitees; both accept and
+        // list the chat.
+        const kps = await client.lookupInvitees(getPublicKey(nsec15), [url]);
+        log(
+          `S15 invitees: ${kps.length} (${kps.map((i) => i.keyPackage.id.slice(0, 8)).join(",")})`,
         );
-      }
-      await client.sendMessage(gid, { kind: CHAT_KIND, tags: [], content: "s15-mk-to-wn" });
-      for (const home of [wn1, wn2]) {
-        // oxlint-disable-next-line no-await-in-loop -- sequential wn polls
-        await waitFor(async () => {
-          const list = await wnTry(
-            home,
-            ["messages", "list", gid, "--limit", String(WN_MESSAGE_LIMIT)],
-            npub15,
+        // Let both wnd workers open the account's inbox subscription
+        // before the Welcomes publish — a wrap older than the `since`
+        // cursor is never replayed to them.
+        await sleep(5000);
+        const created = await client.createGroup({
+          name: "m3b-15",
+          description: "",
+          relays: [url],
+          invitees: kps,
+          admins: [],
+          components: [],
+        });
+        const gid = created.id;
+        // A Welcome lands as a pending invite; when the devices are
+        // linked, the first device's accept fans the joined chat out to
+        // its sibling through the device group, so the sibling may go
+        // straight to `chats list` without an invite of its own.
+        for (const home of [wn1, wn2]) {
+          // oxlint-disable-next-line no-await-in-loop -- device 2's fan-out follows device 1's join
+          await waitFor(
+            async () => {
+              const chats = await wnTry(home, ["chats", "list"], npub15);
+              if (chats.ok && JSON.stringify(chats.parsed).includes(gid)) {
+                return true;
+              }
+              const reply = await wnTry(home, ["groups", "invites"], npub15);
+              if (reply.ok && JSON.stringify(reply.parsed).includes(gid)) {
+                await wn(home, ["groups", "accept", gid], npub15);
+                await wnTry(home, ["sync"], npub15);
+              }
+              return undefined;
+            },
+            `wn device joins and lists ${gid.slice(0, 8)}`,
           );
-          return (list.ok && JSON.stringify(list.parsed).includes("s15-mk-to-wn")) || undefined;
-        }, "wn device lists our message");
-      }
-      await wn(wn1, ["messages", "send", gid, "s15-d1-reply"], npub15);
-      await wn(wn2, ["messages", "send", gid, "s15-d2-reply"], npub15);
-      for (const wanted of ["s15-d1-reply", "s15-d2-reply"]) {
-        // oxlint-disable-next-line no-await-in-loop -- sequential wn polls
-        await waitFor(
-          () =>
-            received.some((entry) => entry.group === gid && entry.message.content === wanted) ||
-            undefined,
-          `mk decodes ${wanted}`,
-        );
+        }
+        await client.sendMessage(gid, { kind: CHAT_KIND, tags: [], content: "s15-mk-to-wn" });
+        for (const home of [wn1, wn2]) {
+          // oxlint-disable-next-line no-await-in-loop -- sequential wn polls
+          await waitFor(async () => {
+            const list = await wnTry(
+              home,
+              ["messages", "list", gid, "--limit", String(WN_MESSAGE_LIMIT)],
+              npub15,
+            );
+            return (list.ok && JSON.stringify(list.parsed).includes("s15-mk-to-wn")) || undefined;
+          }, "wn device lists our message");
+        }
+        await wn(wn1, ["messages", "send", gid, "s15-d1-reply"], npub15);
+        await wn(wn2, ["messages", "send", gid, "s15-d2-reply"], npub15);
+        for (const wanted of ["s15-d1-reply", "s15-d2-reply"]) {
+          // oxlint-disable-next-line no-await-in-loop -- sequential wn polls
+          await waitFor(
+            () =>
+              received.some((entry) => entry.group === gid && entry.message.content === wanted) ||
+              undefined,
+            `mk decodes ${wanted}`,
+          );
+        }
+      } finally {
+        await killWn(wn1);
+        await killWn(wn2);
       }
     });
 
     // S16 — includeOwnDevices founders our second mk device; it joins
-    // from its own Welcome and the account shows devices 2.
+    // from its own Welcome and the account shows devices 2. A fresh
+    // secret keeps the leaf count exact.
     await scenario("S16 createGroup includes our own device", async () => {
-      const sibling = await openSibling();
-      const knownKps = new Set(
-        served.relay
-          .events()
-          .filter((stored) => stored.kind === KEY_PACKAGE_KIND && stored.pubkey === signer.pubkey)
-          .map((stored) => stored.id),
-      );
-      await sibling.mk.ensureKeyPackage();
-      await sibling.mk.publishInboxRelays([url]);
-      await waitFor(
-        () =>
-          served.relay
-            .events()
-            .some(
-              (stored) =>
-                stored.kind === KEY_PACKAGE_KIND &&
-                stored.pubkey === signer.pubkey &&
-                !knownKps.has(stored.id),
-            ) || undefined,
-        "sibling's KeyPackage on the relay",
-      );
-      const wnKps = await client.lookupInvitees(rig.wnPub, [url]);
-      const created = await client.createGroup({
-        name: "m3b-16",
-        description: "",
-        relays: [url],
-        invitees: wnKps,
-        admins: [],
-        components: [],
-      });
-      const gid = created.id;
-      const joined = await waitFor(
-        () =>
-          sibling.invites.flatMap((event) =>
-            event.type === "joined" && event.group === gid ? [event.group] : [],
-          )[0],
-        "sibling joined from own_devices",
-      );
-      if (joined !== gid) {
-        throw new Error(`sibling joined ${joined}, expected ${gid}`);
-      }
-      await waitFor(
-        async () => {
-          const snap = await client.group(gid);
-          const member = snap?.members.find((entry) => entry.account === signer.pubkey);
-          // includeOwnDevices founders every fresh slot of this account,
-          // which earlier scenarios left more than two of.
-          return (member?.devices ?? 0) >= 2 || undefined;
-        },
-        "our account aggregates the sibling's leaf",
-        180_000,
-      );
-      await waitFor(async () => {
-        const reply = await wn(rig, ["groups", "members", gid], rig.wnNpub);
-        const entries = ptrArr(reply, "/result/members").filter((item) =>
-          JSON.stringify(item).includes(signer.pubkey),
+      const secret16 = generateSecretKey();
+      const signer16 = testSigner(secret16);
+      const primary = await openSibling(signer16);
+      const sibling = await openSibling(signer16);
+      try {
+        await pool.publish(
+          [url],
+          finalizeEvent(
+            {
+              kind: RELAY_LIST_KIND,
+              created_at: Math.floor(Date.now() / 1000),
+              tags: [["r", url]],
+              content: "",
+            },
+            secret16,
+          ),
         );
-        return entries.length === 1 || undefined;
-      }, "wn members view shows the account once");
-      await sibling.mk.sendMessage(gid, {
-        kind: CHAT_KIND,
-        tags: [],
-        content: "s16-a2-to-wn",
-      });
-      await waitFor(
-        () =>
-          groupChanges.some((event) => event.group === gid && event.type === "epoch_changed") ||
-          undefined,
-        "primary applies the sibling's message",
-      );
-      await sibling.mk.close();
+        await primary.mk.ensureKeyPackage();
+        await primary.mk.publishInboxRelays([url]);
+        await sibling.mk.ensureKeyPackage();
+        await sibling.mk.publishInboxRelays([url]);
+        await waitFor(
+          () =>
+            new Set(
+              served.relay
+                .events()
+                .filter(
+                  (stored) => stored.kind === KEY_PACKAGE_KIND && stored.pubkey === signer16.pubkey,
+                )
+                .map((stored) => stored.id),
+            ).size >= 2 || undefined,
+          "both devices' KeyPackages on the relay",
+        );
+        const wnKps = await primary.mk.lookupInvitees(rig.wnPub, [url]);
+        const created = await primary.mk.createGroup({
+          name: "m3b-16",
+          description: "",
+          relays: [url],
+          invitees: wnKps,
+          admins: [],
+          components: [],
+        });
+        const gid = created.id;
+        const joined = await waitFor(
+          () =>
+            sibling.invites.flatMap((event) =>
+              event.type === "joined" && event.group === gid ? [event.group] : [],
+            )[0],
+          "sibling joined from own_devices",
+        );
+        if (joined !== gid) {
+          throw new Error(`sibling joined ${joined}, expected ${gid}`);
+        }
+        await waitFor(async () => {
+          const snap = await primary.mk.group(gid);
+          const member = snap?.members.find((entry) => entry.account === signer16.pubkey);
+          return member?.devices === 2 || undefined;
+        }, "our account shows devices == 2");
+        await waitFor(async () => {
+          const reply = await wn(rig, ["groups", "members", gid], rig.wnNpub);
+          const entries = ptrArr(reply, "/result/members").filter((item) =>
+            JSON.stringify(item).includes(signer16.pubkey),
+          );
+          return entries.length === 1 || undefined;
+        }, "wn members view shows the account once");
+        await sibling.mk.sendMessage(gid, {
+          kind: CHAT_KIND,
+          tags: [],
+          content: "s16-a2-to-wn",
+        });
+        await waitFor(
+          () =>
+            primary.changes.some(
+              (event) => event.group === gid && event.type === "epoch_changed",
+            ) || undefined,
+          "primary applies the sibling's message",
+        );
+      } finally {
+        await sibling.mk.close();
+        await primary.mk.close();
+      }
     });
 
     // S18 — wn admin removes our account: every leaf goes in one
     // Commit and both mk devices end access == "removed".
     await scenario("S18 wn removes our whole account", async () => {
       const sibling = await openSibling();
-      const knownKps = new Set(
-        served.relay
-          .events()
-          .filter((stored) => stored.kind === KEY_PACKAGE_KIND && stored.pubkey === signer.pubkey)
-          .map((stored) => stored.id),
-      );
-      await sibling.mk.ensureKeyPackage();
-      await sibling.mk.publishInboxRelays([url]);
-      await waitFor(
-        () =>
+      try {
+        const knownKps = new Set(
           served.relay
             .events()
-            .some(
-              (stored) =>
-                stored.kind === KEY_PACKAGE_KIND &&
-                stored.pubkey === signer.pubkey &&
-                !knownKps.has(stored.id),
-            ) || undefined,
-        "sibling's KeyPackage on the relay",
-      );
-      const created = await wn(rig, ["groups", "create", "m3b-18", ourNpub], rig.wnNpub);
-      const wnGid = wnGroupId(created);
-      const gid1 = await waitFor(
-        () =>
-          invites.flatMap((event) =>
-            event.type === "joined" && event.group === wnGid ? [event.group] : [],
-          )[0],
-        "device 1 joined",
-      );
-      const gid2 = await waitFor(
-        () =>
-          sibling.invites.flatMap((event) =>
-            event.type === "joined" && event.group === wnGid ? [event.group] : [],
-          )[0],
-        "device 2 joined",
-      );
-      await wn(rig, ["groups", "remove-members", wnGid, ourNpub], rig.wnNpub);
-      await waitFor(async () => {
-        const snap = await client.group(gid1);
-        return snap?.access === "removed" || undefined;
-      }, "device 1 access == removed");
-      await waitFor(async () => {
-        const snap = await sibling.mk.group(gid2);
-        return snap?.access === "removed" || undefined;
-      }, "device 2 access == removed");
-      await sibling.mk.close();
+            .filter((stored) => stored.kind === KEY_PACKAGE_KIND && stored.pubkey === signer.pubkey)
+            .map((stored) => stored.id),
+        );
+        await sibling.mk.ensureKeyPackage();
+        await sibling.mk.publishInboxRelays([url]);
+        await waitFor(
+          () =>
+            served.relay
+              .events()
+              .some(
+                (stored) =>
+                  stored.kind === KEY_PACKAGE_KIND &&
+                  stored.pubkey === signer.pubkey &&
+                  !knownKps.has(stored.id),
+              ) || undefined,
+          "sibling's KeyPackage on the relay",
+        );
+        const created = await wn(rig, ["groups", "create", "m3b-18", ourNpub], rig.wnNpub);
+        const wnGid = wnGroupId(created);
+        const gid1 = await waitFor(
+          () =>
+            invites.flatMap((event) =>
+              event.type === "joined" && event.group === wnGid ? [event.group] : [],
+            )[0],
+          "device 1 joined",
+        );
+        const gid2 = await waitFor(
+          () =>
+            sibling.invites.flatMap((event) =>
+              event.type === "joined" && event.group === wnGid ? [event.group] : [],
+            )[0],
+          "device 2 joined",
+        );
+        await wn(rig, ["groups", "remove-members", wnGid, ourNpub], rig.wnNpub);
+        await waitFor(async () => {
+          const snap = await client.group(gid1);
+          return snap?.access === "removed" || undefined;
+        }, "device 1 access == removed");
+        await waitFor(async () => {
+          const snap = await sibling.mk.group(gid2);
+          return snap?.access === "removed" || undefined;
+        }, "device 2 access == removed");
+      } finally {
+        await sibling.mk.close();
+      }
     });
 
     log(`NIP-11 documents served: ${served.documentsServed()}`);
@@ -2607,6 +2675,14 @@ async function run(): Promise<void> {
       log(`client close error: ${error instanceof Error ? error.message : String(error)}`);
     }
     poolRef?.close();
+    for (const entry of extraWns) {
+      try {
+        // oxlint-disable-next-line no-await-in-loop -- sequential reap
+        await killWn(entry);
+      } catch (error) {
+        log(`extra wnd cleanup error: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
     if (wnd.exitCode === null && !wnd.killed) {
       wnd.kill("SIGKILL");
     }
