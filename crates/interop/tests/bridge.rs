@@ -356,7 +356,7 @@ impl BridgeMember {
     /// Ingest gift-wrapped welcomes, `tick`, drain and publish anything the
     /// ingest staged. Returns the drained session events.
     async fn sync_welcomes(&mut self, rig: &Rig) -> Vec<SessionEvent> {
-        let fetched = fetch_welcomes(rig, &self.account_hex()).await;
+        let fetched = fetch_welcomes(rig, &self.signer).await;
         self.ingest_wire(rig, fetched).await
     }
 
@@ -651,6 +651,6 @@ async fn scenario7_bridge_wn_invites_us() {
     )
     .await;
 
-    rig.relay.shutdown();
+    rig.shutdown();
     eprintln!("SCENARIO-7 PASS {:.1}s", start.elapsed().as_secs_f64());
 }
