@@ -16,8 +16,8 @@ publish      = false
 workspace = true
 
 [dev-dependencies]
-mk-core                = { path = "../mk-core", version = "=0.0.0", features = ["testing"] }
-mk-bridge              = { path = "../mk-bridge", version = "=0.0.0" }
+mk-core                = { path = "../mk-core", version = "=0.1.0", features = ["testing"] }
+mk-bridge              = { path = "../mk-bridge", version = "=0.1.0" }
 nostr                  = { git = "https://github.com/erskingardner/rust-nostr", rev = "e93cc06b5624f06c21ecd8111a124176eb0c7589", version = "=0.45.5" }
 nostr-sdk              = { git = "https://github.com/erskingardner/rust-nostr", rev = "e93cc06b5624f06c21ecd8111a124176eb0c7589", version = "=0.45.4", features = ["local-relay"] }
 nostr-directory        = { git = "https://github.com/marmot-protocol/mdk", rev = "34646a577807f2b112ee031f3c164ec58aa18b64", version = "=0.18.0", features = ["test-support"] }

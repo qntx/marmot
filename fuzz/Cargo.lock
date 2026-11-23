@@ -1654,7 +1654,7 @@ checksum = "68354c5c6bd36d73ff3feceb05efa59b6acb7626617f4962be322a825e61f79a"
 
 [[package]]
 name = "mk-bridge"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "hex",
  "mk-core",
@@ -1665,7 +1665,7 @@ dependencies = [
 
 [[package]]
 name = "mk-core"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "base64",
  "cgka-engine",
@@ -1688,7 +1688,7 @@ dependencies = [
 
 [[package]]
 name = "mk-ffi"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "mk-bridge",
  "tokio",
