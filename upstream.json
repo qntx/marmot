@@ -15,5 +15,13 @@
     "tag": "v0.18.0",
     "rev": "34646a577807f2b112ee031f3c164ec58aa18b64",
     "checkout": "3rdparty/mdk"
+  },
+  "nosfry": {
+    "repository": "https://github.com/qntx/nosfry",
+    "tag": "v0.4.0",
+    "rev": "d7893c832f106dc941334ba8b91819243a3ba373",
+    "checkout": "3rdparty/nosfry",
+    "tarball_sha256": "d36f4a92972f79c1d2847f2fc45096d002b23c1ebc1f3dd3bf89ef2fa443e737",
+    "profile_sha256": "a593f4e545e913821d72918816cb18c1607d0d4161787918dce486127ee0f888"
   }
 }

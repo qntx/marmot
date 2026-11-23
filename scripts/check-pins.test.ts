@@ -250,4 +250,60 @@ describe("checkPins", () => {
     expect(errors).toStrictEqual([]);
     expect(notes).toStrictEqual([]);
   });
+
+  const NOSFRY = {
+    nosfry: {
+      repository: "https://github.com/qntx/nosfry",
+      tag: "v0.4.0",
+      rev: REV_A,
+      checkout: "3rdparty/nosfry",
+      tarball_sha256: "2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881",
+      profile_sha256: "2a616ec28a470ea3b71d9a29577cec8600a965ff5c9859d5f07ec0ded1980c5c",
+    },
+  };
+
+  const NOSFRY_TAGS = { "3rdparty/nosfry": { "v0.4.0": REV_A } };
+
+  const NOSFRY_FILES: Record<string, Uint8Array> = {
+    "3rdparty/nosfry/contrib/marmot/nosfry.toml": new TextEncoder().encode("marmot profile"),
+  };
+
+  test("rejects a malformed _sha256 field, checkout present or not", () => {
+    const { errors } = checkPins(
+      { nosfry: { ...NOSFRY.nosfry, tarball_sha256: "not-a-digest" } },
+      probe({}, {}),
+    );
+    expect(errors).toStrictEqual([
+      'nosfry: tarball_sha256 must be a 64-hex SHA-256, got "not-a-digest"',
+    ]);
+  });
+
+  test("verifies the nosfry profile digest when the checkout sits at the pin", () => {
+    expect(
+      checkPins(NOSFRY, probe({ "3rdparty/nosfry": REV_A }, NOSFRY_FILES, NOSFRY_TAGS)),
+    ).toStrictEqual({ errors: [], notes: [] });
+  });
+
+  test("rejects a nosfry profile that does not match the pinned digest", () => {
+    const files = {
+      "3rdparty/nosfry/contrib/marmot/nosfry.toml": new TextEncoder().encode("stale profile"),
+    };
+    const { errors } = checkPins(NOSFRY, probe({ "3rdparty/nosfry": REV_A }, files, NOSFRY_TAGS));
+    expect(errors).toStrictEqual([
+      "nosfry: 3rdparty/nosfry/contrib/marmot/nosfry.toml is sha256 77f9d3d4a012803874f972ef760a158ac8725ffdde1ec4346daa90ed9679f471, pinned profile_sha256 is 2a616ec28a470ea3b71d9a29577cec8600a965ff5c9859d5f07ec0ded1980c5c",
+    ]);
+  });
+
+  test("rejects a nosfry checkout without the profile file", () => {
+    const { errors } = checkPins(NOSFRY, probe({ "3rdparty/nosfry": REV_A }, {}, NOSFRY_TAGS));
+    expect(errors).toStrictEqual(["nosfry: 3rdparty/nosfry/contrib/marmot/nosfry.toml missing"]);
+  });
+
+  test("skips the nosfry digest check when the checkout is absent", () => {
+    const { errors, notes } = checkPins(NOSFRY, probe({}, {}));
+    expect(errors).toStrictEqual([]);
+    expect(notes).toStrictEqual([
+      "nosfry: 3rdparty/nosfry not checked out locally — pin not verified",
+    ]);
+  });
 });

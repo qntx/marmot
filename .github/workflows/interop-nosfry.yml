@@ -1,0 +1,220 @@
+name: Interop nosfry
+
+# Advisory, never required: the crates/interop wn/wnd scenarios run
+# against nosfry — a second relay implementation — instead of the
+# in-process LocalRelay. INTEROP_RELAY_URL makes every party dial the
+# external relay; welcome fetches go through per-account connections that
+# answer NIP-42, because nosfry's default gift-wrap rule serves kind 1059
+# only to an authenticated recipient. nosfry runs its pinned
+# contrib/marmot/nosfry.toml profile, so a red run also flags drift
+# between that profile's rate limits and real White Noise traffic.
+#
+# The nosfry pin lives in upstream.json under `nosfry`: tag, rev, the
+# SHA-256 of the linux release tarball, and the SHA-256 of the Marmot
+# profile at that rev (check:pins verifies the profile digest against a
+# 3rdparty/nosfry checkout; the tarball digest is verified here at
+# download time).
+
+on:
+  schedule:
+    - cron: "41 3 * * *"
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/interop-nosfry.yml"
+      - ".github/actions/build-wn/**"
+      - "crates/interop/**"
+      - "upstream.json"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # The same wn/wnd build as ci.yml's wn job, from the upstream.json pin.
+  wn:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: pin
+        run: |
+          set -euo pipefail
+          repository="$(jq -r .wn.repository upstream.json)"
+          tag="$(jq -r .wn.tag upstream.json)"
+          rev="$(jq -r .wn.rev upstream.json)"
+          # The peeled ref (annotated tags) sorts after the tag ref itself.
+          resolved="$(git ls-remote "$repository" "refs/tags/$tag" "refs/tags/$tag^{}" | tail -n1 | cut -f1)"
+          if [ "$resolved" != "$rev" ]; then
+            echo "::error::upstream.json wn: $tag resolves to '${resolved}' upstream, pinned rev is $rev"
+            exit 1
+          fi
+          {
+            echo "repository=${repository#https://github.com/}"
+            echo "rev=$rev"
+            echo "version=wn ${tag#v}"
+          } >>"$GITHUB_OUTPUT"
+      - uses: ./.github/actions/build-wn
+        with:
+          repository: ${{ steps.pin.outputs.repository }}
+          rev: ${{ steps.pin.outputs.rev }}
+          version: ${{ steps.pin.outputs.version }}
+          path: ${{ runner.temp }}/wn-bin
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: wn-bin
+          path: ${{ runner.temp }}/wn-bin
+          retention-days: 1
+          if-no-files-found: error
+
+  interop-nosfry:
+    needs: wn
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: crates/interop
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: pin
+        run: |
+          set -euo pipefail
+          json="${{ github.workspace }}/upstream.json"
+          repository="$(jq -r .nosfry.repository "$json")"
+          tag="$(jq -r .nosfry.tag "$json")"
+          rev="$(jq -r .nosfry.rev "$json")"
+          tarball_sha256="$(jq -r .nosfry.tarball_sha256 "$json")"
+          profile_sha256="$(jq -r .nosfry.profile_sha256 "$json")"
+          for value in "$repository" "$tag" "$rev" "$tarball_sha256" "$profile_sha256"; do
+            if [ -z "$value" ] || [ "$value" = "null" ]; then
+              echo "::error::upstream.json nosfry: repository, tag, rev, tarball_sha256 and profile_sha256 must all be set"
+              exit 1
+            fi
+          done
+          # The peeled ref (annotated tags) sorts after the tag ref itself.
+          resolved="$(git ls-remote "$repository" "refs/tags/$tag" "refs/tags/$tag^{}" | tail -n1 | cut -f1)"
+          if [ "$resolved" != "$rev" ]; then
+            echo "::error::upstream.json nosfry: $tag resolves to '${resolved}' upstream, pinned rev is $rev"
+            exit 1
+          fi
+          {
+            echo "repository=${repository#https://github.com/}"
+            echo "tag=$tag"
+            echo "rev=$rev"
+            echo "version=${tag#v}"
+            echo "tarball_sha256=$tarball_sha256"
+            echo "profile_sha256=$profile_sha256"
+          } >>"$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: "1.99.1"
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: crates/interop
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: wn-bin
+          path: ${{ runner.temp }}/wn-bin
+      - name: Fetch the pinned nosfry release
+        working-directory: ${{ github.workspace }}
+        env:
+          REPOSITORY: ${{ steps.pin.outputs.repository }}
+          TAG: ${{ steps.pin.outputs.tag }}
+          REV: ${{ steps.pin.outputs.rev }}
+          VERSION: ${{ steps.pin.outputs.version }}
+          TARBALL_SHA256: ${{ steps.pin.outputs.tarball_sha256 }}
+          PROFILE_SHA256: ${{ steps.pin.outputs.profile_sha256 }}
+        run: |
+          set -euo pipefail
+          name="nosfry-${VERSION}-x86_64-unknown-linux-gnu"
+          curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error \
+            -o "$RUNNER_TEMP/nosfry.tar.gz" \
+            "https://github.com/${REPOSITORY}/releases/download/${TAG}/${name}.tar.gz"
+          echo "${TARBALL_SHA256}  $RUNNER_TEMP/nosfry.tar.gz" | sha256sum -c -
+          tar xzf "$RUNNER_TEMP/nosfry.tar.gz" -C "$RUNNER_TEMP"
+          curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error \
+            -o "$RUNNER_TEMP/marmot.toml" \
+            "https://raw.githubusercontent.com/${REPOSITORY}/${REV}/contrib/marmot/nosfry.toml"
+          echo "${PROFILE_SHA256}  $RUNNER_TEMP/marmot.toml" | sha256sum -c -
+      - name: Start nosfry on the Marmot profile
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          install -d -m 0700 "$RUNNER_TEMP/db" "$RUNNER_TEMP/logs"
+          port="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')"
+          # The job connects directly — no proxy sets the header the
+          # shipped profile expects, so real_ip_header is cleared. Each
+          # pattern must match exactly once: anything else is profile
+          # drift this job should surface.
+          python3 - "$RUNNER_TEMP/marmot.toml" "$port" "$RUNNER_TEMP/db" <<'PY'
+          import re, sys
+          path, port, db = sys.argv[1], sys.argv[2], sys.argv[3]
+          text = open(path).read()
+          for pattern, repl in [
+              (r"(?m)^service_url *=.*$", f'service_url = "ws://127.0.0.1:{port}"'),
+              (r"(?m)^address *=.*$", f'address = "127.0.0.1:{port}"'),
+              (r"(?m)^real_ip_header *=.*$", 'real_ip_header = ""'),
+              (r"(?m)^path *=.*$", f'path = "{db}"'),
+          ]:
+              text, n = re.subn(pattern, repl, text)
+              if n != 1:
+                  sys.exit(f"{pattern} matched {n} times in {path} — profile drift")
+          open(path, "w").write(text)
+          PY
+          nosfry_bin="$(echo "$RUNNER_TEMP"/nosfry-*-x86_64-unknown-linux-gnu/nosfry)"
+          "$nosfry_bin" --version | tee -a "$GITHUB_STEP_SUMMARY"
+          "$nosfry_bin" relay --config "$RUNNER_TEMP/marmot.toml" \
+            >"$RUNNER_TEMP/logs/nosfry.log" 2>&1 &
+          echo $! >"$RUNNER_TEMP/nosfry.pid"
+          ready=""
+          for _ in $(seq 1 50); do
+            if curl -sf -H 'Accept: application/nostr+json' "http://127.0.0.1:${port}/" \
+              -o "$RUNNER_TEMP/nip11.json"; then
+              ready=1
+              break
+            fi
+            sleep 0.2
+          done
+          if [ -z "$ready" ] || ! kill -0 "$(cat "$RUNNER_TEMP/nosfry.pid")" 2>/dev/null; then
+            cat "$RUNNER_TEMP/logs/nosfry.log" >&2
+            echo "::error::nosfry did not come up within 10s (pid $(cat "$RUNNER_TEMP/nosfry.pid"))"
+            exit 1
+          fi
+          cat "$RUNNER_TEMP/nip11.json" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "INTEROP_RELAY_URL=ws://127.0.0.1:${port}" >>"$GITHUB_ENV"
+      - name: wn/wnd scenarios against nosfry
+        env:
+          WN_BIN: ${{ runner.temp }}/wn-bin/wn
+          WND_BIN: ${{ runner.temp }}/wn-bin/wnd
+          TMPDIR: ${{ runner.temp }}/tmp
+        run: |
+          set -euo pipefail
+          chmod +x "$WN_BIN" "$WND_BIN"
+          install -d -m 0700 "$RUNNER_TEMP/tmp"
+          cargo test --release --locked -- --ignored --test-threads=1 --nocapture \
+            2>&1 | tee "$RUNNER_TEMP/logs/interop-nosfry.log"
+      - name: Stop nosfry
+        if: always()
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -uo pipefail
+          [ -f "$RUNNER_TEMP/nosfry.pid" ] && kill "$(cat "$RUNNER_TEMP/nosfry.pid")" || true
+      - if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: interop-nosfry-logs
+          path: |
+            crates/interop/target/wn-logs
+            ${{ runner.temp }}/logs
+          retention-days: 7
