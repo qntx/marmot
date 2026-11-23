@@ -5,8 +5,8 @@ use serde::{Deserialize, Serialize};
 
 use super::ser::{hex_bytes, hex_bytes_seq, hex_str, opt_u64_str};
 use super::types::{
-    Event, GroupSnapshot, InputReport, KeyPackageInfo, Outbound, PublishResolution, SendOutcome,
-    SentEvent,
+    Event, GroupSnapshot, InputReport, KeyPackageInfo, Outbound, PublishResolution, ReaddOutcome,
+    RejoinOffer, SendOutcome, SentEvent,
 };
 
 /// `submit_proof` succeeded; the session is usable.
@@ -179,6 +179,22 @@ pub struct KeyPackagesResult {
     pub events: Vec<Event>,
 }
 
+/// `rejoin_offers` result.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RejoinOffersResult {
+    /// The stored offers awaiting consent.
+    pub offers: Vec<RejoinOffer>,
+}
+
+/// `readd_member` result: which phase the re-add reached.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReaddResult {
+    /// What the call staged.
+    pub outcome: ReaddOutcome,
+}
+
 /// The typed result of a successful `call`, internally tagged by `"type"`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -220,6 +236,10 @@ pub enum OpResult {
     Group(GroupResult),
     /// `select_key_packages`.
     KeyPackages(KeyPackagesResult),
+    /// `rejoin_offers`.
+    RejoinOffers(RejoinOffersResult),
+    /// `readd_member`.
+    Readd(ReaddResult),
 }
 
 impl From<core::SignOutReport> for SignOutResult {

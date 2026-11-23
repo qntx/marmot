@@ -138,6 +138,7 @@ function snapshot(relays: string[] = [RELAY]): GroupSnapshot {
     description: "",
     epoch: 1n,
     state: "stable",
+    access: "active",
     members: [],
     relays,
     nostrGroupId: ROUTE,
@@ -1197,6 +1198,161 @@ describe("malicious relay", () => {
     popGate(gates).ok();
     await settle(fixture.timer, 0);
     expect(cursor()).toBe(1000);
+    await fixture.client.close();
+  });
+
+  test("a stall suspicion refetches the group once from scratch", async () => {
+    const script = freshScript();
+    script.groups = [snapshot([RELAY, RELAY2])];
+    const groupKey1 = groupCursorKey(ROUTE, RELAY);
+    const groupKey2 = groupCursorKey(ROUTE, RELAY2);
+    const inboxKey = inboxCursorKey(RELAY);
+    const fixture = await open(
+      script,
+      encodeClientState({
+        nip44Extended: true,
+        cursors: { [groupKey1]: 1000, [groupKey2]: 1000, [inboxKey]: 500 },
+        inbox: [RELAY],
+      }),
+    );
+    await settle(fixture.timer, 5000);
+    const history = (): BridgeRequest[] =>
+      script.calls.filter((call) => call.type === "history_fetched");
+    for (const sub of groupSubs(fixture.network)) {
+      pushEose(sub);
+    }
+    await settle(fixture.timer, 25);
+    expect(history()).toHaveLength(1);
+    const changes: string[] = [];
+    fixture.client.onGroupChange((event) => changes.push(event.type));
+
+    // The session suspects the group: its route cursors reset, the inbox
+    // cursor stays, the live subs close, and the event never surfaces.
+    script.drains.push({
+      type: "events",
+      events: [{ type: "group_stall_suspected", group: GROUP }],
+    });
+    await fixture.client.groups();
+    await settle(fixture.timer, 25);
+    const saved = decodeClientState(fixture.cursors.bytes()).cursors;
+    expect(saved[groupKey1]).toBeUndefined();
+    expect(saved[groupKey2]).toBeUndefined();
+    expect(saved[inboxKey]).toBe(500);
+    expect(changes).toStrictEqual([]);
+    await settle(fixture.timer, RESUBSCRIBE_DELAY_MS);
+
+    // The reopened subs carry no `since` — an unfloored replay — and the
+    // refetch reports through `history_fetched` only once every relay's
+    // EOSE has landed.
+    const reopened = groupSubs(fixture.network).filter((sub) => sub.open);
+    expect(reopened.length).toBeGreaterThan(0);
+    for (const sub of reopened) {
+      expect(sub.filters[0]?.since).toBeUndefined();
+    }
+    expect(history()).toHaveLength(1);
+    pushEose(mustSubOn(reopened, RELAY));
+    await settle(fixture.timer, 25);
+    expect(history()).toHaveLength(1);
+    pushEose(mustSubOn(reopened, RELAY2));
+    await settle(fixture.timer, 25);
+    expect(history()).toStrictEqual([
+      { type: "history_fetched", group: GROUP },
+      { type: "history_fetched", group: GROUP },
+    ]);
+    await fixture.client.close();
+  });
+
+  test("a historyFetched queued before the suspicion is dropped", async () => {
+    const script = freshScript();
+    script.groups = [snapshot([RELAY])];
+    const fixture = await open(
+      script,
+      encodeClientState({
+        nip44Extended: true,
+        cursors: { [groupCursorKey(ROUTE, RELAY)]: 1000 },
+        inbox: [],
+      }),
+    );
+    await settle(fixture.timer, 5000);
+    const sub = mustSub(groupSubs(fixture.network));
+    const history = (): BridgeRequest[] =>
+      script.calls.filter((call) => call.type === "history_fetched");
+
+    // Park one ingest on the op queue so the EOSE's historyFetched job
+    // waits behind it — the position a suspicion lands in mid-flight.
+    const gates: IngestGate[] = [];
+    script.ingestGate = async () => {
+      await new Promise<void>((resolve, reject) => {
+        gates.push({
+          ok: resolve,
+          fail: () => {
+            reject(new Error("ingest down"));
+          },
+        });
+      });
+    };
+    push(sub, groupEvent(1500n));
+    await settle(fixture.timer, 25);
+    pushEose(sub);
+    await settle(fixture.timer, 0);
+
+    // The parked ingest's own drain delivers the suspicion: the queued
+    // report is stale by the time it runs and must be skipped.
+    script.drains.push({
+      type: "events",
+      events: [{ type: "group_stall_suspected", group: GROUP }],
+    });
+    popGate(gates).ok();
+    await settle(fixture.timer, 25);
+    expect(history()).toHaveLength(0);
+
+    // The reopened subs' EOSE is the only report that lands.
+    const reopened = groupSubs(fixture.network).filter((entry) => entry.open);
+    expect(reopened.length).toBeGreaterThan(0);
+    for (const entry of reopened) {
+      expect(entry.filters[0]?.since).toBeUndefined();
+    }
+    pushEose(mustSub(reopened));
+    await settle(fixture.timer, 25);
+    expect(history()).toStrictEqual([{ type: "history_fetched", group: GROUP }]);
+    await fixture.client.close();
+  });
+
+  test("group_stalled reaches onGroupChange", async () => {
+    const script = freshScript();
+    script.groups = [snapshot()];
+    const fixture = await open(
+      script,
+      encodeClientState({ nip44Extended: true, cursors: {}, inbox: [] }),
+    );
+    await settle(fixture.timer, 5000);
+    const changes: string[] = [];
+    fixture.client.onGroupChange((event) => changes.push(event.type));
+    script.drains.push({
+      type: "events",
+      events: [{ type: "group_stalled", group: GROUP }],
+    });
+    await fixture.client.groups();
+    expect(changes).toStrictEqual(["group_stalled"]);
+    await fixture.client.close();
+  });
+
+  test("rejoin_offered reaches onGroupChange", async () => {
+    const script = freshScript();
+    script.groups = [snapshot()];
+    const fixture = await open(
+      script,
+      encodeClientState({ nip44Extended: true, cursors: {}, inbox: [] }),
+    );
+    await settle(fixture.timer, 5000);
+    const changes: string[] = [];
+    fixture.client.onGroupChange((event) => changes.push(event.type));
+    script.drains.push({
+      type: "events",
+      events: [{ type: "rejoin_offered", group: GROUP }],
+    });
+    await fixture.client.groups();
+    expect(changes).toStrictEqual(["rejoin_offered"]);
     await fixture.client.close();
   });
 });

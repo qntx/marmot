@@ -46,6 +46,18 @@ pub struct ReportPublishRequest {
     pub results: Vec<RelayResult>,
 }
 
+/// Audit the account's `KeyPackage` slot for foreign publications.
+///
+/// `events` is every kind-30443 event the host read for this account's
+/// slot from its write relays; the session outranks any foreign
+/// publication inside the future-skew window.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuditKeyPackageSlotRequest {
+    /// The read-back slot publications, own and foreign alike.
+    pub events: Vec<Event>,
+}
+
 /// Ensure the account's `KeyPackage` slot carries a live publication.
 ///
 /// Stage/sign/queue a replacement when due, republish the remembered
@@ -87,6 +99,8 @@ pub struct CreateGroupRequest {
     pub relays: Vec<String>,
     /// Founding invitees (the creator is always a member).
     pub invitees: Vec<Invitee>,
+    /// Founding invitees for this account's other devices.
+    pub own_devices: Vec<Invitee>,
     /// Additional founding admins besides the creator, 32-byte hex each.
     #[serde(with = "hex_str_seq")]
     pub admins: Vec<[u8; 32]>,
@@ -355,6 +369,54 @@ pub struct SelectKeyPackagesRequest {
     pub group: Option<Vec<u8>>,
 }
 
+/// List the group's stored replacement-Welcome offers awaiting consent.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RejoinOffersRequest {
+    /// The group, hex.
+    #[serde(with = "hex_bytes")]
+    pub group: Vec<u8>,
+}
+
+/// Consent to a stored replacement Welcome (installs the new copy).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConfirmRejoinRequest {
+    /// The group, hex.
+    #[serde(with = "hex_bytes")]
+    pub group: Vec<u8>,
+    /// The offer's kind-1059 wrap id, hex.
+    #[serde(with = "hex_str")]
+    pub offer: [u8; 32],
+    /// The consent token the offer carried, hex.
+    #[serde(with = "hex_str")]
+    pub token: [u8; 32],
+}
+
+/// Decline a stored replacement Welcome (retires the offer).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeclineRejoinRequest {
+    /// The offer's kind-1059 wrap id, hex.
+    #[serde(with = "hex_str")]
+    pub offer: [u8; 32],
+}
+
+/// Remove a stuck member account, then re-invite it once the removal
+/// confirms (the admin's two-phase re-add).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReaddMemberRequest {
+    /// The group, hex.
+    #[serde(with = "hex_bytes")]
+    pub group: Vec<u8>,
+    /// The member account to re-add, 32-byte hex.
+    #[serde(with = "hex_str")]
+    pub account: [u8; 32],
+    /// The account's current `KeyPackage` invitees.
+    pub invitees: Vec<Invitee>,
+}
+
 /// A `call` request. The `"type"` tag must appear in
 /// [`crate::protocol::REQUEST_TYPES`] before decode; anything else answers
 /// `unsupported`.
@@ -373,6 +435,8 @@ pub enum Request {
     ReportPublish(ReportPublishRequest),
     /// Ensure the account `KeyPackage` slot's publication lifecycle.
     EnsureKeyPackage(EnsureKeyPackageRequest),
+    /// Audit the account `KeyPackage` slot for foreign publications.
+    AuditKeyPackageSlot(AuditKeyPackageSlotRequest),
     /// Read the account `KeyPackage` slot's lifecycle standing.
     KeyPackageStatus(NoArgs),
     /// Withdraw the `KeyPackage` slot and leave member groups.
@@ -433,4 +497,12 @@ pub enum Request {
     ForgetGroup(ForgetGroupRequest),
     /// Select invitee `KeyPackage` publications.
     SelectKeyPackages(SelectKeyPackagesRequest),
+    /// List the group's stored rejoin offers.
+    RejoinOffers(RejoinOffersRequest),
+    /// Consent to a stored replacement Welcome.
+    ConfirmRejoin(ConfirmRejoinRequest),
+    /// Decline a stored replacement Welcome.
+    DeclineRejoin(DeclineRejoinRequest),
+    /// Remove a stuck member and re-invite it on confirm.
+    ReaddMember(ReaddMemberRequest),
 }

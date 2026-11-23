@@ -273,10 +273,45 @@ async fn main() {
     while let Some(seq) = session.awaiting_durability() {
         session.acknowledge_durable(seq);
     }
+    // A D2 stall-detector row at the group's epoch with its refetch
+    // request open — `Session::open` re-issues the suspicion and the
+    // snapshot's `access` read decodes the row again.
+    let mut seed_rows = host.durable_rows();
+    let mut stall_key = vec![43u8]; // Table::GroupStall
+    stall_key.extend_from_slice(&(group.0.len() as u32).to_be_bytes());
+    stall_key.extend_from_slice(&group.0);
+    let stall_value = serde_json::to_vec(&serde_json::json!({
+        "epoch": session.group(&group).expect("snapshot").epoch,
+        "welcome": null,
+        "events": [
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        ],
+        "refetch": "requested",
+        "stalled": true,
+    }))
+    .expect("stall row json");
+    seed_rows.push((stall_key, stall_value));
+    // A D2 re-add intent row for a foreign account: `tick`'s
+    // drive_readds pass decodes it and re-derives whether the staged
+    // Invite is still owed.
+    let mut readd_key = vec![44u8]; // Table::Readd
+    readd_key.extend_from_slice(&(group.0.len() as u32).to_be_bytes());
+    readd_key.extend_from_slice(&group.0);
+    readd_key.extend_from_slice(&[0xaau8; 32]); // foreign account
+    let readd_value = serde_json::to_vec(&serde_json::json!({
+        "invitees": [{
+            "key_package": kp_json,
+            "inbox_relays": ["ws://localhost:7777"],
+        }],
+    }))
+    .expect("readd row json");
+    seed_rows.push((readd_key, readd_value));
     write(
         &corpus,
         "session_rows",
         "rows-0",
-        &mk_bridge::encode_rows(&host.durable_rows()),
+        &mk_bridge::encode_rows(&seed_rows),
     );
 }

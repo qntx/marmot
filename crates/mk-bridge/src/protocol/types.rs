@@ -686,6 +686,8 @@ pub enum DropReason {
     Unverifiable,
     /// The event's tags or payload failed validation.
     Malformed,
+    /// A device-group pairing kind (452–477) arrived in a chat.
+    Reserved,
     /// An `mk-core` drop reason this wire version does not know.
     Unmapped,
 }
@@ -697,6 +699,7 @@ impl From<core::DropReason> for DropReason {
             core::DropReason::Unauthorized => Self::Unauthorized,
             core::DropReason::Unverifiable => Self::Unverifiable,
             core::DropReason::Malformed => Self::Malformed,
+            core::DropReason::Reserved => Self::Reserved,
             // `DropReason` is `#[non_exhaustive]`.
             _ => Self::Unmapped,
         }
@@ -918,6 +921,91 @@ impl From<core::GroupState> for GroupState {
             core::GroupState::Removed => Self::Removed,
             core::GroupState::Disbanded => Self::Disbanded,
             // `GroupState` is `#[non_exhaustive]`.
+            _ => Self::Unmapped,
+        }
+    }
+}
+
+/// Whether this device's local copy of a group can still read it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GroupAccess {
+    /// The local copy reads and writes normally.
+    Active,
+    /// This device's leaf was removed; the account still has a leaf.
+    RemovedDevice,
+    /// The account no longer has any leaf in the group.
+    Removed,
+    /// The copy cannot select a canonical branch.
+    Unrecoverable,
+    /// The stall detector flagged the copy as behind.
+    Stalled,
+    /// An `mk-core` access this wire version does not know.
+    Unmapped,
+}
+
+impl From<core::GroupAccess> for GroupAccess {
+    fn from(access: core::GroupAccess) -> Self {
+        match access {
+            core::GroupAccess::Active => Self::Active,
+            core::GroupAccess::RemovedDevice => Self::RemovedDevice,
+            core::GroupAccess::Removed => Self::Removed,
+            core::GroupAccess::Unrecoverable => Self::Unrecoverable,
+            core::GroupAccess::Stalled => Self::Stalled,
+            // `GroupAccess` is `#[non_exhaustive]`.
+            _ => Self::Unmapped,
+        }
+    }
+}
+
+/// A stored replacement-Welcome offer awaiting the recipient's consent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RejoinOffer {
+    /// The kind-1059 wrap id carrying the offer, hex.
+    #[serde(with = "hex_str")]
+    pub offer: [u8; 32],
+    /// The admin who authored the re-invite, 32-byte hex.
+    #[serde(with = "hex_str")]
+    pub author: [u8; 32],
+    /// The group epoch the Welcome installs, decimal string.
+    #[serde(with = "u64_str")]
+    pub epoch: u64,
+    /// The consent token, hex.
+    #[serde(with = "hex_str")]
+    pub token: [u8; 32],
+}
+
+impl From<core::RejoinOffer> for RejoinOffer {
+    fn from(offer: core::RejoinOffer) -> Self {
+        Self {
+            offer: offer.offer.0,
+            author: offer.author.0,
+            epoch: offer.epoch,
+            token: offer.token,
+        }
+    }
+}
+
+/// What `readd_member` staged.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReaddOutcome {
+    /// The account held a leaf: `RemoveMembers` staged; the Invite
+    /// follows once it confirms.
+    Removed,
+    /// The account held no leaf: the Invite staged directly.
+    Invited,
+    /// An `mk-core` outcome this wire version does not know.
+    Unmapped,
+}
+
+impl From<core::ReaddOutcome> for ReaddOutcome {
+    fn from(outcome: core::ReaddOutcome) -> Self {
+        match outcome {
+            core::ReaddOutcome::Removed => Self::Removed,
+            core::ReaddOutcome::Invited => Self::Invited,
+            // `ReaddOutcome` is `#[non_exhaustive]`.
             _ => Self::Unmapped,
         }
     }
@@ -1515,6 +1603,27 @@ pub enum SessionEvent {
         #[serde(with = "hex_bytes")]
         group: Vec<u8>,
     },
+    /// The stall detector suspects the group is behind; the host should
+    /// refetch it once.
+    GroupStallSuspected {
+        /// The group, hex.
+        #[serde(with = "hex_bytes")]
+        group: Vec<u8>,
+    },
+    /// The group's refetch left the deferred count full — the copy is
+    /// flagged stalled.
+    GroupStalled {
+        /// The group, hex.
+        #[serde(with = "hex_bytes")]
+        group: Vec<u8>,
+    },
+    /// A stored replacement Welcome for the group needs the recipient's
+    /// consent — `rejoin_offers` names the pending offers.
+    RejoinOffered {
+        /// The group, hex.
+        #[serde(with = "hex_bytes")]
+        group: Vec<u8>,
+    },
     /// An outbound obligation reached a resolution checkpoint.
     PublishResolved {
         /// The outbound item, hex.
@@ -1670,6 +1779,11 @@ impl SessionEvent {
             core::SessionEvent::GroupUnrecoverable { group } => {
                 Self::GroupUnrecoverable { group: group.0 }
             }
+            core::SessionEvent::GroupStallSuspected { group } => {
+                Self::GroupStallSuspected { group: group.0 }
+            }
+            core::SessionEvent::GroupStalled { group } => Self::GroupStalled { group: group.0 },
+            core::SessionEvent::RejoinOffered { group } => Self::RejoinOffered { group: group.0 },
             core::SessionEvent::PublishResolved {
                 outbound,
                 resolution,
@@ -1717,7 +1831,7 @@ impl From<core::key_package::KeyPackageInfo> for KeyPackageInfo {
     }
 }
 
-/// One member in a [`GroupSnapshot`].
+/// One member in a [`GroupSnapshot`]: one entry per account.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MemberSnapshot {
@@ -1726,6 +1840,8 @@ pub struct MemberSnapshot {
     pub account: [u8; 32],
     /// Whether the member is in the admin-policy set.
     pub admin: bool,
+    /// The account's leaf count — how many devices it holds.
+    pub devices: u32,
 }
 
 /// A UI-facing snapshot of one group.
@@ -1744,6 +1860,8 @@ pub struct GroupSnapshot {
     pub epoch: u64,
     /// Lifecycle bucket.
     pub state: GroupState,
+    /// Whether this device can still read the group.
+    pub access: GroupAccess,
     /// Members (account + admin flag).
     pub members: Vec<MemberSnapshot>,
     /// The group's Nostr routing relays.
@@ -1776,12 +1894,14 @@ impl From<core::GroupSnapshot> for GroupSnapshot {
             description: snapshot.description,
             epoch: snapshot.epoch,
             state: snapshot.state.into(),
+            access: snapshot.access.into(),
             members: snapshot
                 .members
                 .into_iter()
                 .map(|member| MemberSnapshot {
                     account: member.account.0,
                     admin: member.admin,
+                    devices: member.devices,
                 })
                 .collect(),
             relays: snapshot.relays,

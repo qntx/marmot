@@ -31,6 +31,7 @@ function toFilter(filter: RelayFilter): Filter {
     ...(filter["#p"] === undefined ? {} : { "#p": filter["#p"] }),
     ...(filter["#h"] === undefined ? {} : { "#h": filter["#h"] }),
     ...(filter["#k"] === undefined ? {} : { "#k": filter["#k"] }),
+    ...(filter["#d"] === undefined ? {} : { "#d": filter["#d"] }),
     ...(filter.since === undefined ? {} : { since: filter.since }),
     ...(filter.limit === undefined ? {} : { limit: filter.limit }),
   };

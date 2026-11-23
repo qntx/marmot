@@ -22,6 +22,7 @@
     clippy::tests_outside_test_module,
     clippy::items_after_statements,
     clippy::clone_on_ref_ptr,
+    clippy::print_stderr,
     unreachable_pub,
     reason = "scenario tests: asserts are the assertions, unwraps fail loudly"
 )]
@@ -30,13 +31,15 @@ use interop as _;
 
 mod support;
 
+use nostr::prelude::{FromBech32, PublicKey};
+use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use mk_core::media::Locator;
 use mk_core::{
     AccountId, AppMessage, AttachmentInput, CreateGroup, GroupId, GroupState, Invitee,
-    MediaMessage, SessionEvent,
+    MediaMessage, RelayResult, RelayStatus, SessionEvent,
 };
 use serde_json::Value;
 use support::*;
@@ -92,7 +95,12 @@ fn wn_group_id(created: &Value) -> String {
 /// mk-core creates a group, invites wn by its fetched `KeyPackage`, wn
 /// accepts, both rosters converge. Returns the MLS group id (asserted
 /// identical on the wn side).
-async fn mk_group_with_wn(rig: &Arc<Rig>, a: &mut Member, name: &str) -> GroupId {
+async fn mk_group_with_wn(
+    rig: &Arc<Rig>,
+    a: &mut Member,
+    name: &str,
+    admins: Vec<AccountId>,
+) -> GroupId {
     let wn_kp = until(
         || {
             let rig = Arc::clone(rig);
@@ -113,7 +121,8 @@ async fn mk_group_with_wn(rig: &Arc<Rig>, a: &mut Member, name: &str) -> GroupId
                 key_package: wn_kp,
                 inbox_relays: vec![rig.url.clone()],
             }],
-            admins: Vec::new(),
+            own_devices: Vec::new(),
+            admins,
             components: Vec::new(),
         })
         .await
@@ -270,7 +279,7 @@ async fn scenario1_mk_core_invites_wn() {
     let mut a = open_member().await;
     publish_identity(&mut a, &rig).await;
 
-    let gid = mk_group_with_wn(&rig, &mut a, "interop-1").await;
+    let gid = mk_group_with_wn(&rig, &mut a, "interop-1", Vec::new()).await;
     let wn_gid = gid.to_string();
 
     wn_says(&rig, &mut a, &gid, &wn_gid, "hello-from-wn").await;
@@ -346,7 +355,7 @@ async fn scenario3_bulk_and_membership() {
     publish_identity(&mut a, &rig).await;
     let a_hex = a.account_hex();
 
-    let gid = mk_group_with_wn(&rig, &mut a, "interop-3").await;
+    let gid = mk_group_with_wn(&rig, &mut a, "interop-3", Vec::new()).await;
     let wn_gid = gid.to_string();
 
     // wn sends its share through the CLI (CLI-bound, ~35 ms/msg in the
@@ -926,7 +935,7 @@ async fn scenario5_media_round_trip() {
 }
 
 fn out_path_exists(path: &str) -> bool {
-    std::path::Path::new(path).is_file()
+    Path::new(path).is_file()
 }
 
 // ---- scenario 6: agent text stream anchors --------------------------------
@@ -1249,7 +1258,8 @@ async fn scenario17_second_device_signs_out() {
     )
     .await;
 
-    // The signed-out device follows the commit to `Removed`.
+    // The signed-out device follows the commit to `Removed`; the account
+    // keeps a leaf through a1, so `access` is `RemovedDevice`.
     let gid2 = gid.clone();
     until_member(
         &mut a2,
@@ -1258,15 +1268,14 @@ async fn scenario17_second_device_signs_out() {
             let rig = Arc::clone(&rig);
             Box::pin(async move {
                 let _ = sync(&mut *a, &rig, &gid2).await;
-                let removed = a
-                    .session
-                    .group(&gid2)
-                    .expect("group")
-                    .is_some_and(|s| s.state == GroupState::Removed);
+                let removed = a.session.group(&gid2).expect("group").is_some_and(|s| {
+                    s.state == GroupState::Removed
+                        && s.access == mk_core::GroupAccess::RemovedDevice
+                });
                 removed.then_some(())
             })
         },
-        "a2 is removed",
+        "a2 is removed (device-scoped)",
         120_000,
     )
     .await;
@@ -1337,4 +1346,1303 @@ async fn scenario21_post_join_self_update() {
 
     rig.relay.shutdown();
     eprintln!("SCENARIO-21 PASS {:.1}s", start.elapsed().as_secs_f64());
+}
+
+// ---- scenario 20: stall detection + consented repair ------------------
+
+/// S20 (D2): wn is the admin of a group holding two devices of one
+/// account of ours. wn renames the group (one Commit) and sends three
+/// messages; the commit is withheld from device 1's feed only. Three
+/// deferred events suspect the stall once; one unfloored refetch still
+/// lacking the commit flags `access: Stalled` while device 2 stays
+/// `Active`. wn then removes and re-invites the account: device 2's
+/// removed copy reinstalls from its new Welcome without consent, device
+/// 1's stalled copy gets a consent-required `RejoinOffered`, and after
+/// `confirm_rejoin` both devices exchange messages with wn again.
+///
+/// Our first device creates the group and seats wn as an admin rather
+/// than joining a wn-created one: a copy installed through a Welcome
+/// keeps `local_copy_welcome_created_at`, and the stall counter's
+/// `transport_message_predates_local_copy` filter drops every event
+/// inside the five-minute post-Welcome clock-skew window — on wall-clock
+/// time nothing wn emits during the test would ever count. A
+/// self-created copy has no Welcome floor, so the withheld wn commit
+/// defers the chats for real.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[ignore = "needs wn/wnd built from the upstream.json wn pin; see CONTRIBUTING"]
+async fn scenario20_stall_and_repair() {
+    let start = Instant::now();
+    let rig = Arc::new(rig("s20").await);
+
+    // Two devices of one account; each holds a leaf of the group.
+    let signer = Arc::new(mk_core::testing::LocalSigner::from_secret([0x20; 32]).expect("secret"));
+    let mut a1 = open_member_with(Arc::clone(&signer)).await;
+    let mut a2 = open_member_with(signer).await;
+    publish_identity(&mut a1, &rig).await;
+    publish_identity(&mut a2, &rig).await;
+    let a_npub = a1.npub();
+    let a_hex = a1.account_hex();
+
+    // a1 founds the group with wn as an admin: the founding invitees are
+    // wn's KeyPackage plus one fresh KeyPackage per own device.
+    let wn_account = AccountId::from_hex(&rig.wn_pub).expect("wn hex");
+    let wn_kp = until(
+        || {
+            let rig = Arc::clone(&rig);
+            async move { fetch_key_package(&rig, &rig.wn_pub).await }
+        },
+        "wn key package on relay",
+        60_000,
+        1_500,
+    )
+    .await;
+    // a2's founding-invitee KeyPackage: the creator's own leaf is already
+    // a member, so only a2 needs an invitee. The relay can also hold a
+    // same-slot replacement (same leaf signature key — a Commit cannot
+    // add two leaves with one key), so select per `d` slot and drop a1's
+    // slot entirely.
+    let a1_slot = hex::encode(a1.session.key_package_status().expect("status").slot);
+    let a2_kp = until(
+        || {
+            let rig = Arc::clone(&rig);
+            let a_hex = a_hex.clone();
+            let a1_slot = a1_slot.clone();
+            async move {
+                let kps = fetch(&rig, key_package_filter(&a_hex)).await;
+                mk_core::key_package::select_key_packages(
+                    AccountId::from_hex(&a_hex).expect("hex"),
+                    &kps,
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .expect("clock")
+                        .as_secs(),
+                )
+                .into_iter()
+                .find(|event| tag_value(event, "d") != Some(a1_slot.as_str()))
+            }
+        },
+        "a2's KeyPackage on relay",
+        60_000,
+        1_500,
+    )
+    .await;
+    let invitees = vec![Invitee {
+        key_package: wn_kp,
+        inbox_relays: vec![rig.url.clone()],
+    }];
+    let own_devices = vec![Invitee {
+        key_package: a2_kp,
+        inbox_relays: vec![rig.url.clone()],
+    }];
+    let gid = a1
+        .session
+        .create_group(CreateGroup {
+            name: "interop-20".to_owned(),
+            description: String::new(),
+            relays: vec![rig.url.clone()],
+            invitees,
+            own_devices,
+            admins: vec![wn_account],
+            components: Vec::new(),
+        })
+        .await
+        .expect("create_group");
+    flush(&mut a1, &rig).await;
+    let wn_gid = gid.to_string();
+
+    // a2 installs its copy from its own wrap of the founding invite.
+    let gid_a2 = gid.clone();
+    let account_hex2 = a_hex.clone();
+    until_member(
+        &mut a2,
+        |a| {
+            let gid = gid_a2.clone();
+            let account_hex = account_hex2.clone();
+            let rig = Arc::clone(&rig);
+            Box::pin(async move {
+                let wraps = fetch_welcomes(&rig, &account_hex).await;
+                let events = ingest(&mut *a, wraps).await;
+                events
+                    .iter()
+                    .any(|event| {
+                        matches!(event, SessionEvent::GroupJoined { group } if *group == gid)
+                    })
+                    .then_some(())
+            })
+        },
+        "a2 welcome join",
+        90_000,
+    )
+    .await;
+
+    // wn accepts the invite; the roster shows three leaves.
+    let found = until(
+        || {
+            let rig = Arc::clone(&rig);
+            async move { wn_invite_gid(&rig) }
+        },
+        "wn invite appears",
+        90_000,
+        1_500,
+    )
+    .await;
+    assert_eq!(found, wn_gid, "group id match");
+    wn(
+        &rig.home,
+        &rig.socket,
+        Some(&rig.wn_npub),
+        &["groups", "accept", &wn_gid],
+    );
+    let wn_gid_ref = wn_gid.clone();
+    until(
+        || {
+            let rig = Arc::clone(&rig);
+            let wn_gid = wn_gid_ref.clone();
+            async move { (wn_members(&rig, &wn_gid).len() >= 2).then_some(()) }
+        },
+        "wn roster shows both accounts",
+        90_000,
+        1_500,
+    )
+    .await;
+    sleep(Duration::from_millis(WND_SETTLE_MS)).await;
+
+    // Both devices converge on the {wn, A, A} roster.
+    for (i, member) in [&mut a1, &mut a2].into_iter().enumerate() {
+        let gid_ref = gid.clone();
+        let wn_pub = rig.wn_pub.clone();
+        until_member(
+            member,
+            |a| {
+                let gid = gid_ref.clone();
+                let wn_pub = wn_pub.clone();
+                let rig = Arc::clone(&rig);
+                Box::pin(async move {
+                    let _ = sync(&mut *a, &rig, &gid).await;
+                    a.roster(&gid).contains(&wn_pub).then_some(())
+                })
+            },
+            if i == 0 {
+                "a1 roster includes wn"
+            } else {
+                "a2 roster includes wn"
+            },
+            90_000,
+        )
+        .await;
+    }
+
+    // Everything currently on the group route is already ingested.
+    let route = a1.route_hex(&gid);
+    let seen: std::collections::BTreeSet<mk_core::EventId> = fetch_group(&rig, &route)
+        .await
+        .into_iter()
+        .map(|event| event.id)
+        .collect();
+
+    // The rename is one commit; the three chats ride it. Capture the
+    // commit before the chats go out — picking "the earliest fresh event"
+    // afterwards is not deterministic because a chat that shares the
+    // commit's `created_at` second can sort first by id. Everything the
+    // rename step publishes is withheld, so the chats cannot reach their
+    // epoch and stay transport-deferred.
+    wn(
+        &rig.home,
+        &rig.socket,
+        Some(&rig.wn_npub),
+        &["groups", "rename", &wn_gid, "interop-20-renamed"],
+    );
+    let last_seen = std::cell::RefCell::new(std::collections::BTreeSet::<mk_core::EventId>::new());
+    let dropped: std::collections::BTreeSet<mk_core::EventId> = until(
+        || {
+            let rig = Arc::clone(&rig);
+            let seen = seen.clone();
+            let route = route.clone();
+            let last_seen = &last_seen;
+            async move {
+                let fresh: std::collections::BTreeSet<mk_core::EventId> = fetch_group(&rig, &route)
+                    .await
+                    .into_iter()
+                    .filter(|event| !seen.contains(&event.id))
+                    .map(|event| event.id)
+                    .collect();
+                // The commit set is trusted only once it stays unchanged
+                // between two polls — a stray that arrives before the
+                // rename lands must not close the window early.
+                let mut last = last_seen.borrow_mut();
+                if !fresh.is_empty() && fresh == *last {
+                    Some(fresh)
+                } else {
+                    *last = fresh;
+                    None
+                }
+            }
+        },
+        "wn's rename commit on the route",
+        90_000,
+        800,
+    )
+    .await;
+    for i in 0..3 {
+        wn_send(&rig, &wn_gid, &format!("s20-m{i}"));
+    }
+    let without_commit: Vec<mk_core::Event> = until(
+        || {
+            let rig = Arc::clone(&rig);
+            let seen = seen.clone();
+            let dropped = dropped.clone();
+            let route = route.clone();
+            async move {
+                let fresh: Vec<mk_core::Event> = fetch_group(&rig, &route)
+                    .await
+                    .into_iter()
+                    .filter(|event| !seen.contains(&event.id) && !dropped.contains(&event.id))
+                    .collect();
+                (fresh.len() >= 3).then_some(fresh)
+            }
+        },
+        "wn's three chats on the route",
+        90_000,
+        800,
+    )
+    .await;
+
+    // Exactly one suspicion across the withheld feed on device 1.
+    let events = ingest(&mut a1, without_commit).await;
+    let suspected = events
+        .iter()
+        .filter(
+            |event| matches!(event, SessionEvent::GroupStallSuspected { group } if *group == gid),
+        )
+        .count();
+    assert_eq!(suspected, 1, "three deferred events suspect once");
+
+    // The one refetch still cannot land the missing commit: the counter
+    // stays full at the same epoch and the copy flags `Stalled`.
+    let refetch: Vec<mk_core::Event> = fetch_group(&rig, &route)
+        .await
+        .into_iter()
+        .filter(|event| !dropped.contains(&event.id))
+        .collect();
+    let _ = ingest(&mut a1, refetch).await;
+    a1.session.history_fetched(&gid).expect("history_fetched");
+    let events = a1.session.drain_events().expect("drain");
+    let stalled = events
+        .iter()
+        .filter(|event| matches!(event, SessionEvent::GroupStalled { group } if *group == gid))
+        .count();
+    assert_eq!(stalled, 1, "one stalled event after the refetch");
+    let snapshot = a1.session.group(&gid).expect("group").expect("snapshot");
+    assert_eq!(snapshot.access, mk_core::GroupAccess::Stalled);
+
+    // Device 2 followed the whole feed and stays Active.
+    let _ = sync(&mut a2, &rig, &gid).await;
+    let snapshot = a2.session.group(&gid).expect("group").expect("snapshot");
+    assert_eq!(snapshot.access, mk_core::GroupAccess::Active);
+
+    // Repair: wn removes the whole account, then re-invites it. Device 2
+    // must apply the removal before the re-add wraps reach it — arriving
+    // while it still held a leaf would park a consent-required offer.
+    wn(
+        &rig.home,
+        &rig.socket,
+        Some(&rig.wn_npub),
+        &["groups", "remove-members", &wn_gid, &a_npub],
+    );
+    let a2_events = Arc::new(std::sync::Mutex::new(Vec::<SessionEvent>::new()));
+    let gid_a2 = gid.clone();
+    let a2_events_ref = Arc::clone(&a2_events);
+    until_member(
+        &mut a2,
+        |a| {
+            let gid = gid_a2.clone();
+            let rig = Arc::clone(&rig);
+            let a2_events = Arc::clone(&a2_events_ref);
+            Box::pin(async move {
+                let events = sync(&mut *a, &rig, &gid).await;
+                a2_events.lock().expect("events").extend(events);
+                let removed = a.session.group(&gid).expect("group").is_some_and(|s| {
+                    matches!(
+                        s.access,
+                        mk_core::GroupAccess::Removed | mk_core::GroupAccess::RemovedDevice
+                    )
+                });
+                removed.then_some(())
+            })
+        },
+        "a2 removed by wn",
+        120_000,
+    )
+    .await;
+    wn(
+        &rig.home,
+        &rig.socket,
+        Some(&rig.wn_npub),
+        &["groups", "add-members", &wn_gid, &a_npub],
+    );
+
+    // Device 2's removed copy reinstalls from its new Welcome on its own —
+    // no consent, no `RejoinOffered` across the whole repair.
+    let gid_a2 = gid.clone();
+    let account_hex2 = a_hex.clone();
+    let a2_events_ref = Arc::clone(&a2_events);
+    until_member(
+        &mut a2,
+        |a| {
+            let gid = gid_a2.clone();
+            let account_hex = account_hex2.clone();
+            let rig = Arc::clone(&rig);
+            let a2_events = Arc::clone(&a2_events_ref);
+            Box::pin(async move {
+                let wraps = fetch_welcomes(&rig, &account_hex).await;
+                let events = ingest(&mut *a, wraps).await;
+                a2_events
+                    .lock()
+                    .expect("events")
+                    .extend(events.iter().cloned());
+                let joined = events.iter().any(
+                    |event| matches!(event, SessionEvent::GroupJoined { group } if *group == gid),
+                );
+                let active = a
+                    .session
+                    .group(&gid)
+                    .expect("group")
+                    .is_some_and(|s| s.access == mk_core::GroupAccess::Active);
+                (joined || active).then_some(())
+            })
+        },
+        "a2 auto-installs the re-add welcome",
+        120_000,
+    )
+    .await;
+    assert!(
+        !a2_events
+            .lock()
+            .expect("events")
+            .iter()
+            .any(|event| matches!(event, SessionEvent::RejoinOffered { .. })),
+        "a healthy sibling never sees a consent offer"
+    );
+    let snapshot = a2.session.group(&gid).expect("group").expect("snapshot");
+    assert_eq!(snapshot.access, mk_core::GroupAccess::Active);
+    flush(&mut a2, &rig).await;
+
+    // Device 1's stalled copy cannot apply the removal commit, so the
+    // re-add wrap parks a consent-required offer on it.
+    let gid_a1 = gid.clone();
+    let account_hex1 = a_hex.clone();
+    until_member(
+        &mut a1,
+        |a| {
+            let gid = gid_a1.clone();
+            let account_hex = account_hex1.clone();
+            let rig = Arc::clone(&rig);
+            Box::pin(async move {
+                let wraps = fetch_welcomes(&rig, &account_hex).await;
+                let events = ingest(&mut *a, wraps).await;
+                events
+                    .iter()
+                    .any(|event| {
+                        matches!(event, SessionEvent::RejoinOffered { group } if *group == gid)
+                    })
+                    .then_some(())
+            })
+        },
+        "a1 rejoin offer",
+        120_000,
+    )
+    .await;
+    let offers = a1.session.rejoin_offers(&gid).expect("rejoin_offers");
+    assert_eq!(offers.len(), 1, "one re-add offer for a1");
+    assert_eq!(offers[0].author, wn_account, "the admin authored it");
+    a1.session
+        .confirm_rejoin(&gid, &offers[0].offer, &offers[0].token)
+        .await
+        .expect("confirm_rejoin");
+    let events = a1.session.drain_events().expect("drain");
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, SessionEvent::GroupJoined { group } if *group == gid)),
+        "confirm installs the replacement copy"
+    );
+    let snapshot = a1.session.group(&gid).expect("group").expect("snapshot");
+    assert_eq!(snapshot.access, mk_core::GroupAccess::Active);
+    flush(&mut a1, &rig).await;
+
+    // wn's next message reaches both devices at the repaired epoch; a
+    // message from each device reaches wn.
+    wn_send(&rig, &wn_gid, "s20-after-rejoin");
+    let wanted = "s20-after-rejoin".to_owned();
+    for (i, member) in [&mut a1, &mut a2].into_iter().enumerate() {
+        let gid_ref = gid.clone();
+        let wanted = wanted.clone();
+        until_member(
+            member,
+            |a| {
+                let gid = gid_ref.clone();
+                let wanted = wanted.clone();
+                let rig = Arc::clone(&rig);
+                Box::pin(async move {
+                    let events = sync(&mut *a, &rig, &gid).await;
+                    received(&events)
+                        .iter()
+                        .any(|content| content.contains(&wanted))
+                        .then_some(())
+                })
+            },
+            if i == 0 {
+                "a1 reads wn after rejoin"
+            } else {
+                "a2 reads wn after rejoin"
+            },
+            90_000,
+        )
+        .await;
+    }
+    member_says(&rig, &mut a1, &gid, &wn_gid, "s20-d1-says").await;
+    member_says(&rig, &mut a2, &gid, &wn_gid, "s20-d2-says").await;
+
+    rig.relay.shutdown();
+    eprintln!("SCENARIO-20 PASS {:.1}s", start.elapsed().as_secs_f64());
+}
+
+// ---- scenario 22: the admin re-adds a stuck member --------------------
+
+/// S22 (D2): we are the admin of a group holding a wn member. One of our
+/// commits is withheld from the relay — our session hears `Accepted`
+/// while wn never learns the epoch — and a chat rides it that wn cannot
+/// read. `readd_member` stages the removal, the removal's confirmation
+/// stages exactly one Invite, and wn's stalled copy surfaces a
+/// consent-required rejoin offer through `groups recovery-status`;
+/// `confirm-rejoin` installs the replacement copy and the round trip
+/// recovers. Whatever wn publishes toward recovery on its own (kind-1159
+/// requests), our side must stage nothing in response.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs wn/wnd built from the upstream.json wn pin; see CONTRIBUTING"]
+async fn scenario22_readd_member() {
+    let start = Instant::now();
+    let rig = Arc::new(rig("s22").await);
+    let mut a = open_member().await;
+    publish_identity(&mut a, &rig).await;
+    let gid = mk_group_with_wn(&rig, &mut a, "interop-22", Vec::new()).await;
+    let wn_gid = gid.to_string();
+
+    // A rename is one self-contained commit at the new epoch. It never
+    // reaches the relay, but the session hears `Accepted` so the publish
+    // resolves and our epoch moves — wn is stuck behind it for good.
+    a.session
+        .update_group_profile(&gid, Some("interop-22-moved".to_owned()), None)
+        .await
+        .expect("rename");
+    if let Some(seq) = a.session.awaiting_durability() {
+        a.session.acknowledge_durable(seq);
+    }
+    let withheld = a.session.take_outbound().expect("take_outbound");
+    assert!(!withheld.is_empty(), "the rename stages an outbound commit");
+    for item in &withheld {
+        let results: Vec<RelayResult> = item
+            .relays
+            .iter()
+            .map(|relay| RelayResult {
+                relay: relay.clone(),
+                status: RelayStatus::Accepted,
+            })
+            .collect();
+        a.session
+            .report_publish(&item.id, &results)
+            .await
+            .expect("report_publish");
+    }
+    a.session
+        .send_message(&gid, chat("s22-unreadable"))
+        .await
+        .expect("chat");
+    flush(&mut a, &rig).await;
+
+    // Whatever wn does about being stuck (its kind-1159 recovery
+    // requests, if it issues them), our side stays inert: several
+    // catch-up passes must stage nothing.
+    for _ in 0..3 {
+        sleep(Duration::from_secs(2)).await;
+        let route = a.route_hex(&gid);
+        let backlog = fetch_group(&rig, &route).await;
+        let _ = ingest(&mut a, backlog).await;
+        a.session.tick().await.expect("tick");
+        let staged = a.session.take_outbound().expect("take_outbound");
+        assert!(
+            staged.is_empty(),
+            "a recovery request must stage nothing: {staged:?}"
+        );
+    }
+
+    // Re-add the stuck account: `Removed` — the Invite follows once the
+    // removal commit confirms.
+    let wn_account = AccountId::from_hex(&rig.wn_pub).expect("wn hex");
+    let wn_kp = until(
+        || {
+            let rig = Arc::clone(&rig);
+            async move { fetch_key_package(&rig, &rig.wn_pub).await }
+        },
+        "wn key package on relay",
+        60_000,
+        1_500,
+    )
+    .await;
+    let outcome = a
+        .session
+        .readd_member(
+            &gid,
+            wn_account,
+            vec![Invitee {
+                key_package: wn_kp,
+                inbox_relays: vec![rig.url.clone()],
+            }],
+        )
+        .await
+        .expect("readd_member");
+    assert!(
+        matches!(outcome, mk_core::ReaddOutcome::Removed),
+        "wn still holds a leaf: {outcome:?}"
+    );
+    // Ticks drive the removal to confirmation and stage the one Invite;
+    // flushes publish both to the relay and wn's inbox.
+    for _ in 0..8 {
+        flush(&mut a, &rig).await;
+        a.session.tick().await.expect("tick");
+        flush(&mut a, &rig).await;
+    }
+
+    // wn's stalled copy holds the offer: `recovery-status` lists it with
+    // the token `confirm-rejoin` needs.
+    let wn_gid_ref = wn_gid.clone();
+    let (welcome_id, token) = until(
+        || {
+            let rig = Arc::clone(&rig);
+            let wn_gid = wn_gid_ref.clone();
+            async move {
+                let (ok, parsed) = wn_try(
+                    &rig.home,
+                    &rig.socket,
+                    Some(&rig.wn_npub),
+                    &["groups", "recovery-status", &wn_gid],
+                );
+                if !ok {
+                    return None;
+                }
+                let offers = parsed
+                    .pointer("/result/rejoin_invitations")
+                    .and_then(Value::as_array)?;
+                let offer = offers.first()?;
+                let welcome_id = offer
+                    .pointer("/welcome_id_hex")
+                    .and_then(Value::as_str)?
+                    .to_owned();
+                let token = offer
+                    .pointer("/local_state_token")
+                    .and_then(Value::as_str)?
+                    .to_owned();
+                Some((welcome_id, token))
+            }
+        },
+        "wn rejoin offer in recovery-status",
+        120_000,
+        2_000,
+    )
+    .await;
+    wn(
+        &rig.home,
+        &rig.socket,
+        Some(&rig.wn_npub),
+        &[
+            "groups",
+            "confirm-rejoin",
+            &welcome_id,
+            "--local-state-token",
+            &token,
+            "--confirm",
+        ],
+    );
+
+    // The round trip recovers: wn reads our next message and we read wn's.
+    member_says(&rig, &mut a, &gid, &wn_gid, "s22-after-readd").await;
+    wn_says(&rig, &mut a, &gid, &wn_gid, "s22-wn-replies").await;
+
+    rig.relay.shutdown();
+    eprintln!("SCENARIO-22 PASS {:.1}s", start.elapsed().as_secs_f64());
+}
+
+/// One `wn messages list` from an arbitrary home/account pair.
+fn wn_messages_at(home: &Path, socket: &Path, account: &str, group: &str) -> Vec<Value> {
+    let (ok, parsed) = wn_try(
+        home,
+        socket,
+        Some(account),
+        &["messages", "list", group, "--limit", "600"],
+    );
+    if !ok {
+        return Vec::new();
+    }
+    parsed
+        .pointer("/result/messages")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// The account's kind-30443 publications on the rig relay.
+async fn key_packages_of(rig: &Arc<Rig>, account_hex: &str) -> Vec<mk_core::Event> {
+    fetch(rig, key_package_filter(account_hex)).await
+}
+
+/// S14: a wn admin invites an account holding one wn device (a second
+/// wnd home on the same nsec) and one mk device; both join, the account
+/// shows `devices == 2` and messages flow both ways from both devices.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[ignore = "needs wn/wnd built from the upstream.json wn pin; see CONTRIBUTING"]
+async fn scenario14_wn_invites_wn_and_mk_devices() {
+    let start = Instant::now();
+    let rig = Arc::new(rig("s14").await);
+    let secret = [0x14u8; 32];
+    let signer = Arc::new(mk_core::testing::LocalSigner::from_secret(secret).expect("secret"));
+    let mut a = open_member_with(signer).await;
+    publish_identity(&mut a, &rig).await;
+    let a_npub = a.npub();
+    let a_hex = a.account_hex();
+
+    // The account's wn device: a second wnd home logged into our nsec.
+    let (home2, socket2, logs2) = extra_wn_paths("s14-wn2");
+    let _wnd2 = spawn_wnd(&home2, &socket2, &logs2, &rig.url).await;
+    wn_stdin(
+        &home2,
+        &socket2,
+        None,
+        &["login", "--nsec-stdin"],
+        &nsec(&secret),
+    );
+    let a2_npub = wn_account_npub(&home2, &socket2);
+    assert_eq!(
+        PublicKey::from_bech32(&a2_npub).expect("npub").to_hex(),
+        a_hex,
+        "the wn sibling is our account"
+    );
+    wn(&home2, &socket2, Some(&a2_npub), &["keys", "publish"]);
+
+    // wn admin invites the account; our device and the wn sibling join.
+    let created = wn(
+        &rig.home,
+        &rig.socket,
+        Some(&rig.wn_npub),
+        &["groups", "create", "interop-14", &a_npub],
+    );
+    let wn_gid = wn_group_id(&created);
+    let gid = hex_group(&wn_gid);
+    join_wn_group(&rig, &mut a, &gid).await;
+    let (home2c, socket2c) = (home2.clone(), socket2.clone());
+    let (a2_npub_c, wn_gid_c) = (a2_npub.clone(), wn_gid.clone());
+    until(
+        || {
+            let (home2c, socket2c) = (home2c.clone(), socket2c.clone());
+            let (a2_npub_c, wn_gid_c) = (a2_npub_c.clone(), wn_gid_c.clone());
+            async move {
+                let (ok, parsed) =
+                    wn_try(&home2c, &socket2c, Some(&a2_npub_c), &["groups", "invites"]);
+                let found = ok && parsed.to_string().contains(&wn_gid_c);
+                if found {
+                    wn(
+                        &home2c,
+                        &socket2c,
+                        Some(&a2_npub_c),
+                        &["groups", "accept", &wn_gid_c],
+                    );
+                }
+                found.then_some(())
+            }
+        },
+        "the wn sibling accepts the invite",
+        90_000,
+        1_500,
+    )
+    .await;
+
+    // Both leaves of the account aggregate to one member, devices 2.
+    let account = a.session.account();
+    until_member(
+        &mut a,
+        |a| {
+            let gid = gid.clone();
+            let rig = Arc::clone(&rig);
+            Box::pin(async move {
+                let _ = sync(&mut *a, &rig, &gid).await;
+                (a.session
+                    .group(&gid)
+                    .expect("group")
+                    .expect("snapshot")
+                    .members
+                    .iter()
+                    .find(|member| member.account == account)
+                    .map(|member| member.devices)
+                    == Some(2))
+                .then_some(())
+            })
+        },
+        "our account shows devices == 2",
+        120_000,
+    )
+    .await;
+
+    // Both directions, from both of the account's devices.
+    member_says(&rig, &mut a, &gid, &wn_gid, "s14-mk-to-wn").await;
+    wn_says(&rig, &mut a, &gid, &wn_gid, "s14-wn-to-mk").await;
+    wn(
+        &home2,
+        &socket2,
+        Some(&a2_npub),
+        &["messages", "send", &wn_gid, "s14-sibling-to-mk"],
+    );
+    until_member(
+        &mut a,
+        |a| {
+            let gid = gid.clone();
+            let rig = Arc::clone(&rig);
+            Box::pin(async move {
+                let events = sync(&mut *a, &rig, &gid).await;
+                received(&events)
+                    .iter()
+                    .any(|content| content.contains("s14-sibling-to-mk"))
+                    .then_some(())
+            })
+        },
+        "mk decodes the sibling's message",
+        90_000,
+    )
+    .await;
+    member_says(&rig, &mut a, &gid, &wn_gid, "s14-mk-round2").await;
+    let (home2c, socket2c) = (home2.clone(), socket2.clone());
+    let (a2_npub_c, wn_gid_c) = (a2_npub.clone(), wn_gid.clone());
+    until(
+        || {
+            let (home2c, socket2c) = (home2c.clone(), socket2c.clone());
+            let (a2_npub_c, wn_gid_c) = (a2_npub_c.clone(), wn_gid_c.clone());
+            async move {
+                wn_messages_at(&home2c, &socket2c, &a2_npub_c, &wn_gid_c)
+                    .iter()
+                    .any(|message| message.to_string().contains("s14-mk-round2"))
+                    .then_some(())
+            }
+        },
+        "the wn sibling lists our message",
+        120_000,
+        2_000,
+    )
+    .await;
+
+    rig.relay.shutdown();
+    eprintln!("SCENARIO-14 PASS {:.1}s", start.elapsed().as_secs_f64());
+}
+
+/// S16: we create a group with our second device as an `own_devices`
+/// leaf — the sibling joins from its Welcome and the account shows
+/// `devices == 2`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[ignore = "needs wn/wnd built from the upstream.json wn pin; see CONTRIBUTING"]
+async fn scenario16_found_with_own_devices() {
+    let start = Instant::now();
+    let rig = Arc::new(rig("s16").await);
+    let signer =
+        Arc::new(mk_core::testing::LocalSigner::from_secret([0x16u8; 32]).expect("secret"));
+    let mut a1 = open_member_with(Arc::clone(&signer)).await;
+    let mut a2 = open_member_with(signer).await;
+    publish_identity(&mut a1, &rig).await;
+    publish_identity(&mut a2, &rig).await;
+    let account_hex = a1.account_hex();
+
+    // The sibling slot's KeyPackage goes into `own_devices`, wn into
+    // `invitees`; the sibling is a founding member of the same group.
+    let a1_slot = hex::encode(a1.session.key_package_status().expect("status").slot);
+    let a2_kp = until(
+        || {
+            let rig = Arc::clone(&rig);
+            let account_hex = account_hex.clone();
+            let a1_slot = a1_slot.clone();
+            async move {
+                key_packages_of(&rig, &account_hex)
+                    .await
+                    .into_iter()
+                    .find(|event| {
+                        event
+                            .tags
+                            .iter()
+                            .find(|tag| tag.first().map(String::as_str) == Some("d"))
+                            .and_then(|tag| tag.get(1))
+                            .map(String::as_str)
+                            != Some(a1_slot.as_str())
+                    })
+            }
+        },
+        "sibling slot KeyPackage",
+        90_000,
+        1_500,
+    )
+    .await;
+    let wn_kp = until(
+        || {
+            let rig = Arc::clone(&rig);
+            async move { fetch_key_package(&rig, &rig.wn_pub).await }
+        },
+        "wn key package",
+        60_000,
+        1_500,
+    )
+    .await;
+    let invitee = |key_package: mk_core::Event| Invitee {
+        key_package,
+        inbox_relays: vec![rig.url.clone()],
+    };
+    let gid = a1
+        .session
+        .create_group(CreateGroup {
+            name: "interop-16".to_owned(),
+            description: String::new(),
+            relays: vec![rig.url.clone()],
+            invitees: vec![invitee(wn_kp)],
+            own_devices: vec![invitee(a2_kp)],
+            admins: Vec::new(),
+            components: Vec::new(),
+        })
+        .await
+        .expect("create_group");
+    flush(&mut a1, &rig).await;
+    join_wn_group(&rig, &mut a2, &gid).await;
+    let wn_gid = until(
+        || {
+            let rig = Arc::clone(&rig);
+            async move { wn_invite_gid(&rig) }
+        },
+        "wn invite appears",
+        90_000,
+        1_500,
+    )
+    .await;
+    assert_eq!(wn_gid, gid.to_string(), "group id match");
+    wn(
+        &rig.home,
+        &rig.socket,
+        Some(&rig.wn_npub),
+        &["groups", "accept", &wn_gid],
+    );
+
+    // Our account aggregates its two leaves; wn's members view is
+    // account-level and shows the account once.
+    let account = a1.session.account();
+    until_member(
+        &mut a1,
+        |a| {
+            let gid = gid.clone();
+            let rig = Arc::clone(&rig);
+            Box::pin(async move {
+                let _ = sync(&mut *a, &rig, &gid).await;
+                (a.session
+                    .group(&gid)
+                    .expect("group")
+                    .expect("snapshot")
+                    .members
+                    .iter()
+                    .find(|member| member.account == account)
+                    .map(|member| member.devices)
+                    == Some(2))
+                .then_some(())
+            })
+        },
+        "our account shows devices == 2",
+        120_000,
+    )
+    .await;
+    let a2_snap = sync(&mut a2, &rig, &gid).await;
+    let _ = a2_snap;
+    let a_npub = a1.npub();
+    until(
+        || {
+            let rig = Arc::clone(&rig);
+            let wn_gid = wn_gid.clone();
+            let a_npub = a_npub.clone();
+            async move {
+                (wn_members(&rig, &wn_gid)
+                    .iter()
+                    .filter(|member| member.to_string().contains(&a_npub))
+                    .count()
+                    == 1)
+                    .then_some(())
+            }
+        },
+        "wn members view shows the account once",
+        120_000,
+        1_500,
+    )
+    .await;
+
+    member_says(&rig, &mut a1, &gid, &wn_gid, "s16-a1-to-wn").await;
+    member_says(&rig, &mut a2, &gid, &wn_gid, "s16-a2-to-wn").await;
+    wn_says(&rig, &mut a1, &gid, &wn_gid, "s16-wn-to-a1").await;
+    wn_says(&rig, &mut a2, &gid, &wn_gid, "s16-wn-to-a2").await;
+
+    rig.relay.shutdown();
+    eprintln!("SCENARIO-16 PASS {:.1}s", start.elapsed().as_secs_f64());
+}
+
+/// S18: wn admin removes our account — every leaf is removed in one
+/// Commit and both of our devices end `access == removed`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[ignore = "needs wn/wnd built from the upstream.json wn pin; see CONTRIBUTING"]
+async fn scenario18_wn_removes_whole_account() {
+    let start = Instant::now();
+    let rig = Arc::new(rig("s18").await);
+    let signer =
+        Arc::new(mk_core::testing::LocalSigner::from_secret([0x18u8; 32]).expect("secret"));
+    let mut a1 = open_member_with(Arc::clone(&signer)).await;
+    let mut a2 = open_member_with(signer).await;
+    publish_identity(&mut a1, &rig).await;
+    publish_identity(&mut a2, &rig).await;
+    let a_npub = a1.npub();
+
+    let created = wn(
+        &rig.home,
+        &rig.socket,
+        Some(&rig.wn_npub),
+        &["groups", "create", "interop-18", &a_npub],
+    );
+    let wn_gid = wn_group_id(&created);
+    let gid = hex_group(&wn_gid);
+    join_wn_group(&rig, &mut a1, &gid).await;
+    join_wn_group(&rig, &mut a2, &gid).await;
+
+    wn(
+        &rig.home,
+        &rig.socket,
+        Some(&rig.wn_npub),
+        &["groups", "remove-members", &wn_gid, &a_npub],
+    );
+
+    // No leaf of the account survives on either copy: both read
+    // `access == removed`, not `removed_device`.
+    for member in [&mut a1, &mut a2] {
+        until_member(
+            member,
+            |a| {
+                let gid = gid.clone();
+                let rig = Arc::clone(&rig);
+                Box::pin(async move {
+                    let _ = sync(&mut *a, &rig, &gid).await;
+                    a.session
+                        .group(&gid)
+                        .expect("group")
+                        .is_some_and(|snap| snap.access == mk_core::GroupAccess::Removed)
+                        .then_some(())
+                })
+            },
+            "device ends access == removed",
+            120_000,
+        )
+        .await;
+    }
+    let a_hex = a1.account_hex();
+    until(
+        || {
+            let rig = Arc::clone(&rig);
+            let wn_gid = wn_gid.clone();
+            let a_hex = a_hex.clone();
+            async move {
+                (wn_members(&rig, &wn_gid)
+                    .iter()
+                    .all(|member| !member.to_string().contains(&a_hex)))
+                .then_some(())
+            }
+        },
+        "wn roster keeps no leaf of our account",
+        90_000,
+        800,
+    )
+    .await;
+
+    rig.relay.shutdown();
+    eprintln!("SCENARIO-18 PASS {:.1}s", start.elapsed().as_secs_f64());
+}
+
+/// Depth-first search for a device-link prompt id anywhere in a `wn
+/// devices link status` payload.
+fn find_prompt_id(value: &Value) -> Option<String> {
+    match value {
+        Value::Object(map) => {
+            for key in ["prompt_id", "promptId", "id"] {
+                if let Some(found) = map.get(key).and_then(Value::as_str) {
+                    return Some(found.to_owned());
+                }
+            }
+            map.values().find_map(find_prompt_id)
+        }
+        Value::Array(items) => items.iter().find_map(find_prompt_id),
+        _ => None,
+    }
+}
+
+/// Try the `wn devices link` flow end to end: `start` on the new device,
+/// `status` on both, `confirm-match` on the new, `approve` on the
+/// existing. `false` when any step refuses, so the scenario can fall
+/// back to an unlinked second home.
+async fn try_link_devices(
+    first_home: &Path,
+    first_socket: &Path,
+    first_npub: &str,
+    second_home: &Path,
+    second_socket: &Path,
+) -> bool {
+    // `link start` signs the request, so the new device must already
+    // hold the account's secret — the caller logged it in first.
+    let (ok, started) = wn_try(
+        second_home,
+        second_socket,
+        Some(first_npub),
+        &["devices", "link", "start"],
+    );
+    if !ok {
+        eprintln!("link start refused: {started}");
+        return false;
+    }
+    let prompt = until(
+        || async {
+            let (ok, status) = wn_try(
+                first_home,
+                first_socket,
+                Some(first_npub),
+                &["devices", "link", "status"],
+            );
+            (ok).then(|| find_prompt_id(&status)).flatten()
+        },
+        "link prompt on the existing device",
+        30_000,
+        1_000,
+    )
+    .await;
+    let (ok, matched) = wn_try(
+        second_home,
+        second_socket,
+        None,
+        &["devices", "link", "confirm-match"],
+    );
+    if !ok {
+        eprintln!("link confirm-match refused: {matched}");
+        return false;
+    }
+    let (ok, approved) = wn_try(
+        first_home,
+        first_socket,
+        Some(first_npub),
+        &["devices", "link", "approve", &prompt, "--label", "second"],
+    );
+    if !ok {
+        eprintln!("link approve refused: {approved}");
+        return false;
+    }
+    until(
+        || async {
+            let (ok, listed) = wn_try(
+                first_home,
+                first_socket,
+                Some(first_npub),
+                &["devices", "list"],
+            );
+            let count = listed
+                .pointer("/result/devices")
+                .and_then(Value::as_array)
+                .map(Vec::len)
+                .or_else(|| {
+                    listed
+                        .pointer("/result")
+                        .and_then(Value::as_array)
+                        .map(Vec::len)
+                })
+                .unwrap_or(0);
+            (ok && count >= 2).then_some(())
+        },
+        "two linked devices listed",
+        60_000,
+        1_500,
+    )
+    .await;
+    true
+}
+
+/// S15: we invite an account that holds two wn devices — linked through
+/// `wn devices link` when the CLI flow completes, unlinked (two homes on
+/// one nsec) otherwise. Both devices get Welcomes and list the chat.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[ignore = "needs wn/wnd built from the upstream.json wn pin; see CONTRIBUTING"]
+async fn scenario15_invite_two_wn_devices() {
+    let start = Instant::now();
+    let rig = Arc::new(rig("s15").await);
+    let mut a = open_member().await;
+    publish_identity(&mut a, &rig).await;
+    let secret = [0x15u8; 32];
+    let n_nsec = nsec(&secret);
+    let n_hex = nostr::key::Keys::new(nostr::key::SecretKey::from_slice(&secret).expect("secret"))
+        .public_key()
+        .to_hex();
+
+    // Account N's first wn device: a dedicated wnd home on our nsec.
+    let (home1, socket1, logs1) = extra_wn_paths("s15-d1");
+    let _wnd1 = spawn_wnd(&home1, &socket1, &logs1, &rig.url).await;
+    wn_stdin(&home1, &socket1, None, &["login", "--nsec-stdin"], &n_nsec);
+    let n_npub = wn_account_npub(&home1, &socket1);
+    wn(&home1, &socket1, Some(&n_npub), &["keys", "publish"]);
+
+    // The second wn device: link it when the CLI flow runs
+    // non-interactively, else log the same nsec in unlinked.
+    let (home2, socket2, logs2) = extra_wn_paths("s15-d2");
+    let _wnd2 = spawn_wnd(&home2, &socket2, &logs2, &rig.url).await;
+    // The second home logs the same nsec first — `link start` needs the
+    // secret — then the link flow runs; on any refusal the device stays
+    // an unlinked second installation of the account.
+    wn_stdin(&home2, &socket2, None, &["login", "--nsec-stdin"], &n_nsec);
+    wn(&home2, &socket2, Some(&n_npub), &["keys", "publish"]);
+    if !try_link_devices(&home1, &socket1, &n_npub, &home2, &socket2).await {
+        eprintln!("wn devices link did not complete; running unlinked");
+    }
+
+    // Invite every fresh slot of the account.
+    let kps = until(
+        || {
+            let rig = Arc::clone(&rig);
+            let n_hex = n_hex.clone();
+            async move {
+                let kps = key_packages_of(&rig, &n_hex).await;
+                (kps.len() >= 2).then_some(kps)
+            }
+        },
+        "both device key packages on the relay",
+        90_000,
+        1_500,
+    )
+    .await;
+    let gid = a
+        .session
+        .create_group(CreateGroup {
+            name: "interop-15".to_owned(),
+            description: String::new(),
+            relays: vec![rig.url.clone()],
+            invitees: kps
+                .into_iter()
+                .map(|key_package| Invitee {
+                    key_package,
+                    inbox_relays: vec![rig.url.clone()],
+                })
+                .collect(),
+            own_devices: Vec::new(),
+            admins: Vec::new(),
+            components: Vec::new(),
+        })
+        .await
+        .expect("create_group");
+    flush(&mut a, &rig).await;
+    let wn_gid = gid.to_string();
+
+    // Both wn devices end up listing the chat. A Welcome lands as a
+    // pending invite (`groups invites` → `groups accept`); when the
+    // devices are linked, the first device's accept also fans the
+    // joined chat out to its sibling through the device group, so the
+    // sibling may go straight to `chats list` without ever showing an
+    // invite of its own. Poll the joined surface and accept any
+    // invite that appears along the way.
+    for (home, socket) in [(&home1, &socket1), (&home2, &socket2)] {
+        let (home, socket) = (home.clone(), socket.clone());
+        let (npub, wanted) = (n_npub.clone(), wn_gid.clone());
+        until(
+            || {
+                let (home, socket) = (home.clone(), socket.clone());
+                let (npub, wanted) = (npub.clone(), wanted.clone());
+                async move {
+                    let (ok, chats) = wn_try(&home, &socket, Some(&npub), &["chats", "list"]);
+                    if ok && chats.to_string().contains(&wanted) {
+                        return Some(());
+                    }
+                    let (ok, invites) = wn_try(&home, &socket, Some(&npub), &["groups", "invites"]);
+                    if ok && invites.to_string().contains(&wanted) {
+                        wn(&home, &socket, Some(&npub), &["groups", "accept", &wanted]);
+                        let _ = wn_try(&home, &socket, Some(&npub), &["sync"]);
+                    }
+                    None
+                }
+            },
+            "wn device joins and lists the chat",
+            120_000,
+            1_500,
+        )
+        .await;
+        sleep(Duration::from_millis(WND_SETTLE_MS)).await;
+    }
+
+    // Round trip: our message reaches both wn devices, each device's
+    // reply reaches us.
+    a.session
+        .send_message(&gid, chat("s15-mk-to-wn"))
+        .await
+        .expect("send_message");
+    flush(&mut a, &rig).await;
+    for (home, socket) in [(&home1, &socket1), (&home2, &socket2)] {
+        let (home, socket) = (home.clone(), socket.clone());
+        let (npub, wanted) = (n_npub.clone(), wn_gid.clone());
+        until(
+            || {
+                let (home, socket) = (home.clone(), socket.clone());
+                let (npub, wanted) = (npub.clone(), wanted.clone());
+                async move {
+                    wn_messages_at(&home, &socket, &npub, &wanted)
+                        .iter()
+                        .any(|message| message.to_string().contains("s15-mk-to-wn"))
+                        .then_some(())
+                }
+            },
+            "wn device lists our message",
+            120_000,
+            2_000,
+        )
+        .await;
+    }
+    wn(
+        &home1,
+        &socket1,
+        Some(&n_npub),
+        &["messages", "send", &wn_gid, "s15-d1-reply"],
+    );
+    wn(
+        &home2,
+        &socket2,
+        Some(&n_npub),
+        &["messages", "send", &wn_gid, "s15-d2-reply"],
+    );
+    // Both replies can land in one drain — accumulate across passes so
+    // the second reply is not consumed by the first's wait.
+    let replies = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    until_member(
+        &mut a,
+        |a| {
+            let gid = gid.clone();
+            let rig = Arc::clone(&rig);
+            let replies = Arc::clone(&replies);
+            Box::pin(async move {
+                let events = sync(&mut *a, &rig, &gid).await;
+                replies.lock().unwrap().extend(received(&events));
+                let replies = replies.lock().unwrap();
+                ["s15-d1-reply", "s15-d2-reply"]
+                    .iter()
+                    .all(|wanted| replies.iter().any(|content| content.contains(wanted)))
+                    .then_some(())
+            })
+        },
+        "mk decodes both wn device replies",
+        120_000,
+    )
+    .await;
+
+    rig.relay.shutdown();
+    eprintln!("SCENARIO-15 PASS {:.1}s", start.elapsed().as_secs_f64());
 }

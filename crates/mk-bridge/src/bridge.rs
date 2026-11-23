@@ -16,19 +16,21 @@ use crate::clock::CellClock;
 use crate::error::{BridgeError, open_error, proof_error, session_error};
 use crate::host::{Host, QueueHost, lock};
 use crate::protocol::{
-    AcknowledgeMessagesRequest, AttachmentData, AwaitingDurabilityResult, CallEnvelope, Config,
-    ConfigProbe, CreateGroupRequest, DisbandRequest, DiscardAttachmentRequest, DrainResponse,
-    EnableDisbandingRequest, EnsureKeyPackageRequest, ForgetGroupRequest, GroupCreatedResult,
-    GroupResult, GroupsResult, HistoryFetchedRequest, InboxRelaysResult, IngestRequest,
-    IngestedResult, InviteRequest, KeyPackagesResult, LeaveRequest, MAX_REQUEST_BYTES,
-    MediaAttachmentRef, MessageSentResult, OpResult, OpenAttachmentRequest, OpenResponse,
-    OutboundResult, PROTOCOL_VERSION, PublishInboxRelaysRequest, PublishResolutionResult,
-    REQUEST_TYPES, ReadyResult, RemoveMembersRequest, ReportPublishRequest, Request, Response,
-    SealAttachmentRequest, SealedAttachmentResult, SelectKeyPackagesRequest, SelfUpdateRequest,
-    SendIntentRequest, SendMediaRequest, SendMessageRequest, SendOutcomeResult, SetAdminRequest,
-    SetGroupAvatarRequest, SetRetentionRequest, SignOutRequest, SignerReply, SignerRequest,
-    SignerResult, TickedResult, UpdateAppComponentsRequest, UpdateGroupProfileRequest, decode,
-    encode, invalid, reason_label,
+    AcknowledgeMessagesRequest, AttachmentData, AuditKeyPackageSlotRequest,
+    AwaitingDurabilityResult, CallEnvelope, Config, ConfigProbe, ConfirmRejoinRequest,
+    CreateGroupRequest, DeclineRejoinRequest, DisbandRequest, DiscardAttachmentRequest,
+    DrainResponse, EnableDisbandingRequest, EnsureKeyPackageRequest, ForgetGroupRequest,
+    GroupCreatedResult, GroupResult, GroupsResult, HistoryFetchedRequest, InboxRelaysResult,
+    IngestRequest, IngestedResult, InviteRequest, KeyPackagesResult, LeaveRequest,
+    MAX_REQUEST_BYTES, MediaAttachmentRef, MessageSentResult, OpResult, OpenAttachmentRequest,
+    OpenResponse, OutboundResult, PROTOCOL_VERSION, PublishInboxRelaysRequest,
+    PublishResolutionResult, REQUEST_TYPES, ReaddMemberRequest, ReaddResult, ReadyResult,
+    RejoinOffersRequest, RejoinOffersResult, RemoveMembersRequest, ReportPublishRequest, Request,
+    Response, SealAttachmentRequest, SealedAttachmentResult, SelectKeyPackagesRequest,
+    SelfUpdateRequest, SendIntentRequest, SendMediaRequest, SendMessageRequest, SendOutcomeResult,
+    SetAdminRequest, SetGroupAvatarRequest, SetRetentionRequest, SignOutRequest, SignerReply,
+    SignerRequest, SignerResult, TickedResult, UpdateAppComponentsRequest,
+    UpdateGroupProfileRequest, decode, encode, invalid, reason_label,
 };
 use crate::rows::decode_rows;
 use crate::signer::{QueueSigner, SignerState};
@@ -346,6 +348,9 @@ impl<H: Host> Bridge<H> {
             Request::SignerReply(_) => Self::error_response(BridgeError::NoPendingSigner),
             Request::ReportPublish(args) => self.run(op_report_publish(args), Vec::new()),
             Request::EnsureKeyPackage(args) => self.run(op_ensure_key_package(args), Vec::new()),
+            Request::AuditKeyPackageSlot(args) => {
+                self.run(op_audit_key_package_slot(args), Vec::new())
+            }
             Request::KeyPackageStatus(_) => self.key_package_status(),
             Request::SignOut(args) => self.run(op_sign_out(args), Vec::new()),
             Request::PublishInboxRelays(args) => {
@@ -372,6 +377,10 @@ impl<H: Host> Bridge<H> {
             Request::EnableDisbanding(args) => self.run(op_enable_disbanding(args), Vec::new()),
             Request::ForgetGroup(args) => self.forget_group(args),
             Request::SelectKeyPackages(args) => self.select_key_packages(args),
+            Request::RejoinOffers(args) => self.rejoin_offers(args),
+            Request::ConfirmRejoin(args) => self.run(op_confirm_rejoin(args), Vec::new()),
+            Request::DeclineRejoin(args) => self.decline_rejoin(args),
+            Request::ReaddMember(args) => self.run(op_readd_member(args), Vec::new()),
             Request::Ingest(args) => self.run(op_ingest(args), Vec::new()),
             Request::Tick(_) => self.run(op_tick(), Vec::new()),
         }
@@ -569,6 +578,29 @@ impl<H: Host> Bridge<H> {
         let group = core::GroupId(args.group);
         self.sync_op(|session| {
             session.history_fetched(&group)?;
+            Ok(OpResult::Done)
+        })
+    }
+
+    /// `rejoin_offers`: the group's stored replacement-Welcome offers.
+    fn rejoin_offers(&mut self, args: RejoinOffersRequest) -> Response {
+        let group = core::GroupId(args.group);
+        self.sync_op(|session| {
+            Ok(OpResult::RejoinOffers(RejoinOffersResult {
+                offers: session
+                    .rejoin_offers(&group)?
+                    .into_iter()
+                    .map(Into::into)
+                    .collect(),
+            }))
+        })
+    }
+
+    /// `decline_rejoin`: retire a stored offer.
+    fn decline_rejoin(&mut self, args: DeclineRejoinRequest) -> Response {
+        let offer = core::EventId(args.offer);
+        self.sync_op(|session| {
+            session.decline_rejoin(&offer)?;
             Ok(OpResult::Done)
         })
     }
@@ -840,6 +872,23 @@ fn op_report_publish(args: ReportPublishRequest) -> impl FnOnce(Box<Session>) ->
     }
 }
 
+/// `audit_key_package_slot` as an operation future: the read-back slot
+/// scan, answered with the slot's standing.
+fn op_audit_key_package_slot(
+    args: AuditKeyPackageSlotRequest,
+) -> impl FnOnce(Box<Session>) -> OpFuture {
+    move |mut session| {
+        Box::pin(async move {
+            let events: Vec<core::Event> = args.events.into_iter().map(Into::into).collect();
+            let status = session.audit_key_package_slot(&events).await;
+            (
+                session,
+                status.map(|status| OpResult::KeyPackageStatus(status.into())),
+            )
+        })
+    }
+}
+
 /// `ensure_key_package` as an operation future: one lifecycle pass over
 /// the host's NIP-65 write set, answered with the slot's standing.
 fn op_ensure_key_package(args: EnsureKeyPackageRequest) -> impl FnOnce(Box<Session>) -> OpFuture {
@@ -909,6 +958,38 @@ fn op_invite(args: InviteRequest) -> impl FnOnce(Box<Session>) -> OpFuture {
     let group = core::GroupId(args.group);
     let invitees: Vec<core::Invitee> = args.invitees.into_iter().map(core::Invitee::from).collect();
     op_send(move |session| Box::pin(async move { session.invite(&group, invitees).await }))
+}
+
+/// `confirm_rejoin` as an operation future.
+fn op_confirm_rejoin(args: ConfirmRejoinRequest) -> impl FnOnce(Box<Session>) -> OpFuture {
+    let group = core::GroupId(args.group);
+    let offer = core::EventId(args.offer);
+    move |mut session| {
+        Box::pin(async move {
+            let result = session.confirm_rejoin(&group, &offer, &args.token).await;
+            (session, result.map(|()| OpResult::Done))
+        })
+    }
+}
+
+/// `readd_member` as an operation future.
+fn op_readd_member(args: ReaddMemberRequest) -> impl FnOnce(Box<Session>) -> OpFuture {
+    let group = core::GroupId(args.group);
+    let account = core::AccountId(args.account);
+    let invitees: Vec<core::Invitee> = args.invitees.into_iter().map(core::Invitee::from).collect();
+    move |mut session| {
+        Box::pin(async move {
+            let result = session.readd_member(&group, account, invitees).await;
+            (
+                session,
+                result.map(|outcome| {
+                    OpResult::Readd(ReaddResult {
+                        outcome: outcome.into(),
+                    })
+                }),
+            )
+        })
+    }
 }
 
 /// `ingest` as an operation future.
@@ -1139,6 +1220,11 @@ fn op_create_group_args(args: CreateGroupRequest) -> impl FnOnce(Box<Session>) -
         description: args.description,
         relays: args.relays,
         invitees: args.invitees.into_iter().map(core::Invitee::from).collect(),
+        own_devices: args
+            .own_devices
+            .into_iter()
+            .map(core::Invitee::from)
+            .collect(),
         admins: args.admins.iter().map(|id| core::AccountId(*id)).collect(),
         components: args
             .components

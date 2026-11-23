@@ -59,12 +59,14 @@ mod mls;
 mod outbox;
 mod pacing;
 mod provider;
+mod rejoin;
 mod self_update;
 mod semantics;
 mod ser;
 mod session;
 mod signer;
 mod snapshot;
+mod stall;
 mod store;
 #[cfg(feature = "testing")]
 pub mod testing;
@@ -81,15 +83,17 @@ pub use kv::{BatchCodecError, CommitSeq, KvBatch, KvHost, KvOp};
 pub use mls::KvOpenMlsStorage;
 pub use outbox::{Outbound, OutboundPurpose, PublishResolution, RelayResult, RelayStatus};
 pub use provider::{INGRESS_DEDUP_MARKER_CAPACITY, KvStorageProvider};
+pub use rejoin::{ReaddOutcome, RejoinOffer};
 pub use semantics::{DropReason, MessageIntent, Semantics};
 pub use session::OpenError as SessionOpenError;
 pub use session::{
-    AppMessage, AttachmentInput, ComponentUpdate, CreateGroup, DestinationPolicy, GroupAvatar,
-    GroupSnapshot, GroupState, Invitee, MediaMessage, MemberSnapshot, Opened, PendingAttachment,
-    PendingProof, ProofError, ProofRejected, SealedAttachment, SendOutcome, SentMessage, Session,
-    SessionConfig, SessionError, TickReport,
+    AppMessage, AttachmentInput, ComponentUpdate, CreateGroup, DestinationPolicy, GroupAccess,
+    GroupAvatar, GroupSnapshot, GroupState, Invitee, MediaMessage, MemberSnapshot, Opened,
+    PendingAttachment, PendingProof, ProofError, ProofRejected, SealedAttachment, SendOutcome,
+    SentMessage, Session, SessionConfig, SessionError, TickReport,
 };
 pub use signer::{AccountSigner, SignerError, SignerFuture};
+pub use stall::STALL_EVENTS;
 pub use types::{AccountId, Event, EventError, EventId, GroupId, OutboundId, UnsignedEvent};
 
 // Dev-dependencies serve only the integration tests; binding them under

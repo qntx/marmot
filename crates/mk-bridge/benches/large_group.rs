@@ -271,6 +271,7 @@ async fn run_n(n: usize) -> Value {
             description: String::new(),
             relays: vec![RELAY.to_owned()],
             invitees,
+            own_devices: Vec::new(),
             admins: Vec::new(),
             components: Vec::new(),
         }))

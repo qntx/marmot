@@ -343,7 +343,7 @@ mod self_update_tests {
 
     #[tokio::test]
     async fn history_fetched_errors_and_idempotent() {
-        let (_relay, a, b, gid) = Box::pin(join_group()).await;
+        let (_relay, mut a, mut b, gid) = Box::pin(join_group()).await;
         let unknown = GroupId(vec![9u8; 16]);
         let error = a
             .session

@@ -1,5 +1,5 @@
 /**
- * TypeScript mirror of the mk-bridge JSON wire protocol (`PROTOCOL_VERSION` 6). Decoded
+ * TypeScript mirror of the mk-bridge JSON wire protocol (`PROTOCOL_VERSION` 7). Decoded
  * representation: `u64` fields arrive as decimal strings and decode to `bigint`; identifiers (event
  * ids, pubkeys, group ids, nostr group ids, signatures, outbound ids, hashes, nonces) decode to
  * validated lowercase hex `string`s; payload blobs (`key_package`, component `data`, attachment
@@ -17,7 +17,7 @@ import type { InputCategory } from "../core/errors.ts";
 export type Complete<T extends never> = T;
 
 /** Wire protocol version. Bumped on any breaking schema change. */
-export const PROTOCOL_VERSION = 6;
+export const PROTOCOL_VERSION = 7;
 
 /** One reading of the injected clock (decimal strings on the wire). */
 export type ClockReading = {
@@ -147,6 +147,27 @@ export type Invitee = {
   inboxRelays: string[];
 };
 
+/** A stored replacement-Welcome offer awaiting the recipient's consent (`rejoin_offers`). */
+export type RejoinOffer = {
+  /** The kind-1059 wrap id carrying the offer, hex. */
+  offer: string;
+  /** The admin who authored the re-invite, hex. */
+  author: string;
+  /** The group epoch the Welcome installs. */
+  epoch: bigint;
+  /** The consent token, hex. */
+  token: string;
+};
+
+/** What `readd_member` staged. */
+export type ReaddOutcome = "removed" | "invited" | "unmapped";
+
+export const READD_OUTCOME_TYPES = ["removed", "invited", "unmapped"] as const;
+
+export type _ReaddOutcomeComplete = Complete<
+  Exclude<ReaddOutcome, (typeof READD_OUTCOME_TYPES)[number]>
+>;
+
 /** An app-component update. */
 export type ComponentUpdate = {
   componentId: number;
@@ -238,13 +259,20 @@ export type _SemanticsComplete = Complete<
 >;
 
 /** Why a received application event was dropped instead of delivered. */
-export type DropReason = "expired" | "unauthorized" | "unverifiable" | "malformed" | "unmapped";
+export type DropReason =
+  | "expired"
+  | "unauthorized"
+  | "unverifiable"
+  | "malformed"
+  | "reserved"
+  | "unmapped";
 
 export const DROP_REASONS = [
   "expired",
   "unauthorized",
   "unverifiable",
   "malformed",
+  "reserved",
   "unmapped",
 ] as const;
 
@@ -367,6 +395,26 @@ export const GROUP_STATES = [
 ] as const;
 
 export type _GroupStateComplete = Complete<Exclude<GroupState, (typeof GROUP_STATES)[number]>>;
+
+/** Whether this device's local copy of a group can still read it. */
+export type GroupAccess =
+  | "active"
+  | "removed_device"
+  | "removed"
+  | "unrecoverable"
+  | "stalled"
+  | "unmapped";
+
+export const GROUP_ACCESSES = [
+  "active",
+  "removed_device",
+  "removed",
+  "unrecoverable",
+  "stalled",
+  "unmapped",
+] as const;
+
+export type _GroupAccessComplete = Complete<Exclude<GroupAccess, (typeof GROUP_ACCESSES)[number]>>;
 
 /** A convergence disposition (spec `foundation/errors.md` vocabulary). */
 export type WireDisposition = "accepted" | "deferred" | "stale" | "invalidated" | "unmapped";
@@ -584,6 +632,9 @@ export type SessionEvent =
   | { type: "hydration_recovered"; group: string; epoch: bigint }
   | { type: "pending_commit_recovered"; group: string; epoch: bigint }
   | { type: "group_unrecoverable"; group: string }
+  | { type: "group_stall_suspected"; group: string }
+  | { type: "group_stalled"; group: string }
+  | { type: "rejoin_offered"; group: string }
   | { type: "publish_resolved"; outbound: string; resolution: PublishResolution }
   | { type: "app_event_dropped"; group: string; reason: DropReason }
   | { type: "key_package_rotated" }
@@ -608,6 +659,9 @@ export const SESSION_EVENT_TYPES = [
   "hydration_recovered",
   "pending_commit_recovered",
   "group_unrecoverable",
+  "group_stall_suspected",
+  "group_stalled",
+  "rejoin_offered",
   "publish_resolved",
   "app_event_dropped",
   "key_package_rotated",
@@ -635,6 +689,8 @@ export type KeyPackageInfo = {
 export type MemberSnapshot = {
   account: string;
   admin: boolean;
+  /** The account's leaf count — how many devices it holds. */
+  devices: number;
 };
 
 /** A UI-facing snapshot of one group. */
@@ -645,6 +701,7 @@ export type GroupSnapshot = {
   description: string;
   epoch: bigint;
   state: GroupState;
+  access: GroupAccess;
   members: MemberSnapshot[];
   /** The group's Nostr routing relays. */
   relays: string[];
@@ -716,6 +773,7 @@ export type BridgeRequest =
   | { type: "take_outbound" }
   | { type: "report_publish"; id: string; results: RelayResult[] }
   | { type: "ensure_key_package"; writeRelays: string[] }
+  | { type: "audit_key_package_slot"; events: NostrEvent[] }
   | { type: "key_package_status" }
   | { type: "sign_out"; writeRelays: string[] }
   | { type: "publish_inbox_relays"; relays: string[] }
@@ -725,6 +783,7 @@ export type BridgeRequest =
       description: string;
       relays: string[];
       invitees: Invitee[];
+      own_devices: Invitee[];
       admins: string[];
       components: ComponentUpdate[];
     }
@@ -755,6 +814,10 @@ export type BridgeRequest =
       /** The group whose invite requirements filter candidates; `undefined` = creation requirements. */
       group: string | undefined;
     }
+  | { type: "rejoin_offers"; group: string }
+  | { type: "confirm_rejoin"; group: string; offer: string; token: string }
+  | { type: "decline_rejoin"; offer: string }
+  | { type: "readd_member"; group: string; account: string; invitees: Invitee[] }
   | { type: "seal_attachment"; group: string; attachment: AttachmentInput }
   | {
       type: "send_media";
@@ -782,8 +845,11 @@ export type BridgeRequest =
 export const REQUEST_TYPES = [
   "ack_durable",
   "acknowledge_messages",
+  "audit_key_package_slot",
   "awaiting_durability",
+  "confirm_rejoin",
   "create_group",
+  "decline_rejoin",
   "disband",
   "discard_attachment",
   "enable_disbanding",
@@ -798,6 +864,8 @@ export const REQUEST_TYPES = [
   "leave",
   "open_attachment",
   "publish_inbox_relays",
+  "readd_member",
+  "rejoin_offers",
   "remove_members",
   "report_publish",
   "seal_attachment",
@@ -883,7 +951,9 @@ export type OpResult =
   | { type: "ticked"; nextWakeMs: bigint | undefined }
   | { type: "groups"; groups: GroupSnapshot[] }
   | { type: "group"; group: GroupSnapshot | undefined }
-  | { type: "key_packages"; events: NostrEvent[] };
+  | { type: "key_packages"; events: NostrEvent[] }
+  | { type: "rejoin_offers"; offers: RejoinOffer[] }
+  | { type: "readd"; outcome: ReaddOutcome };
 
 export const RESULT_TYPES = [
   "ready",
@@ -904,6 +974,8 @@ export const RESULT_TYPES = [
   "groups",
   "group",
   "key_packages",
+  "rejoin_offers",
+  "readd",
 ] as const;
 
 export type _OpResultComplete = Complete<Exclude<OpResult["type"], (typeof RESULT_TYPES)[number]>>;
@@ -936,6 +1008,7 @@ export type PlainErrorKind =
   | "not_group_admin"
   | "not_open"
   | "poisoned"
+  | "rejoin_token_stale"
   | "reserved_app_event"
   | "send_rate_exceeded"
   | "signed_out"
@@ -998,6 +1071,7 @@ export const ERROR_KINDS = [
   "poisoned",
   "proof_rejected",
   "protocol_version_mismatch",
+  "rejoin_token_stale",
   "reserved_app_event",
   "send_rate_exceeded",
   "signed_out",

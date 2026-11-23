@@ -76,6 +76,7 @@ mod media_flow_tests {
                 description: String::new(),
                 relays: vec![RELAY.to_owned()],
                 invitees: invites,
+                own_devices: Vec::new(),
                 admins: Vec::new(),
                 components,
             })

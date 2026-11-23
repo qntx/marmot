@@ -14,6 +14,8 @@ import type {
   Invitee,
   Locator,
   MediaAttachmentRef,
+  ReaddOutcome,
+  RejoinOffer,
   SendOutcome,
   SentMessage,
 } from "../backend/protocol.ts";
@@ -180,6 +182,36 @@ export async function enableDisbanding(engine: Engine, group: string): Promise<S
 /** Forget the group locally. */
 export async function forgetGroup(engine: Engine, group: string): Promise<void> {
   return engine.forgetGroup(group);
+}
+
+/** The group's stored replacement-Welcome offers awaiting consent. */
+export async function rejoinOffers(engine: Engine, group: string): Promise<RejoinOffer[]> {
+  return engine.rejoinOffers(group);
+}
+
+/** Consent to a stored replacement Welcome — installs the new copy. */
+export async function confirmRejoin(
+  engine: Engine,
+  group: string,
+  offer: string,
+  token: string,
+): Promise<void> {
+  return engine.confirmRejoin(group, offer, token);
+}
+
+/** Decline a stored replacement Welcome — retires the offer. */
+export async function declineRejoin(engine: Engine, offer: string): Promise<void> {
+  return engine.declineRejoin(offer);
+}
+
+/** Remove a stuck member account, then re-invite it once the removal confirms. */
+export async function readdMember(
+  engine: Engine,
+  group: string,
+  account: string,
+  invitees: Invitee[],
+): Promise<ReaddOutcome> {
+  return engine.readdMember(group, account, invitees);
 }
 
 /** One blob upload: ciphertext plus the metadata the store needs; resolves with its locators. */

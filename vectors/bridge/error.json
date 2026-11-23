@@ -111,6 +111,9 @@
     "got": 2,
     "kind": "protocol_version_mismatch"
   },
+  "rejoin_token_stale": {
+    "kind": "rejoin_token_stale"
+  },
   "reserved_app_event": {
     "kind": "reserved_app_event"
   },

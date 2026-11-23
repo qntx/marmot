@@ -673,6 +673,27 @@ pub enum SessionEvent {
         /// The group.
         group: GroupId,
     },
+    /// The stall detector counted `STALL_EVENTS` distinct deferred events
+    /// at the group's current epoch — the host should refetch the group
+    /// once (D2).
+    GroupStallSuspected {
+        /// The group.
+        group: GroupId,
+    },
+    /// The group's refetch completed and the deferred-event count stayed
+    /// full at the same epoch — the copy is flagged `stalled` until epoch
+    /// progress or an accepted current-epoch message clears it (D2).
+    GroupStalled {
+        /// The group.
+        group: GroupId,
+    },
+    /// A stored replacement Welcome needs the host's consent before the
+    /// engine may discard this device's still-active copy (D2): read the
+    /// offers with [`crate::Session::rejoin_offers`].
+    RejoinOffered {
+        /// The group.
+        group: GroupId,
+    },
     /// A pending `KeyPackage` replacement was promoted after a relay
     /// acknowledgement (D3); the previous current is retained for its
     /// grace period.

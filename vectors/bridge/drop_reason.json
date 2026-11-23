@@ -1,6 +1,7 @@
 {
   "expired": "expired",
   "malformed": "malformed",
+  "reserved": "reserved",
   "unauthorized": "unauthorized",
   "unmapped": "unmapped",
   "unverifiable": "unverifiable"

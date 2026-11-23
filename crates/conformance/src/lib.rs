@@ -658,6 +658,7 @@ impl ConvergenceSubject for SessionSubject {
                     invitees,
                     admins,
                     components: Vec::new(),
+                    own_devices: Vec::new(),
                 })
                 .await
                 .map_err(session_error)?

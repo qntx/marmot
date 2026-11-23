@@ -165,6 +165,86 @@ fn wn_run(
     }
 }
 
+/// `wn` CLI invocation with `input` piped to stdin — `wn login
+/// --nsec-stdin` reads the secret there.
+pub fn wn_stdin(
+    home: &Path,
+    socket: &Path,
+    account: Option<&str>,
+    args: &[&str],
+    input: &str,
+) -> Value {
+    use std::io::Write;
+    let mut cmd = Command::new(wn_bin());
+    cmd.arg("--json")
+        .arg("--home")
+        .arg(home)
+        .arg("--socket")
+        .arg(socket)
+        .env("WN_HOME", home)
+        .env("WN_SECRET_STORE", "file")
+        .env("WN_ALLOW_LOOPBACK_RELAYS", "1")
+        .env("WN_ALLOW_LOOPBACK_BLOB_ENDPOINTS", "1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if let Some(account) = account {
+        cmd.arg("--account").arg(account);
+    }
+    cmd.args(args);
+    let mut child = cmd.spawn().expect("spawn wn");
+    child
+        .stdin
+        .take()
+        .expect("wn stdin")
+        .write_all(input.as_bytes())
+        .expect("pipe wn stdin");
+    let out = child.wait_with_output().expect("wait wn");
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    let text = if stdout.trim().is_empty() {
+        stderr
+    } else {
+        stdout
+    };
+    let parsed: Value =
+        serde_json::from_str(&text).unwrap_or_else(|_| panic!("wn {args:?} non-JSON: {text}"));
+    assert!(
+        parsed.get("ok").and_then(Value::as_bool) == Some(true),
+        "wn {args:?} refused: {text}"
+    );
+    parsed
+}
+
+/// `(home, socket, logs)` paths for an extra `wnd` home of one scenario —
+/// the same shape `rig` picks, tagged per device.
+pub fn extra_wn_paths(tag: &str) -> (PathBuf, PathBuf, PathBuf) {
+    let home = std::env::temp_dir().join(format!("mi-{tag}-{}", std::process::id()));
+    drop(std::fs::remove_dir_all(&home));
+    let logs = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("target/wn-logs")
+        .join(format!("{tag}-{}", std::process::id()));
+    (home.clone(), home.join("w.sock"), logs)
+}
+
+/// `nsec` bech32 for a raw 32-byte secret — the stdin form `wn login
+/// --nsec-stdin` accepts.
+pub fn nsec(secret: &[u8; 32]) -> String {
+    nostr::key::SecretKey::from_slice(secret)
+        .expect("secret")
+        .to_bech32()
+        .expect("nsec")
+}
+
+/// The selected account's npub of a `wn` home (`whoami` account 0).
+pub fn wn_account_npub(home: &Path, socket: &Path) -> String {
+    wn(home, socket, None, &["whoami"])
+        .pointer("/result/accounts/0/npub")
+        .and_then(Value::as_str)
+        .expect("whoami npub")
+        .to_owned()
+}
+
 /// An `wnd` process owned by the test: killed and reaped on drop, also on
 /// panic unwind. Its `WN_HOME` is removed; its logs stay under
 /// `target/wn-logs/`.

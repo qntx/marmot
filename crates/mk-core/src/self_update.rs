@@ -104,7 +104,7 @@ impl Session {
     /// [`SessionError::UnknownGroup`] for a group this device does not
     /// know; [`SessionError::NotAMember`] for a removed or disbanded copy;
     /// [`SessionError`] for storage failures.
-    pub fn history_fetched(&self, group: &GroupId) -> Result<(), SessionError> {
+    pub fn history_fetched(&mut self, group: &GroupId) -> Result<(), SessionError> {
         let gid = engine_gid(group);
         let snapshot = match self.group(group) {
             Ok(Some(snapshot)) => snapshot,
@@ -153,7 +153,7 @@ impl Session {
             }
             Ok(())
         })?;
-        Ok(())
+        self.stall_on_history_fetched(group, snapshot.epoch)
     }
 
     /// The D4 driver, run by [`Session::tick`]: enrols periodic deadlines,

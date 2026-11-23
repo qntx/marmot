@@ -170,6 +170,9 @@ pub enum BridgeError {
     /// The group's send pacing refused the send; retry after the clock
     /// advances.
     SendRateExceeded,
+    /// A `confirm_rejoin` token no longer matches the stored offer —
+    /// the offer rotated since it was read.
+    RejoinTokenStale,
     /// The group carries no encrypted-media component.
     MediaNotEnabled,
     /// The pinned media epoch no longer matches the group's epoch.
@@ -240,6 +243,7 @@ impl fmt::Display for BridgeError {
             Self::DisbandingNotEnabled => f.write_str("disbanding not enabled"),
             Self::GroupDisbanding => f.write_str("group disbanding in progress"),
             Self::SendRateExceeded => f.write_str("send rate exceeded"),
+            Self::RejoinTokenStale => f.write_str("rejoin token stale"),
             Self::MediaNotEnabled => f.write_str("encrypted media not enabled"),
             Self::MediaEpochStale => f.write_str("media epoch stale"),
             Self::MediaEpochUnsettled => f.write_str("media epoch unsettled"),
@@ -297,6 +301,7 @@ pub(crate) fn session_error(error: &SessionError) -> BridgeError {
         SessionError::DisbandingNotEnabled => BridgeError::DisbandingNotEnabled,
         SessionError::GroupDisbanding => BridgeError::GroupDisbanding,
         SessionError::SendRateExceeded => BridgeError::SendRateExceeded,
+        SessionError::RejoinTokenStale => BridgeError::RejoinTokenStale,
         SessionError::MediaNotEnabled => BridgeError::MediaNotEnabled,
         SessionError::MediaEpochStale => BridgeError::MediaEpochStale,
         SessionError::MediaEpochUnsettled => BridgeError::MediaEpochUnsettled,

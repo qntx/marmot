@@ -122,6 +122,16 @@ pub(crate) enum Table {
     /// commit id. Outside every snapshot and checkpoint; rows go with the
     /// group record.
     ChangeNotDelivered = 42,
+    /// Session-owned stall evidence (D2): one row per group keyed by the
+    /// group id, carrying `{epoch, welcome, events, refetch, stalled}` —
+    /// `events` bounded to `STALL_EVENTS` distinct ids; deleted with the
+    /// group.
+    GroupStall = 43,
+    /// Session-owned re-add intent (D2): one row per `group/account`
+    /// carrying `{invitees: [{key_package, inbox_relays}]}` — written with
+    /// the `RemoveMembers` stage so the follow-up `Invite` survives a
+    /// crash between the two commits; deleted with the group.
+    Readd = 44,
 }
 
 /// Meta row keys inside [`Table::Meta`].
@@ -145,7 +155,9 @@ pub(crate) const META_PENDING_HIGH_WATER: &[u8] = b"pending-ref-high-water";
 /// v7: the `key-package-slot` meta row is dropped — the slot lives in the
 /// `KeyPackageLifecycleState` record — and `SessionPublication.purpose`
 /// gains `key_package_republish`.
-pub(crate) const SCHEMA_VERSION: u32 = 7;
+/// v8: `Table::GroupStall` (the D2 stall detector's per-group row) and
+/// `Table::Readd` (the D2 re-add intent bridging removal and invite).
+pub(crate) const SCHEMA_VERSION: u32 = 8;
 
 /// Whether `key` names a row the `OpenMLS` store owns — the write set the
 /// engine's write generation counts (provider.rs `mls_write_generation`).

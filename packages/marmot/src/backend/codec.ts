@@ -25,6 +25,7 @@ import type {
   DropReason,
   EncryptedMediaPolicy,
   GroupAvatar,
+  GroupAccess,
   GroupChange,
   GroupSnapshot,
   GroupState,
@@ -44,7 +45,9 @@ import type {
   Outbound,
   OutboundPurpose,
   PublishResolution,
+  ReaddOutcome,
   ReceivedMessage,
+  RejoinOffer,
   RelayResult,
   RelayStatus,
   Semantics,
@@ -66,6 +69,7 @@ import {
   AVAILABILITY_VALUES,
   DROP_REASONS,
   ERROR_KINDS,
+  GROUP_ACCESSES,
   GROUP_STATES,
   INPUT_CATEGORY_VALUES,
   LOCAL_STATES,
@@ -463,6 +467,35 @@ export function encodeInvitee(invitee: Invitee): Json {
 
 const COMPONENT_KEYS = ["component_id", "data"];
 
+const REJOIN_OFFER_KEYS = ["offer", "author", "epoch", "token"];
+
+function decodeRejoinOffer(value: unknown, path: string): RejoinOffer {
+  const o = rec(value, path, REJOIN_OFFER_KEYS);
+  return {
+    offer: hex32(field(o, "offer", path), `${path}.offer`),
+    author: hex32(field(o, "author", path), `${path}.author`),
+    epoch: u64(field(o, "epoch", path), `${path}.epoch`),
+    token: hex32(field(o, "token", path), `${path}.token`),
+  };
+}
+
+function encodeRejoinOffer(offer: RejoinOffer): Json {
+  return {
+    offer: offer.offer,
+    author: offer.author,
+    epoch: offer.epoch.toString(),
+    token: offer.token,
+  };
+}
+
+export function decodeReaddOutcome(value: unknown, path = "readd_outcome"): ReaddOutcome {
+  const outcome = str(value, path);
+  if (outcome === "removed" || outcome === "invited" || outcome === "unmapped") {
+    return outcome;
+  }
+  return fail(path, "value");
+}
+
 export function decodeComponentUpdate(value: unknown, path = "update"): ComponentUpdate {
   const o = rec(value, path, COMPONENT_KEYS);
   return {
@@ -716,6 +749,10 @@ export function encodeOutbound(outbound: Outbound): Json {
 
 export function decodeGroupState(value: unknown, path = "state"): GroupState {
   return oneOf(value, path, GROUP_STATES);
+}
+
+export function decodeGroupAccess(value: unknown, path = "access"): GroupAccess {
+  return oneOf(value, path, GROUP_ACCESSES);
 }
 
 export function decodeLocalState(value: unknown, path = "state"): LocalState {
@@ -1028,6 +1065,9 @@ export function decodeSessionEvent(value: unknown, path = "event"): SessionEvent
     case "local_copy_restored":
     case "hydration_quarantined":
     case "group_unrecoverable":
+    case "group_stall_suspected":
+    case "group_stalled":
+    case "rejoin_offered":
     case "self_updated":
       return { type, group: group(path) };
     case "epoch_changed":
@@ -1125,6 +1165,9 @@ export function encodeSessionEvent(event: SessionEvent): Json {
     local_copy_restored: (event) => ({ type: event.type, group: event.group }),
     hydration_quarantined: (event) => ({ type: event.type, group: event.group }),
     group_unrecoverable: (event) => ({ type: event.type, group: event.group }),
+    group_stall_suspected: (event) => ({ type: event.type, group: event.group }),
+    group_stalled: (event) => ({ type: event.type, group: event.group }),
+    rejoin_offered: (event) => ({ type: event.type, group: event.group }),
     self_updated: (event) => ({ type: event.type, group: event.group }),
     epoch_changed: (event) => ({
       type: "epoch_changed",
@@ -1190,18 +1233,19 @@ export function encodeSessionEvent(event: SessionEvent): Json {
   });
 }
 
-const MEMBER_KEYS = ["account", "admin"];
+const MEMBER_KEYS = ["account", "admin", "devices"];
 
 function decodeMember(value: unknown, path: string): MemberSnapshot {
   const o = rec(value, path, MEMBER_KEYS);
   return {
     account: hex32(field(o, "account", path), `${path}.account`),
     admin: bool(field(o, "admin", path), `${path}.admin`),
+    devices: uint(field(o, "devices", path), `${path}.devices`),
   };
 }
 
 function encodeMember(member: MemberSnapshot): Json {
-  return { account: member.account, admin: member.admin };
+  return { account: member.account, admin: member.admin, devices: member.devices };
 }
 
 const SNAPSHOT_KEYS = [
@@ -1210,6 +1254,7 @@ const SNAPSHOT_KEYS = [
   "description",
   "epoch",
   "state",
+  "access",
   "members",
   "relays",
   "nostr_group_id",
@@ -1252,6 +1297,7 @@ export function decodeGroupSnapshot(value: unknown, path = "group"): GroupSnapsh
     description: str(field(o, "description", path), `${path}.description`),
     epoch: u64(field(o, "epoch", path), `${path}.epoch`),
     state: decodeGroupState(field(o, "state", path), `${path}.state`),
+    access: decodeGroupAccess(field(o, "access", path), `${path}.access`),
     members: arr(field(o, "members", path), `${path}.members`, decodeMember),
     relays: strList(field(o, "relays", path), `${path}.relays`),
     nostrGroupId: hex32(field(o, "nostr_group_id", path), `${path}.nostr_group_id`),
@@ -1281,6 +1327,7 @@ export function encodeGroupSnapshot(snapshot: GroupSnapshot): Json {
     description: snapshot.description,
     epoch: snapshot.epoch.toString(),
     state: snapshot.state,
+    access: snapshot.access,
     members: snapshot.members.map(encodeMember),
     relays: snapshot.relays,
     nostr_group_id: snapshot.nostrGroupId,
@@ -1515,6 +1562,7 @@ export function decodeRequest(value: unknown, path = "request"): BridgeRequest {
     "name",
     "description",
     "invitees",
+    "own_devices",
     "admins",
     "components",
     "group",
@@ -1537,6 +1585,8 @@ export function decodeRequest(value: unknown, path = "request"): BridgeRequest {
     "admin",
     "avatar",
     "seconds",
+    "offer",
+    "token",
   ]);
   const type = tag(o, path);
   const group = (p: string) => hexEncode(hex(field(o, "group", p), `${p}.group`));
@@ -1556,6 +1606,11 @@ export function decodeRequest(value: unknown, path = "request"): BridgeRequest {
         type,
         writeRelays: strList(field(o, "write_relays", path), `${path}.write_relays`),
       };
+    case "audit_key_package_slot":
+      return {
+        type,
+        events: arr(field(o, "events", path), `${path}.events`, decodeEvent),
+      };
     case "key_package_status":
       return { type };
     case "sign_out":
@@ -1572,6 +1627,7 @@ export function decodeRequest(value: unknown, path = "request"): BridgeRequest {
         description: str(field(o, "description", path), `${path}.description`),
         relays: strList(field(o, "relays", path), `${path}.relays`),
         invitees: arr(field(o, "invitees", path), `${path}.invitees`, decodeInvitee),
+        own_devices: arr(field(o, "own_devices", path), `${path}.own_devices`, decodeInvitee),
         admins: arr(field(o, "admins", path), `${path}.admins`, (item, p) => hex32(item, p)),
         components: arr(field(o, "components", path), `${path}.components`, decodeComponentUpdate),
       };
@@ -1591,7 +1647,24 @@ export function decodeRequest(value: unknown, path = "request"): BridgeRequest {
     case "self_update":
     case "history_fetched":
     case "group":
+    case "rejoin_offers":
       return { type, group: group(path) };
+    case "confirm_rejoin":
+      return {
+        type,
+        group: group(path),
+        offer: hex32(field(o, "offer", path), `${path}.offer`),
+        token: hex32(field(o, "token", path), `${path}.token`),
+      };
+    case "decline_rejoin":
+      return { type, offer: hex32(field(o, "offer", path), `${path}.offer`) };
+    case "readd_member":
+      return {
+        type,
+        group: group(path),
+        account: hex32(field(o, "account", path), `${path}.account`),
+        invitees: arr(field(o, "invitees", path), `${path}.invitees`, decodeInvitee),
+      };
     case "update_group_profile":
       return {
         type,
@@ -1720,6 +1793,10 @@ export function encodeRequest(request: BridgeRequest): Json {
       type: "ensure_key_package",
       write_relays: request.writeRelays,
     }),
+    audit_key_package_slot: (request) => ({
+      type: "audit_key_package_slot",
+      events: request.events.map(encodeEvent),
+    }),
     key_package_status: () => ({ type: "key_package_status" }),
     sign_out: (request) => ({ type: "sign_out", write_relays: request.writeRelays }),
     publish_inbox_relays: (request) => ({ type: request.type, relays: request.relays }),
@@ -1729,6 +1806,7 @@ export function encodeRequest(request: BridgeRequest): Json {
       description: request.description ?? null,
       relays: request.relays,
       invitees: request.invitees.map(encodeInvitee),
+      own_devices: request.own_devices.map(encodeInvitee),
       admins: request.admins,
       components: request.components.map(encodeComponentUpdate),
     }),
@@ -1813,6 +1891,20 @@ export function encodeRequest(request: BridgeRequest): Json {
       events: request.events.map(encodeEvent),
       group: request.group ?? null,
     }),
+    rejoin_offers: (request) => ({ type: request.type, group: request.group }),
+    confirm_rejoin: (request) => ({
+      type: "confirm_rejoin",
+      group: request.group,
+      offer: request.offer,
+      token: request.token,
+    }),
+    decline_rejoin: (request) => ({ type: "decline_rejoin", offer: request.offer }),
+    readd_member: (request) => ({
+      type: "readd_member",
+      group: request.group,
+      account: request.account,
+      invitees: request.invitees.map(encodeInvitee),
+    }),
     acknowledge_messages: (request) => ({ type: "acknowledge_messages", ids: request.ids }),
     signer_reply: (request) => ({
       type: "signer_reply",
@@ -1851,6 +1943,7 @@ export function decodeOpResult(value: unknown, path = "result"): OpResult {
     "next_wake_ms",
     "message",
     "events",
+    "offers",
   ]);
   const type = tag(o, path);
   switch (type) {
@@ -1954,6 +2047,16 @@ export function decodeOpResult(value: unknown, path = "result"): OpResult {
         type,
         events: arr(field(o, "events", path), `${path}.events`, decodeEvent),
       };
+    case "rejoin_offers":
+      return {
+        type,
+        offers: arr(field(o, "offers", path), `${path}.offers`, decodeRejoinOffer),
+      };
+    case "readd":
+      return {
+        type,
+        outcome: decodeReaddOutcome(field(o, "outcome", path), `${path}.outcome`),
+      };
     default:
       return fail(`${path}.type`, "value");
   }
@@ -2017,6 +2120,11 @@ export function encodeOpResult(result: OpResult): Json {
       type: "key_packages",
       events: result.events.map(encodeEvent),
     }),
+    rejoin_offers: (result) => ({
+      type: "rejoin_offers",
+      offers: result.offers.map(encodeRejoinOffer),
+    }),
+    readd: (result) => ({ type: "readd", outcome: result.outcome }),
   });
 }
 

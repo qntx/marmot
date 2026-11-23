@@ -20,6 +20,7 @@ export type RelayFilter = {
   "#p"?: string[];
   "#h"?: string[];
   "#k"?: string[];
+  "#d"?: string[];
   since?: number;
   limit?: number;
 };

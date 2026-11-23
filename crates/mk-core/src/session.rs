@@ -465,6 +465,10 @@ fn open_session(mut session: Session) -> Result<Session, &'static str> {
             .transact(|| session.provider.put_key_package_lifecycle(&seeded))
             .map_err(|_| "lifecycle write")?;
     }
+    session.reissue_stall_requests().map_err(|_| "stall rows")?;
+    session
+        .reissue_rejoin_offers()
+        .map_err(|_| "rejoin offers")?;
     Ok(session)
 }
 
@@ -592,6 +596,11 @@ pub enum SessionError {
     /// The pure media layer refused (typed, no payload echo).
     #[error("media: {0}")]
     Media(#[from] MediaError),
+    /// The consent token no longer names this group's local branch — the
+    /// epoch authenticator moved since the offer was read. List
+    /// [`Session::rejoin_offers`] again for the current token.
+    #[error("rejoin token stale")]
+    RejoinTokenStale,
 }
 
 pub(crate) fn session_engine_error(error: EngineError) -> SessionError {
@@ -667,8 +676,15 @@ pub struct CreateGroup {
     pub description: String,
     /// The group's Nostr relays (canonical routing component).
     pub relays: Vec<String>,
-    /// Founding invitees (the creator is always a member).
+    /// Founding invitees (the creator is always a member). A
+    /// `KeyPackage` authored by this account is refused — sibling
+    /// devices belong in `own_devices`.
     pub invitees: Vec<Invitee>,
+    /// Founding invitees for this account's other devices: each
+    /// `KeyPackage` must be authored by this account, address a different
+    /// `d` slot than this device's, and not be this device's own current
+    /// or pending publication.
+    pub own_devices: Vec<Invitee>,
     /// Additional founding admins besides the creator.
     pub admins: Vec<AccountId>,
     /// Additional initial app components (e.g. an encrypted-media policy and
@@ -827,13 +843,118 @@ pub enum GroupState {
     Disbanded,
 }
 
-/// One member in a [`GroupSnapshot`].
+/// How this device's local copy of a group stands.
+///
+/// The one host vocabulary for "this device can't read this group". Each
+/// variant has exactly one source of truth in [`Session::group`];
+/// `Active` also marks a disbanded copy because `state` already reports
+/// that ending.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum GroupAccess {
+    /// The local copy reads and writes normally.
+    Active,
+    /// This device's leaf was removed; the account still has a leaf.
+    RemovedDevice,
+    /// The account no longer has any leaf in the group.
+    Removed,
+    /// The copy cannot select a canonical branch (engine-flagged).
+    Unrecoverable,
+    /// The stall detector flagged the copy as behind.
+    Stalled,
+}
+
+/// Which removal a `removed` record represents, read against the roster.
+#[derive(Clone, Copy)]
+enum RemovedScope {
+    /// The copy is live.
+    Live,
+    /// This device's leaf is gone; the account still holds one.
+    DeviceOnly,
+    /// No leaf of this account remains.
+    Account,
+}
+
+/// The access mapping's precedence: a removed copy splits by whether
+/// the account still holds a roster leaf, an engine-flagged
+/// unrecoverable copy outranks a stall flag, and everything else reads
+/// normally.
+const fn group_access(removed: RemovedScope, unrecoverable: bool, stalled: bool) -> GroupAccess {
+    match removed {
+        RemovedScope::DeviceOnly => GroupAccess::RemovedDevice,
+        RemovedScope::Account => GroupAccess::Removed,
+        RemovedScope::Live => {
+            if unrecoverable {
+                GroupAccess::Unrecoverable
+            } else if stalled {
+                GroupAccess::Stalled
+            } else {
+                GroupAccess::Active
+            }
+        }
+    }
+}
+
+/// Collapses a leaf-level roster into one snapshot member per account,
+/// first-appearance order, `devices` = the account's leaf count.
+fn aggregate_members(
+    leaves: impl IntoIterator<Item = [u8; 32]>,
+    admins: &[[u8; 32]],
+) -> Vec<MemberSnapshot> {
+    let mut members: Vec<MemberSnapshot> = Vec::new();
+    for bytes in leaves {
+        if let Some(member) = members.iter_mut().find(|member| member.account.0 == bytes) {
+            member.devices = member.devices.saturating_add(1);
+        } else {
+            members.push(MemberSnapshot {
+                account: AccountId(bytes),
+                admin: admins.contains(&bytes),
+                devices: 1,
+            });
+        }
+    }
+    members
+}
+
+/// The snapshot a disbanded copy can still answer: the durable record
+/// keeps name, epoch, and the former roster, but the engine deleted the
+/// live MLS state the member/component reads need.
+fn disbanded_snapshot(id: &GroupId, record: &cgka_traits::group::Group) -> GroupSnapshot {
+    GroupSnapshot {
+        id: id.clone(),
+        name: record.name.clone(),
+        description: record.description.clone(),
+        epoch: record.epoch.0,
+        state: GroupState::Disbanded,
+        access: GroupAccess::Active,
+        members: aggregate_members(
+            record
+                .members
+                .iter()
+                .filter_map(|member| member.id.as_slice().try_into().ok()),
+            &[],
+        ),
+        relays: Vec::new(),
+        nostr_group_id: [0; 32],
+        own_account_admin: false,
+        encrypted_media: None,
+        agent_text_stream: None,
+        avatar: None,
+        retention_seconds: 0,
+        disband_enabled: false,
+        disbanding: false,
+    }
+}
+
+/// One member in a [`GroupSnapshot`]: one entry per account.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MemberSnapshot {
     /// The member's account.
     pub account: AccountId,
     /// Whether the member is in the admin-policy set.
     pub admin: bool,
+    /// The account's leaf count — how many devices it holds.
+    pub devices: u32,
 }
 
 /// A UI-facing snapshot of one group.
@@ -849,7 +970,10 @@ pub struct GroupSnapshot {
     pub epoch: u64,
     /// Lifecycle bucket.
     pub state: GroupState,
-    /// Members (account + admin flag).
+    /// Whether this device can still read the group; `Active` also marks
+    /// a `Disbanded` snapshot (`state` carries the ending).
+    pub access: GroupAccess,
+    /// Members, one entry per account (leaf scope stays in `devices`).
     pub members: Vec<MemberSnapshot>,
     /// The group's Nostr routing relays.
     pub relays: Vec<String>,
@@ -1797,8 +1921,54 @@ impl Session {
             component_id: update.component_id,
             data: update.data.clone(),
         }));
-        let mut members = Vec::with_capacity(req.invitees.len());
+        // Sibling devices of this account are founding members through
+        // `own_devices`; a same-account KeyPackage anywhere else can
+        // never add a leaf — refuse before anything stages.
+        let account = self.account();
         for invitee in &req.invitees {
+            if invitee.key_package.pubkey == account {
+                return Err(SessionError::InvalidInput("own account"));
+            }
+        }
+        let lifecycle = self
+            .provider
+            .key_package_lifecycle()
+            .map_err(SessionError::Storage)?;
+        let own_slot = lifecycle
+            .as_ref()
+            .map(|lc| lc.stable_slot_id.as_str())
+            .unwrap_or_default();
+        let mut own_ids: std::collections::BTreeSet<[u8; 32]> = std::collections::BTreeSet::new();
+        for id in lifecycle
+            .as_ref()
+            .and_then(|lc| lc.authored_event_id.as_ref())
+            .into_iter()
+            .chain(
+                lifecycle
+                    .as_ref()
+                    .and_then(|lc| lc.pending_replacement.as_ref())
+                    .and_then(|pending| pending.signed_event.as_ref())
+                    .map(|artifact| &artifact.id),
+            )
+        {
+            if let Ok(bytes) = <[u8; 32]>::try_from(id.as_slice()) {
+                own_ids.insert(bytes);
+            }
+        }
+        for invitee in &req.own_devices {
+            let event = &invitee.key_package;
+            let sibling_slot = event
+                .tags
+                .iter()
+                .find(|tag| tag.first().map(String::as_str) == Some(key_package::D_TAG))
+                .and_then(|tag| tag.get(1))
+                .is_some_and(|value| value.as_str() != own_slot);
+            if event.pubkey != account || !sibling_slot || own_ids.contains(&event.id.0) {
+                return Err(SessionError::InvalidInput("own device"));
+            }
+        }
+        let mut members = Vec::with_capacity(req.invitees.len() + req.own_devices.len());
+        for invitee in req.invitees.iter().chain(&req.own_devices) {
             members.push(self.invitee_key_package(invitee)?);
         }
         let (group_id, result) = self
@@ -1812,7 +1982,7 @@ impl Session {
                 initial_admins: req
                     .admins
                     .iter()
-                    .map(|account| MemberId::new(account.0.to_vec()))
+                    .map(|admin| MemberId::new(admin.0.to_vec()))
                     .collect(),
             })
             .await
@@ -1824,7 +1994,10 @@ impl Session {
 
     /// Validate an invitee's `KeyPackage` event, persist its inbox relays and
     /// produce the engine `KeyPackage`.
-    fn invitee_key_package(&self, invitee: &Invitee) -> Result<KeyPackage, SessionError> {
+    pub(crate) fn invitee_key_package(
+        &self,
+        invitee: &Invitee,
+    ) -> Result<KeyPackage, SessionError> {
         let info = key_package::key_package_info(&invitee.key_package)
             .map_err(|_| SessionError::InvalidInput("key package"))?;
         self.check_relays(&invitee.inbox_relays)?;
@@ -1850,6 +2023,14 @@ impl Session {
         invitees: Vec<Invitee>,
     ) -> Result<SendOutcome, SessionError> {
         self.require_admin(group)?;
+        // A same-account Add is never committed after founding: a
+        // sibling device joins via `own_devices` or an admin re-invite
+        // of the whole account, and the engine's refusal is untyped.
+        for invitee in &invitees {
+            if invitee.key_package.pubkey == self.account() {
+                return Err(SessionError::InvalidInput("own account"));
+            }
+        }
         let key_packages = invitees
             .iter()
             .map(|invitee| self.invitee_key_package(invitee))
@@ -2180,6 +2361,14 @@ impl Session {
                 for id in &stale {
                     self.provider.delete_outbound_retry(id)?;
                 }
+                self.provider
+                    .del_row(crate::keys::Table::GroupStall, &[&group.0])?;
+                for (row_key, _) in self
+                    .provider
+                    .scan_rows(crate::keys::Table::Readd, &[&group.0])?
+                {
+                    self.provider.store().delete(&row_key)?;
+                }
                 Ok(())
             })
             .map_err(SessionError::Storage)
@@ -2262,7 +2451,7 @@ impl Session {
     /// validation, before the event is built — and a sent message records
     /// its own delivered-index row so a sibling device can authorize a
     /// modifier against it.
-    async fn send_app_event(
+    pub(crate) async fn send_app_event(
         &mut self,
         group: &GroupId,
         kind: u64,
@@ -2894,6 +3083,11 @@ impl Session {
     pub async fn ingest(&mut self, event: &Event) -> Result<InputReport, SessionError> {
         let outcome = self.ingest_verified(event).await?;
         self.drive().await?;
+        if self.retry_rejoins().await? {
+            // A held offer installed on this copy's removal: the new
+            // copy's own convergence work settles in the same pass.
+            self.drive().await?;
+        }
         self.note_valid_state_bearing_inputs()?;
         Ok(InputReport {
             event: event.id,
@@ -2938,6 +3132,9 @@ impl Session {
             });
         }
         self.drive().await?;
+        if self.retry_rejoins().await? {
+            self.drive().await?;
+        }
         self.note_valid_state_bearing_inputs()?;
         Ok(reports)
     }
@@ -2995,14 +3192,34 @@ impl Session {
             // dedup marker is still the point of the ingest).
             savepoint.commit().map_err(SessionError::Storage)?;
             let outcome = result.map_err(session_engine_error)?;
-            return Ok(input_outcome(&outcome));
+            let input = input_outcome(&outcome);
+            if input == InputOutcome::Local(crate::events::LocalState::RejoinConfirmationRequired) {
+                self.note_rejoin_offer(&event.id)?;
+            }
+            return Ok(input);
         }
+        let transport_group_id = match &message.envelope {
+            TransportEnvelope::GroupMessage { transport_group_id } => {
+                Some(transport_group_id.clone())
+            }
+            TransportEnvelope::Welcome { .. } => None,
+        };
         let outcome = self
             .engine
             .ingest(message)
             .await
             .map_err(session_engine_error)?;
-        Ok(input_outcome(&outcome))
+        let input = input_outcome(&outcome);
+        if let Some(transport_group_id) = transport_group_id
+            && event.kind == 445
+            && input
+                == (InputOutcome::Unavailable {
+                    category: crate::events::Availability::TransportDeferred,
+                })
+        {
+            self.stall_note_deferred(&transport_group_id, &event.id, event.created_at)?;
+        }
+        Ok(input)
     }
 
     /// Whether a live group owes convergence work beyond what the engine
@@ -3060,7 +3277,7 @@ impl Session {
     /// engine advance. The input settle uses the deterministic
     /// `until_settled` form so the injected session clock, not a wall-time
     /// budget, decides when a pass reports unfinished work.
-    async fn drive(&mut self) -> Result<(), SessionError> {
+    pub(crate) async fn drive(&mut self) -> Result<(), SessionError> {
         let mut groups = self.engine.drain_pending_convergence_groups();
         for group_id in self.engine.live_group_ids().map_err(session_engine_error)? {
             if !groups.contains(&group_id) && self.group_owes_advance(&group_id)? {
@@ -3141,6 +3358,13 @@ impl Session {
         // surface on the next `drain_events` and the earliest hold/sweep
         // deadline folds into the wake.
         fold(self.process_expiry_and_holds(self.now_ms())?, &mut next);
+        // D2: offers whose copy turned removed/unrecoverable install
+        // without consent; admin re-adds finish their second commit and
+        // fold a retry wake only while a transient error holds one.
+        self.retry_rejoins().await?;
+        if let Some(delay) = self.drive_readds().await? {
+            fold(Some(delay), &mut next);
+        }
         self.drive().await?;
         Ok(TickReport { next_wake_ms: next })
     }
@@ -3210,6 +3434,7 @@ impl Session {
             if let SessionEvent::EpochChanged { group, .. } = &item.event {
                 epoch_groups.push(group.clone());
             }
+            self.stall_clear_for_event(&item.event)?;
             self.process_mapped(item, now_ms, &mut out)
                 .map_err(SessionError::Storage)?;
         }
@@ -3326,6 +3551,37 @@ impl Session {
         Ok(out)
     }
 
+    /// `access` for [`Self::group`]: the roster read splits `removed`
+    /// into device- vs account-scoped, and the stall row flags `stalled`
+    /// only while it still names this copy's epoch and Welcome stamp.
+    fn access_of(
+        &self,
+        id: &GroupId,
+        record: &cgka_traits::group::Group,
+        members: &[cgka_traits::group::Member],
+        unrecoverable: bool,
+    ) -> Result<GroupAccess, SessionError> {
+        let removed = if !record.removed {
+            RemovedScope::Live
+        } else if members
+            .iter()
+            .any(|member| member.id.as_slice() == self.account().0)
+        {
+            RemovedScope::DeviceOnly
+        } else {
+            RemovedScope::Account
+        };
+        let stalled = self
+            .stall_row(id)
+            .map_err(SessionError::Storage)?
+            .is_some_and(|row| {
+                row.stalled
+                    && row.epoch == record.epoch.0
+                    && row.welcome == record.local_copy_welcome_created_at.map(|stamp| stamp.0)
+            });
+        Ok(group_access(removed, unrecoverable, stalled))
+    }
+
     /// Snapshot of one group. `Ok(None)` when the group is not live.
     ///
     /// # Errors
@@ -3342,33 +3598,7 @@ impl Session {
         // member/component reads below would fail — the tombstone answers
         // everything the snapshot can still say.
         if record.disbanded.is_some() {
-            return Ok(Some(GroupSnapshot {
-                id: id.clone(),
-                name: record.name,
-                description: record.description,
-                epoch: record.epoch.0,
-                state: GroupState::Disbanded,
-                members: record
-                    .members
-                    .iter()
-                    .filter_map(|member| {
-                        let bytes: [u8; 32] = member.id.as_slice().try_into().ok()?;
-                        Some(MemberSnapshot {
-                            account: AccountId(bytes),
-                            admin: false,
-                        })
-                    })
-                    .collect(),
-                relays: Vec::new(),
-                nostr_group_id: [0; 32],
-                own_account_admin: false,
-                encrypted_media: None,
-                agent_text_stream: None,
-                avatar: None,
-                retention_seconds: 0,
-                disband_enabled: false,
-                disbanding: false,
-            }));
+            return Ok(Some(disbanded_snapshot(id, &record)));
         }
         let members = self.engine.members(&gid).map_err(session_engine_error)?;
         let admins = self.admin_set(&gid)?;
@@ -3388,6 +3618,14 @@ impl Session {
         } else {
             state
         };
+        // A removed copy keeps its roster: an account that still holds
+        // another leaf lost this device, not its membership.
+        let access = self.access_of(
+            id,
+            &record,
+            &members,
+            record.unrecoverable || matches!(state, GroupState::Unrecoverable),
+        )?;
         let routing = self.routing_of(&gid).ok();
         let relays = routing
             .as_ref()
@@ -3430,17 +3668,14 @@ impl Session {
             description: record.description,
             epoch,
             state,
+            access,
             nostr_group_id,
-            members: members
-                .iter()
-                .filter_map(|member| {
-                    let bytes: [u8; 32] = member.id.as_slice().try_into().ok()?;
-                    Some(MemberSnapshot {
-                        account: AccountId(bytes),
-                        admin: admins.contains(&bytes),
-                    })
-                })
-                .collect(),
+            members: aggregate_members(
+                members
+                    .iter()
+                    .filter_map(|member| member.id.as_slice().try_into().ok()),
+                &admins,
+            ),
             relays,
             own_account_admin: admins.contains(&account.0),
             encrypted_media: self.media_policy(&gid)?,
@@ -3455,7 +3690,7 @@ impl Session {
     /// `NotGroupAdmin` when this account is not a current admin — the
     /// session-side gate for admin ops so a refused call stages nothing
     /// (the engine may validate a commit only after staging it).
-    fn require_admin(&self, group: &GroupId) -> Result<(), SessionError> {
+    pub(crate) fn require_admin(&self, group: &GroupId) -> Result<(), SessionError> {
         if !self
             .admin_set(&engine_gid(group))?
             .contains(&self.account().0)
@@ -3468,7 +3703,10 @@ impl Session {
     /// The admin-policy component decoded: a QUIC-varint count followed by
     /// that many sorted 32-byte member keys (cgka-engine
     /// `app_components::decode_admin_policy`).
-    fn admin_set(&self, group_id: &EngineGroupId) -> Result<Vec<[u8; 32]>, SessionError> {
+    pub(crate) fn admin_set(
+        &self,
+        group_id: &EngineGroupId,
+    ) -> Result<Vec<[u8; 32]>, SessionError> {
         let Some(bytes) = self
             .engine
             .app_component(group_id, GROUP_ADMIN_POLICY_COMPONENT_ID)
@@ -3864,5 +4102,36 @@ mod proof_tests {
             .pending
             .provide_account_proof(&signed)
             .expect("retry with the right proof succeeds");
+    }
+}
+
+#[cfg(test)]
+mod access_tests {
+    //! The `access` projection's precedence without a live engine: the
+    //! `unrecoverable` variant has no cheap real flow, so the pure
+    //! mapping is pinned here while `tests/stall.rs` proves the
+    //! removed-device/removed and stalled halves end to end.
+
+    use super::{GroupAccess, RemovedScope, group_access};
+
+    #[test]
+    fn precedence() {
+        use RemovedScope::{Account, DeviceOnly, Live};
+
+        assert_eq!(
+            group_access(DeviceOnly, false, false),
+            GroupAccess::RemovedDevice
+        );
+        assert_eq!(group_access(Account, false, false), GroupAccess::Removed);
+        assert_eq!(group_access(Live, true, false), GroupAccess::Unrecoverable);
+        assert_eq!(group_access(Live, false, true), GroupAccess::Stalled);
+        assert_eq!(group_access(Live, false, false), GroupAccess::Active);
+        // A removed copy outranks every other flag; `unrecoverable`
+        // outranks `stalled`.
+        assert_eq!(
+            group_access(DeviceOnly, true, true),
+            GroupAccess::RemovedDevice
+        );
+        assert_eq!(group_access(Live, true, true), GroupAccess::Unrecoverable);
     }
 }

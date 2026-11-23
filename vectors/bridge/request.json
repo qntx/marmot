@@ -1,338 +1,418 @@
 {
-  "ack_durable": {
-    "seq": "7",
-    "type": "ack_durable"
-  },
-  "acknowledge_messages": {
-    "ids": [
-      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-    ],
-    "type": "acknowledge_messages"
-  },
-  "awaiting_durability": {
-    "type": "awaiting_durability"
-  },
-  "create_group": {
-    "admins": [
-      "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-    ],
-    "components": [
-      {
-        "component_id": 32779,
-        "data": "01"
-      }
-    ],
-    "description": "desc",
-    "invitees": [
-      {
-        "inbox_relays": [
-          "wss://relay.example"
-        ],
-        "key_package": {
-          "content": "hello",
-          "created_at": "1700000000",
-          "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-          "kind": 9,
-          "pubkey": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-          "sig": "55555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555",
-          "tags": [
-            [
-              "e",
-              "00"
-            ]
-          ]
-        }
-      }
-    ],
-    "name": "group",
-    "relays": [
-      "wss://relay.example"
-    ],
-    "type": "create_group"
-  },
-  "disband": {
-    "group": "dead",
-    "type": "disband"
-  },
-  "discard_attachment": {
-    "handle": 1,
-    "type": "discard_attachment"
-  },
-  "enable_disbanding": {
-    "group": "dead",
-    "type": "enable_disbanding"
-  },
-  "ensure_key_package": {
-    "type": "ensure_key_package",
-    "write_relays": [
-      "wss://relay.example"
-    ]
-  },
-  "forget_group": {
-    "group": "dead",
-    "type": "forget_group"
-  },
-  "group": {
-    "group": "dead",
-    "type": "group"
-  },
-  "groups": {
-    "type": "groups"
-  },
-  "history_fetched": {
-    "group": "dead",
-    "type": "history_fetched"
-  },
-  "ingest": {
-    "events": [
-      {
-        "content": "hello",
-        "created_at": "1700000000",
-        "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        "kind": 9,
-        "pubkey": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-        "sig": "55555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555",
-        "tags": [
-          [
-            "e",
-            "00"
-          ]
-        ]
-      }
-    ],
-    "type": "ingest"
-  },
-  "invite": {
-    "group": "dead",
-    "invitees": [
-      {
-        "inbox_relays": [
-          "wss://relay.example"
-        ],
-        "key_package": {
-          "content": "hello",
-          "created_at": "1700000000",
-          "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-          "kind": 9,
-          "pubkey": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-          "sig": "55555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555",
-          "tags": [
-            [
-              "e",
-              "00"
-            ]
-          ]
-        }
-      }
-    ],
-    "type": "invite"
-  },
-  "key_package_status": {
-    "type": "key_package_status"
-  },
-  "leave": {
-    "group": "dead",
-    "type": "leave"
-  },
-  "open_attachment": {
-    "ciphertext": "99",
-    "group": "dead",
-    "message": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-    "reference": {
-      "ciphertext_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
-      "dim": "10x10",
-      "filename": "a.png",
-      "locators": [
-        {
-          "kind": "https",
-          "value": "https://blob.example/aa"
-        }
-      ],
-      "media_type": "image/png",
-      "nonce": "010101010101010101010101",
-      "plaintext_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-      "thumbhash": "AA=="
-    },
-    "type": "open_attachment"
-  },
-  "publish_inbox_relays": {
-    "relays": [
-      "wss://relay.example"
-    ],
-    "type": "publish_inbox_relays"
-  },
-  "remove_members": {
-    "group": "dead",
-    "members": [
-      "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-    ],
-    "type": "remove_members"
-  },
-  "report_publish": {
+ "ack_durable": {
+  "seq": "7",
+  "type": "ack_durable"
+ },
+ "acknowledge_messages": {
+  "ids": [
+   "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  ],
+  "type": "acknowledge_messages"
+ },
+ "audit_key_package_slot": {
+  "events": [
+   {
+    "content": "hello",
+    "created_at": "1700000000",
     "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-    "results": [
-      {
-        "relay": "wss://relay.example",
-        "status": "accepted"
-      }
-    ],
-    "type": "report_publish"
-  },
-  "seal_attachment": {
-    "attachment": {
-      "dim": null,
-      "filename": "a.png",
-      "media_type": "image/png",
-      "plaintext": "0102",
-      "thumbhash": null
-    },
-    "group": "dead",
-    "type": "seal_attachment"
-  },
-  "select_key_packages": {
-    "account": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-    "events": [
-      {
-        "content": "a2V5",
-        "created_at": "1700000000",
-        "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        "kind": 30443,
-        "pubkey": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-        "sig": "55555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555",
-        "tags": [
-          [
-            "d",
-            "device-1"
-          ],
-          [
-            "i",
-            "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
-          ]
-        ]
-      }
-    ],
-    "group": null,
-    "type": "select_key_packages"
-  },
-  "self_update": {
-    "group": "dead",
-    "type": "self_update"
-  },
-  "send_intent": {
-    "group": "dead",
-    "intent": {
-      "emoji": "\ud83d\udc4d",
-      "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-      "type": "reaction"
-    },
-    "type": "send_intent"
-  },
-  "send_media": {
-    "attachments": [
-      {
-        "handle": 1,
-        "locators": [
-          {
-            "kind": "https",
-            "value": "https://blob.example/aa"
-          }
-        ]
-      }
-    ],
-    "caption": "cap",
-    "group": "dead",
+    "kind": 30443,
+    "pubkey": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "sig": "55555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555",
     "tags": [
+     [
+      "d",
+      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+     ]
+    ]
+   }
+  ],
+  "type": "audit_key_package_slot"
+ },
+ "awaiting_durability": {
+  "type": "awaiting_durability"
+ },
+ "confirm_rejoin": {
+  "group": "dead",
+  "offer": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "token": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "type": "confirm_rejoin"
+ },
+ "create_group": {
+  "admins": [
+   "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  ],
+  "components": [
+   {
+    "component_id": 32779,
+    "data": "01"
+   }
+  ],
+  "description": "desc",
+  "invitees": [
+   {
+    "inbox_relays": [
+     "wss://relay.example"
+    ],
+    "key_package": {
+     "content": "hello",
+     "created_at": "1700000000",
+     "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "kind": 9,
+     "pubkey": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "sig": "55555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555",
+     "tags": [
       [
-        "t",
-        "v"
+       "e",
+       "00"
       ]
+     ]
+    }
+   }
+  ],
+  "name": "group",
+  "own_devices": [
+   {
+    "inbox_relays": [
+     "wss://relay.example"
     ],
-    "type": "send_media"
-  },
-  "send_message": {
-    "group": "dead",
-    "message": {
-      "content": "hi",
-      "kind": 9,
-      "tags": []
-    },
-    "type": "send_message"
-  },
-  "set_admin": {
-    "account": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-    "admin": true,
-    "group": "dead",
-    "type": "set_admin"
-  },
-  "set_group_avatar": {
-    "avatar": {
-      "dim": "64x64",
-      "thumbhash": null,
-      "url": "https://example.com/a.png"
-    },
-    "group": "dead",
-    "type": "set_group_avatar"
-  },
-  "set_retention": {
-    "group": "dead",
-    "seconds": "60",
-    "type": "set_retention"
-  },
-  "sign_out": {
-    "type": "sign_out",
-    "write_relays": [
-      "wss://a.example"
-    ]
-  },
-  "signer_reply": {
-    "replies": [
-      {
-        "id": 1,
-        "result": {
-          "text": "cipher",
-          "type": "text"
-        }
-      }
-    ],
-    "type": "signer_reply"
-  },
-  "submit_proof": {
-    "event": {
-      "content": "hello",
-      "created_at": "1700000000",
-      "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-      "kind": 9,
-      "pubkey": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-      "sig": "55555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555",
-      "tags": [
-        [
-          "e",
-          "00"
-        ]
+    "key_package": {
+     "content": "hello",
+     "created_at": "1700000000",
+     "id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+     "kind": 9,
+     "pubkey": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "sig": "55555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555",
+     "tags": [
+      [
+       "d",
+       "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
       ]
-    },
-    "type": "submit_proof"
-  },
-  "take_outbound": {
-    "type": "take_outbound"
-  },
-  "tick": {
-    "type": "tick"
-  },
-  "update_app_components": {
-    "group": "dead",
-    "type": "update_app_components",
-    "updates": [
-      {
-        "component_id": 32774,
-        "data": "03"
-      }
+     ]
+    }
+   }
+  ],
+  "relays": [
+   "wss://relay.example"
+  ],
+  "type": "create_group"
+ },
+ "decline_rejoin": {
+  "offer": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "type": "decline_rejoin"
+ },
+ "disband": {
+  "group": "dead",
+  "type": "disband"
+ },
+ "discard_attachment": {
+  "handle": 1,
+  "type": "discard_attachment"
+ },
+ "enable_disbanding": {
+  "group": "dead",
+  "type": "enable_disbanding"
+ },
+ "ensure_key_package": {
+  "type": "ensure_key_package",
+  "write_relays": [
+   "wss://relay.example"
+  ]
+ },
+ "forget_group": {
+  "group": "dead",
+  "type": "forget_group"
+ },
+ "group": {
+  "group": "dead",
+  "type": "group"
+ },
+ "groups": {
+  "type": "groups"
+ },
+ "history_fetched": {
+  "group": "dead",
+  "type": "history_fetched"
+ },
+ "ingest": {
+  "events": [
+   {
+    "content": "hello",
+    "created_at": "1700000000",
+    "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "kind": 9,
+    "pubkey": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "sig": "55555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555",
+    "tags": [
+     [
+      "e",
+      "00"
+     ]
     ]
+   }
+  ],
+  "type": "ingest"
+ },
+ "invite": {
+  "group": "dead",
+  "invitees": [
+   {
+    "inbox_relays": [
+     "wss://relay.example"
+    ],
+    "key_package": {
+     "content": "hello",
+     "created_at": "1700000000",
+     "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "kind": 9,
+     "pubkey": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "sig": "55555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555",
+     "tags": [
+      [
+       "e",
+       "00"
+      ]
+     ]
+    }
+   }
+  ],
+  "type": "invite"
+ },
+ "key_package_status": {
+  "type": "key_package_status"
+ },
+ "leave": {
+  "group": "dead",
+  "type": "leave"
+ },
+ "open_attachment": {
+  "ciphertext": "99",
+  "group": "dead",
+  "message": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "reference": {
+   "ciphertext_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+   "dim": "10x10",
+   "filename": "a.png",
+   "locators": [
+    {
+     "kind": "https",
+     "value": "https://blob.example/aa"
+    }
+   ],
+   "media_type": "image/png",
+   "nonce": "010101010101010101010101",
+   "plaintext_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "thumbhash": "AA=="
   },
-  "update_group_profile": {
-    "description": null,
-    "group": "dead",
-    "name": "new",
-    "type": "update_group_profile"
-  }
+  "type": "open_attachment"
+ },
+ "publish_inbox_relays": {
+  "relays": [
+   "wss://relay.example"
+  ],
+  "type": "publish_inbox_relays"
+ },
+ "readd_member": {
+  "account": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "group": "dead",
+  "invitees": [
+   {
+    "inbox_relays": [
+     "wss://relay.example"
+    ],
+    "key_package": {
+     "content": "hello",
+     "created_at": "1700000000",
+     "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "kind": 9,
+     "pubkey": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "sig": "55555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555",
+     "tags": [
+      [
+       "e",
+       "00"
+      ]
+     ]
+    }
+   }
+  ],
+  "type": "readd_member"
+ },
+ "rejoin_offers": {
+  "group": "dead",
+  "type": "rejoin_offers"
+ },
+ "remove_members": {
+  "group": "dead",
+  "members": [
+   "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  ],
+  "type": "remove_members"
+ },
+ "report_publish": {
+  "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "results": [
+   {
+    "relay": "wss://relay.example",
+    "status": "accepted"
+   }
+  ],
+  "type": "report_publish"
+ },
+ "seal_attachment": {
+  "attachment": {
+   "dim": null,
+   "filename": "a.png",
+   "media_type": "image/png",
+   "plaintext": "0102",
+   "thumbhash": null
+  },
+  "group": "dead",
+  "type": "seal_attachment"
+ },
+ "select_key_packages": {
+  "account": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "events": [
+   {
+    "content": "a2V5",
+    "created_at": "1700000000",
+    "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "kind": 30443,
+    "pubkey": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "sig": "55555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555",
+    "tags": [
+     [
+      "d",
+      "device-1"
+     ],
+     [
+      "i",
+      "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+     ]
+    ]
+   }
+  ],
+  "group": null,
+  "type": "select_key_packages"
+ },
+ "self_update": {
+  "group": "dead",
+  "type": "self_update"
+ },
+ "send_intent": {
+  "group": "dead",
+  "intent": {
+   "emoji": "\ud83d\udc4d",
+   "target": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "type": "reaction"
+  },
+  "type": "send_intent"
+ },
+ "send_media": {
+  "attachments": [
+   {
+    "handle": 1,
+    "locators": [
+     {
+      "kind": "https",
+      "value": "https://blob.example/aa"
+     }
+    ]
+   }
+  ],
+  "caption": "cap",
+  "group": "dead",
+  "tags": [
+   [
+    "t",
+    "v"
+   ]
+  ],
+  "type": "send_media"
+ },
+ "send_message": {
+  "group": "dead",
+  "message": {
+   "content": "hi",
+   "kind": 9,
+   "tags": []
+  },
+  "type": "send_message"
+ },
+ "set_admin": {
+  "account": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "admin": true,
+  "group": "dead",
+  "type": "set_admin"
+ },
+ "set_group_avatar": {
+  "avatar": {
+   "dim": "64x64",
+   "thumbhash": null,
+   "url": "https://example.com/a.png"
+  },
+  "group": "dead",
+  "type": "set_group_avatar"
+ },
+ "set_retention": {
+  "group": "dead",
+  "seconds": "60",
+  "type": "set_retention"
+ },
+ "sign_out": {
+  "type": "sign_out",
+  "write_relays": [
+   "wss://a.example"
+  ]
+ },
+ "signer_reply": {
+  "replies": [
+   {
+    "id": 1,
+    "result": {
+     "text": "cipher",
+     "type": "text"
+    }
+   }
+  ],
+  "type": "signer_reply"
+ },
+ "submit_proof": {
+  "event": {
+   "content": "hello",
+   "created_at": "1700000000",
+   "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "kind": 9,
+   "pubkey": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+   "sig": "55555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555555",
+   "tags": [
+    [
+     "e",
+     "00"
+    ]
+   ]
+  },
+  "type": "submit_proof"
+ },
+ "take_outbound": {
+  "type": "take_outbound"
+ },
+ "tick": {
+  "type": "tick"
+ },
+ "update_app_components": {
+  "group": "dead",
+  "type": "update_app_components",
+  "updates": [
+   {
+    "component_id": 32774,
+    "data": "03"
+   }
+  ]
+ },
+ "update_group_profile": {
+  "description": null,
+  "group": "dead",
+  "name": "new",
+  "type": "update_group_profile"
+ }
 }

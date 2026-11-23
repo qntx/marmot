@@ -32,6 +32,39 @@ All `src/` code is platform-neutral and Hermes V1-safe (no Node- or
 browser-only globals, no `node:*` imports, no ES2023+ array methods);
 platform capabilities arrive through the injected ports.
 
+## Multi-device
+
+Each Marmot installation is a device with its own `KeyPackage` slot (the
+`d` tag), and an account's membership is per leaf: inviters — this SDK
+and White Noise alike — add every fresh slot they are shown. A new
+device sees a group only after an admin invites the account again, or
+when the group is founded with `createGroup`'s default
+`includeOwnDevices`, which adds the account's sibling slots as
+`own_devices` (a MAY — lookup failures found without them).
+
+`GroupSnapshot.access` names this device's copy: `active`;
+`removed_device` when this device left or was dropped while the account
+stays on its other leaves; `removed` for a whole-account removal;
+`unrecoverable` when the copy lost its key schedule; `stalled` when a
+stall suspicion survives one full refetch. `members` carries one entry
+per account with `devices`, its leaf count — a sibling leaf leaving
+fires no member event, so hosts re-read the snapshot on
+`epoch_changed`. A stalled, removed-device or unrecoverable copy is
+replaced by an admin re-invite: the client surfaces `rejoin_offered`,
+the host shows it, and `confirmRejoin` installs the new local copy while
+delivered history stays; messages between the stall and the rejoin
+epoch are not recoverable. `declineRejoin` drops the offer. An admin
+heals a stuck member with `readdMember`, which removes and re-invites
+the account's leaves exactly once. `open` also audits the device's own
+`KeyPackage` slot daily, outranking any foreign publication of the same
+slot.
+
+A White Noise device of the same account lists each Meowl device as an
+unrecognized sign-in; tell users to answer "Not now" there — "This
+wasn't me" makes White Noise warn that the account's key may be
+compromised. The protocol cannot fix this (a draft device-group
+limitation).
+
 ## License
 
 Licensed under either of Apache-2.0 or MIT, at your option.

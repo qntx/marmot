@@ -51,6 +51,7 @@ export type GroupEvent = Exclude<
   | { type: "publish_resolved" }
   | { type: "app_event_dropped" }
   | { type: "key_package_rotated" }
+  | { type: "group_stall_suspected" }
   | { type: "unmapped" }
 >;
 
@@ -160,6 +161,12 @@ export class Pump {
   private readonly eoseSeen = new Map<string, Set<string>>();
   /** Groups already reported via `historyFetched` — once per Pump lifetime. */
   private readonly historyReported = new Set<string>();
+  /**
+   * Per-group refetch generation, bumped by `onStallSuspected`. `onEose` captures it when it queues
+   * `historyFetched`; a report queued before the suspicion is dropped when it runs, so only the
+   * reopened subs' EOSE can stand in as the refetch-complete signal.
+   */
+  private readonly refetchGeneration = new Map<string, number>();
   private readonly buffer = new Map<string, Buffered>();
   private readonly active = new Map<string, ActiveSub>();
   /** Distinct events buffered or inside an unsettled ingest batch. */
@@ -890,12 +897,16 @@ export class Pump {
         case "key_package_rotated":
         case "unmapped":
           break;
+        case "group_stall_suspected":
+          this.onStallSuspected(event.group);
+          break;
         case "group_created":
         case "local_copy_terminated":
         case "local_copy_restored":
         case "group_state_changed":
         case "epoch_changed":
         case "group_unrecoverable":
+        case "rejoin_offered":
         case "group_state_invalidated":
         case "group_state_revalidated":
           this.reconcileFlag = true;
@@ -1033,12 +1044,13 @@ export class Pump {
   /**
    * First EOSE per group subscription per relay: once every relay the plan subscribes a route on
    * has delivered, flush the ingest buffer and report `historyFetched` through the serialized op
-   * queue — once per group per Pump lifetime. A subscription lost before its EOSE (relay close,
-   * inbound cap) leaves its relay unseen until the reopened one delivers. Never-ending EOSE needs
-   * no timer: the session's own deadline covers it.
+   * queue — once per group per Pump lifetime, plus once after each stall refetch. A subscription
+   * lost before its EOSE (relay close, inbound cap) leaves its relay unseen until the reopened one
+   * delivers; an EOSE from a sub that is no longer the active one is stale and counts for nothing.
+   * Never-ending EOSE needs no timer: the session's own deadline covers it.
    */
   private onEose(sub: ActiveSub): void {
-    if (this.closed || sub.kind === GIFT_WRAP_KIND) {
+    if (this.closed || sub.kind === GIFT_WRAP_KIND || this.active.get(sub.key) !== sub) {
       return;
     }
     for (const route of sub.routes) {
@@ -1058,14 +1070,55 @@ export class Pump {
       }
       this.historyReported.add(group);
       this.flushNow();
+      const generation = this.refetchGeneration.get(group) ?? 0;
       void (async () => {
         try {
-          await this.run(async () => this.engine.historyFetched(group), false);
+          await this.run(async () => {
+            if ((this.refetchGeneration.get(group) ?? 0) !== generation) {
+              return;
+            }
+            await this.engine.historyFetched(group);
+          }, false);
         } catch (error) {
           this.emitError(toMarmotError(error));
         }
       })();
     }
+  }
+
+  /**
+   * The session suspects the group's copy is behind: reset every cursor key of the group's routes
+   * (the inbox cursor is untouched), close the live group subs covering them, and let the reconcile
+   * reopen them with no `since` — an unfloored replay of the group feed, the same full-history
+   * fetch marmot-app performs. `historyReported` re-arms so the reopened subs' EOSE reports
+   * `historyFetched` again; that report is the refetch-complete signal the session evaluates. The
+   * generation bump voids a report still queued from the earlier fetch. Dispatch runs inside
+   * `afterOp`, so `reconcileFlag` alone reopens the subs in the same pass.
+   */
+  private onStallSuspected(group: string): void {
+    for (const [route, routeGroup] of this.routeGroup) {
+      if (routeGroup !== group) {
+        continue;
+      }
+      const prefix = groupCursorKey(route, "");
+      this.state.cursors = Object.fromEntries(
+        Object.entries(this.state.cursors).filter(([key]) => !key.startsWith(prefix)),
+      );
+      this.eoseSeen.delete(route);
+      for (const sub of this.active.values()) {
+        if (sub.kind === GIFT_WRAP_KIND || !sub.routes.includes(route)) {
+          continue;
+        }
+        sub.close();
+        if (this.active.get(sub.key) === sub) {
+          this.active.delete(sub.key);
+        }
+      }
+    }
+    this.refetchGeneration.set(group, (this.refetchGeneration.get(group) ?? 0) + 1);
+    this.historyReported.delete(group);
+    this.scheduleSave();
+    this.reconcileFlag = true;
   }
 
   private scheduleReconcile(): void {

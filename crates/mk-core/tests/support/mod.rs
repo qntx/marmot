@@ -492,6 +492,7 @@ pub async fn group_as(
             description: String::new(),
             relays: vec![url.to_owned()],
             invitees: invites,
+            own_devices: Vec::new(),
             admins: admins.to_vec(),
             components,
         })

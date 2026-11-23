@@ -133,6 +133,9 @@ pub enum DropReason {
     /// Kind 7 with an invalid target or emoji; kind 4891 whose removal
     /// payload does not parse; a kind 1009 or 5 without a usable `e` tag.
     Malformed,
+    /// Kinds 452–477 are reserved for the device-group draft's pairing
+    /// traffic and never carry a chat payload.
+    Reserved,
 }
 
 impl DropReason {
@@ -144,6 +147,7 @@ impl DropReason {
             Self::Unauthorized => "unauthorized",
             Self::Unverifiable => "unverifiable",
             Self::Malformed => "malformed",
+            Self::Reserved => "reserved",
         }
     }
 }
@@ -253,6 +257,10 @@ pub(crate) fn classify(
 ) -> Classified {
     if expires_at.is_some_and(|expiry| expiry <= now_secs) {
         return Classified::Drop(DropReason::Expired);
+    }
+    // The device-group draft's pairing kinds never carry a chat payload.
+    if (452..=477).contains(&kind) {
+        return Classified::Drop(DropReason::Reserved);
     }
     match kind {
         MARMOT_APP_EVENT_KIND_CHAT => Classified::Deliver(Semantics::Chat {
@@ -1053,5 +1061,27 @@ mod tests {
             classify(5, &tags(150, 100), "", None, None, 0),
             Classified::Modifier(Modifier::Delete { ref targets }) if targets.len() == 100
         ));
+    }
+
+    #[test]
+    fn reserved_device_kinds_drop() {
+        for kind in [452u64, 460, 477] {
+            assert!(
+                matches!(
+                    classify(kind, &[], "", None, None, 0),
+                    Classified::Drop(DropReason::Reserved)
+                ),
+                "kind {kind} drops reserved"
+            );
+        }
+        for kind in [451u64, 478] {
+            assert!(
+                matches!(
+                    classify(kind, &[], "", None, None, 0),
+                    Classified::Deliver(Semantics::Other)
+                ),
+                "kind {kind} stays untyped"
+            );
+        }
     }
 }

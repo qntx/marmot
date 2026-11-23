@@ -84,6 +84,7 @@ mod agent_stream_tests {
                 description: String::new(),
                 relays: vec![RELAY.to_owned()],
                 invitees: invites,
+                own_devices: Vec::new(),
                 admins: Vec::new(),
                 components,
             })
@@ -188,6 +189,7 @@ mod agent_stream_tests {
                     description: String::new(),
                     relays: vec![RELAY.to_owned()],
                     invitees: invites,
+                    own_devices: Vec::new(),
                     admins: Vec::new(),
                     components: vec![send_and_receive.to_component().expect("component")],
                 })
@@ -282,6 +284,7 @@ mod agent_stream_tests {
                 description: String::new(),
                 relays: vec![RELAY.to_owned()],
                 invitees: Vec::new(),
+                own_devices: Vec::new(),
                 admins: Vec::new(),
                 components: vec![send_and_receive.to_component().expect("component")],
             })

@@ -40,6 +40,7 @@ import type { ManualTimer } from "../src/testing/timer.ts";
 import { wireEventBytes } from "../src/transport/nostr.ts";
 import { groupCursorKey, inboxCursorKey } from "../src/transport/plan.ts";
 import type { RelayFilter, RelayPort } from "../src/transport/port.ts";
+import { markVerified } from "../src/transport/verify.ts";
 
 const ACCOUNT = "a".repeat(64);
 const RELAY = "wss://r1.example";
@@ -110,6 +111,7 @@ function snapshot(): GroupSnapshot {
     description: "",
     epoch: 1n,
     state: "stable",
+    access: "active",
     members: [],
     relays: [RELAY],
     nostrGroupId: ROUTE,
@@ -237,6 +239,7 @@ function scriptedBackend(script: Script): {
                         result: { type: "group", group: script.groups[0] },
                       };
                     case "ensure_key_package":
+                    case "audit_key_package_slot":
                     case "key_package_status":
                       return {
                         type: "ok",
@@ -439,6 +442,7 @@ async function open(
   blob?: Uint8Array,
   sign?: Signer,
   lookupRelays?: string[],
+  seed?: (network: ReturnType<typeof fakeRelay>) => Promise<void>,
 ): Promise<Fixture> {
   const timer = manualTimer();
   const network = fakeRelay();
@@ -448,6 +452,9 @@ async function open(
   const subs: Array<{ relay: string; filters: RelayFilter[] }> = [];
   if (blob !== undefined) {
     await cursors.save(blob);
+  }
+  if (seed !== undefined) {
+    await seed(network);
   }
   const inner = network.port("c");
   const port: RelayPort = {
@@ -722,6 +729,47 @@ describe("MarmotClient", () => {
     await fixture.client.close();
   });
 
+  test("createGroup passes sibling slots as own_devices", async () => {
+    const seed = async (network: ReturnType<typeof fakeRelay>): Promise<void> => {
+      const peer = network.port("peer");
+      const mk = (id: string, kind: number, tags: string[][]) => {
+        const item = {
+          id,
+          pubkey: ACCOUNT,
+          createdAt: 1000n,
+          kind,
+          tags,
+          content: "",
+          sig: "5".repeat(128),
+        };
+        markVerified(item);
+        return item;
+      };
+      // Write set on the lookup relays; the slot's sibling publications
+      // on the (normalized) write relay; inbox relays for the Welcome.
+      await peer.publish(LOOKUP, mk("12".repeat(32), 10002, [["r", RELAY]]));
+      await peer.publish(LOOKUP, mk("14".repeat(32), 10050, [["relay", RELAY2]]));
+      await peer.publish(`${RELAY}/`, mk("15".repeat(32), 30443, [["d", "11".repeat(32)]]));
+      await peer.publish(`${RELAY}/`, mk("16".repeat(32), 30443, [["d", "22".repeat(32)]]));
+    };
+    const fixture = await open(freshScript(), undefined, undefined, [LOOKUP], seed);
+    await settle(fixture.timer, 5000);
+    await fixture.client.createGroup({
+      name: "g",
+      description: "",
+      relays: [RELAY],
+      invitees: [],
+      admins: [],
+      components: [],
+    });
+    const calls = callsOf(fixture.script, "create_group");
+    expect(calls).toHaveLength(1);
+    const ownDevices = (calls[0] as { own_devices?: Array<{ keyPackage: { id: string } }> })
+      .own_devices;
+    expect(ownDevices?.map((invitee) => invitee.keyPackage.id)).toStrictEqual(["16".repeat(32)]);
+    await fixture.client.close();
+  });
+
   test("createGroup refuses unsafe relay urls before touching the engine", async () => {
     const fixture = await open(freshScript());
     await expect(
@@ -739,10 +787,10 @@ describe("MarmotClient", () => {
     const fixture = await open(freshScript(), undefined, undefined, [LOOKUP]);
     // An authored NIP-65 list on the lookup relay: `read`-marked relays are
     // excluded from the write set the request carries.
-    // The list is fetched by `writeRelaysOf` (an authors-filtered one-shot fetch, no
-    // signature check) — a literal fixture, not a pump-ingested event, so the fake
-    // pubkey is fine here.
-    await fixture.network.port("peer").publish(LOOKUP, {
+    // The list is fetched by `writeRelaysOf` (an authors-filtered one-shot fetch that
+    // re-verifies inbound events) — `markVerified` plays the role of a RelayPort whose pool
+    // already verified the object, so the fake pubkey fixture still lands.
+    const list = {
       id: "12".repeat(32),
       pubkey: ACCOUNT,
       createdAt: 1000n,
@@ -753,7 +801,9 @@ describe("MarmotClient", () => {
       ],
       content: "",
       sig: "5".repeat(128),
-    });
+    };
+    markVerified(list);
+    await fixture.network.port("peer").publish(LOOKUP, list);
     const result = await fixture.client.signOut();
     expect(result).toStrictEqual({ left: [], keptAdminLeaves: [] });
     const calls = callsOf(fixture.script, "sign_out");
@@ -796,6 +846,59 @@ describe("MarmotClient", () => {
     await expect(fixture.client.signOut()).rejects.toMatchObject({ kind: "no_relay_list" });
     expect(callsOf(fixture.script, "sign_out")).toHaveLength(0);
     await fixture.client.close();
+  });
+
+  /** The write-set NIP-65 list plus one slot publication for the audit. */
+  const seedSlot = async (network: ReturnType<typeof fakeRelay>): Promise<void> => {
+    const peer = network.port("peer");
+    const list = {
+      id: "12".repeat(32),
+      pubkey: ACCOUNT,
+      createdAt: 1000n,
+      kind: 10002,
+      tags: [["r", RELAY]],
+      content: "",
+      sig: "5".repeat(128),
+    };
+    const package_ = {
+      id: "13".repeat(32),
+      pubkey: ACCOUNT,
+      createdAt: 1000n,
+      kind: 30443,
+      tags: [["d", "11".repeat(32)]],
+      content: "",
+      sig: "5".repeat(128),
+    };
+    markVerified(list);
+    markVerified(package_);
+    await peer.publish(LOOKUP, list);
+    // The write set is normalized — `wss://r1.example/` is its store key.
+    await peer.publish(`${RELAY}/`, package_);
+  };
+
+  test("open runs the slot audit in the background", async () => {
+    const fixture = await open(freshScript(), undefined, undefined, [LOOKUP], seedSlot);
+    await settle(fixture.timer, 5000);
+    const calls = callsOf(fixture.script, "audit_key_package_slot");
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({
+      type: "audit_key_package_slot",
+      events: [{ id: "13".repeat(32) }],
+    });
+    await fixture.client.close();
+  });
+
+  test("the daily timer re-runs the slot audit; close clears it", async () => {
+    const fixture = await open(freshScript(), undefined, undefined, [LOOKUP], seedSlot);
+    await settle(fixture.timer, 5000);
+    expect(callsOf(fixture.script, "audit_key_package_slot")).toHaveLength(1);
+    await fixture.timer.advance(24 * 60 * 60 * 1000);
+    await settle(fixture.timer, 5000);
+    expect(callsOf(fixture.script, "audit_key_package_slot")).toHaveLength(2);
+    await fixture.client.close();
+    await fixture.timer.advance(48 * 60 * 60 * 1000);
+    await settle(fixture.timer, 5000);
+    expect(callsOf(fixture.script, "audit_key_package_slot")).toHaveLength(2);
   });
 
   test("lookupInvitees maps non-found answers to typed errors", async () => {

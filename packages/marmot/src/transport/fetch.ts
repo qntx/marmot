@@ -5,6 +5,7 @@
 
 import type { NostrEvent } from "../backend/protocol.ts";
 import type { RelayFilter, RelayPort, Timer } from "./port.ts";
+import { verifyInbound } from "./verify.ts";
 
 /** Hard bound on one `fetchEvents` call. */
 export const FETCH_TIMEOUT_MS = 5000;
@@ -59,7 +60,12 @@ export async function fetchEvents(
       const end = makeEnd();
       const close = port.subscribe(relay, [filter], {
         event: (event) => {
-          byId.set(event.id, event);
+          // The port is not required to verify; a forged event must not enter the dedupe
+          // buffer — a same-id copy would shadow the genuine event and a forged relay list
+          // with a later created_at would steer the caller.
+          if (verifyInbound(event)) {
+            byId.set(event.id, event);
+          }
         },
         eose: end,
         closed: end,
