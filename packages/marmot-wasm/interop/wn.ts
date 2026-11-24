@@ -819,10 +819,9 @@ async function run(): Promise<void> {
           ),
         "local_copy_terminated event",
         10_000,
-      ).then(
-        (event) => (event?.type === "local_copy_terminated" ? event : undefined),
-        () => undefined,
-      );
+      )
+        .then((event) => (event?.type === "local_copy_terminated" ? event : undefined))
+        .catch(() => undefined);
       log(
         terminated === undefined
           ? `no local_copy_terminated event within 10s (${secs(at)})`
