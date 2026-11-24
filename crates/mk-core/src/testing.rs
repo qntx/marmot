@@ -264,6 +264,13 @@ pub struct LocalSigner {
 }
 
 impl LocalSigner {
+    /// The underlying `Keys` — the interop harness uses them to answer
+    /// NIP-42 challenges as the account on restricted-read relays.
+    #[must_use]
+    pub const fn keys(&self) -> &nostr::prelude::Keys {
+        &self.keys
+    }
+
     /// A signer over a freshly generated keypair.
     #[must_use]
     pub fn new() -> Self {

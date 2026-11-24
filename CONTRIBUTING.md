@@ -70,9 +70,10 @@ fuzz/                 standalone cargo-fuzz project (excluded); corpus/ is
                       gitignored — seeds are generated (see Fuzzing below)
 vectors/              recorded copies frozen at the pinned revs (see
                       vectors/README.md): spec/ spec text, mdk/ MDK vectors
-upstream.json         the one pins file: spec rev + MDK tag/rev (and the
-                      separate `wn` pin for White Noise) and their
-                      3rdparty/ checkout paths
+upstream.json         the one pins file: spec rev + MDK tag/rev, the
+                      separate `wn` pin for White Noise and the `nosfry`
+                      pin (relay release + Marmot profile digests) —
+                      and their 3rdparty/ checkout paths
 3rdparty/             local upstream checkouts — gitignored, never committed
 scripts/              repo tooling (check-version, sync-versions,
                       check-pins); script tests run under the root vp test
@@ -164,6 +165,23 @@ White Noise defect, measured by the non-required CI job
 ```sh
 cd crates/interop
 cargo test                                     # compiles/lints; scenarios ignored
+WN_BIN=$PWD/../../spike/target/wn/bin/wn \
+WND_BIN=$PWD/../../spike/target/wn/bin/wnd \
+  cargo test --release -- --ignored --test-threads=1 --nocapture
+```
+
+`INTEROP_RELAY_URL=<ws-url>` skips the in-process relay and the NIP-11
+front entirely: every party — the client, `wnd`, the sessions — dials
+that relay, and welcome fetches read through per-account connections
+that answer NIP-42 (kind 1059 is commonly read-gated to author and
+recipient on real relays; `INTEROP_RELAY` must stay unset). The
+advisory `interop-nosfry.yml` workflow runs the suite nightly against
+the nosfry release pinned in `upstream.json` (`nosfry`), configured by
+its `contrib/marmot/nosfry.toml` profile. Locally, with a nosfry
+listening on `ws://127.0.0.1:7777`:
+
+```sh
+INTEROP_RELAY_URL=ws://127.0.0.1:7777 \
 WN_BIN=$PWD/../../spike/target/wn/bin/wn \
 WND_BIN=$PWD/../../spike/target/wn/bin/wnd \
   cargo test --release -- --ignored --test-threads=1 --nocapture

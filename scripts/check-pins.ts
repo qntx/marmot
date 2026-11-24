@@ -1,5 +1,6 @@
 /// <reference types="node" />
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
@@ -59,6 +60,17 @@ const RECORDED: Record<string, RecordedRoot[]> = {
   ],
 };
 
+/**
+ * Recorded-digest checks. Some pins carry `*_sha256` fields whose digest covers a file inside the
+ * upstream checkout rather than a recorded copy under `vectors/`; when that pin's checkout sits at
+ * its pinned rev, each mapped field must equal the SHA-256 of the file at the mapped checkout path.
+ * Digests covering release artifacts (e.g. the nosfry tarball) are not listed here — they are not
+ * part of the source checkout and the workflow verifies them at download time.
+ */
+const DIGESTS: Record<string, Record<string, string>> = {
+  nosfry: { profile_sha256: "contrib/marmot/nosfry.toml" },
+};
+
 export type PinProbe = {
   /** HEAD of a checkout directory, or undefined when the directory is absent. */
   checkoutHead: (checkout: string) => string | undefined;
@@ -85,9 +97,13 @@ function sameBytes(a: Uint8Array, b: Uint8Array): boolean {
  * directory exists locally, the checkout HEAD must equal the pinned rev; absent checkouts are
  * skipped with a note (CI has no 3rdparty). A pin carrying `tag` also requires that tag to resolve
  * to the pinned rev inside the checkout: a missing tag is a note (a shallow fetch may not carry
- * it), a tag pointing elsewhere is an error. When a checkout is at the pin, every recorded copy
- * under the pin's `RECORDED` roots (spec `*.md`, mdk vector `*.json`) must match its upstream
- * source byte-for-byte (we record subsets of the source trees, not whole directories).
+ * it), a tag pointing elsewhere is an error. Any field ending in `_sha256` must be a 64-hex digest,
+ * checked for every pin whether or not its checkout is present. When a checkout is at the pin,
+ * every recorded copy under the pin's `RECORDED` roots (spec `*.md`, mdk vector `*.json`) must
+ * match its upstream source byte-for-byte (we record subsets of the source trees, not whole
+ * directories), and each `DIGESTS` field must equal the SHA-256 of the mapped file inside the
+ * checkout. Artifact digests (a release tarball's `*_sha256`) are not checkable offline — the
+ * workflow verifies them when it downloads the artifact.
  */
 export function checkPins(upstream: unknown, probe: PinProbe): PinsResult {
   const errors: string[] = [];
@@ -106,6 +122,11 @@ export function checkPins(upstream: unknown, probe: PinProbe): PinsResult {
     }
     if (tag !== undefined && typeof tag !== "string") {
       errors.push(`${name}: tag must be a string, got ${JSON.stringify(tag)}`);
+    }
+    for (const [key, value] of Object.entries(pin)) {
+      if (key.endsWith("_sha256") && (typeof value !== "string" || !/^[0-9a-f]{64}$/.test(value))) {
+        errors.push(`${name}: ${key} must be a 64-hex SHA-256, got ${JSON.stringify(value)}`);
+      }
     }
     if (typeof rev !== "string" || !/^[0-9a-f]{40}$/.test(rev)) {
       errors.push(`${name}: rev must be a full 40-hex commit, got ${JSON.stringify(rev)}`);
@@ -136,8 +157,29 @@ export function checkPins(upstream: unknown, probe: PinProbe): PinsResult {
       }
     }
 
-    // The checkout sits at the pinned rev: every recorded copy must be
-    // byte-identical to its source under <checkout>/<source>/.
+    // The checkout sits at the pinned rev: every recorded-digest field
+    // must equal the SHA-256 of its file inside the checkout.
+    for (const [field, path] of Object.entries(DIGESTS[name] ?? {})) {
+      const expected = pin[field];
+      if (typeof expected !== "string") {
+        errors.push(`${name}: ${field} must be a 64-hex SHA-256, got ${JSON.stringify(expected)}`);
+        continue;
+      }
+      const bytes = probe.readBytes(join(checkout, path));
+      if (bytes === undefined) {
+        errors.push(`${name}: ${checkout}/${path} missing`);
+      } else {
+        const actual = createHash("sha256").update(bytes).digest("hex");
+        if (actual !== expected) {
+          errors.push(
+            `${name}: ${checkout}/${path} is sha256 ${actual}, pinned ${field} is ${expected}`,
+          );
+        }
+      }
+    }
+
+    // Every recorded copy must be byte-identical to its source under
+    // <checkout>/<source>/.
     for (const root of RECORDED[name] ?? []) {
       for (const file of probe.listFiles(root.recorded).filter((f) => f.endsWith(root.extension))) {
         const copy = probe.readBytes(join(root.recorded, file));

@@ -190,16 +190,14 @@ async fn mk_group_with_wn(
 /// A joins a wn-created group via the gift-wrapped Welcome. Asserts
 /// `GroupJoined` for the exact group id.
 async fn join_wn_group(rig: &Arc<Rig>, a: &mut Member, gid: &GroupId) {
-    let account_hex = a.account_hex();
     let wanted = gid.clone();
     until_member(
         a,
         |a| {
-            let account_hex = account_hex.clone();
             let wanted = wanted.clone();
             let rig = Arc::clone(rig);
             Box::pin(async move {
-                let wraps = fetch_welcomes(&rig, &account_hex).await;
+                let wraps = fetch_welcomes(&rig, &a.signer).await;
                 let events = ingest(&mut *a, wraps).await;
                 events
                     .iter()
@@ -285,7 +283,7 @@ async fn scenario1_mk_core_invites_wn() {
     wn_says(&rig, &mut a, &gid, &wn_gid, "hello-from-wn").await;
     member_says(&rig, &mut a, &gid, &wn_gid, "hello-from-mk-core").await;
 
-    rig.relay.shutdown();
+    rig.shutdown();
     eprintln!("SCENARIO-1 PASS {:.1}s", start.elapsed().as_secs_f64());
 }
 
@@ -340,7 +338,7 @@ async fn scenario2_wn_invites_mk_core() {
     member_says(&rig, &mut a, &gid, &wn_gid, "s2-hello-from-mk-core").await;
     wn_says(&rig, &mut a, &gid, &wn_gid, "s2-hello-from-wn").await;
 
-    rig.relay.shutdown();
+    rig.shutdown();
     eprintln!("SCENARIO-2 PASS {:.1}s", start.elapsed().as_secs_f64());
 }
 
@@ -591,7 +589,7 @@ async fn scenario3_bulk_and_membership() {
     )
     .await;
 
-    rig.relay.shutdown();
+    rig.shutdown();
     eprintln!("SCENARIO-3 PASS {:.1}s", start.elapsed().as_secs_f64());
 }
 
@@ -743,7 +741,7 @@ async fn scenario4_capability_requirements() {
     member_says(&rig, &mut a, &gid_b, &wn_gid_b, "s4b-hello-from-mk-core").await;
     wn_says(&rig, &mut a, &gid_b, &wn_gid_b, "s4b-hello-from-wn").await;
 
-    rig.relay.shutdown();
+    rig.shutdown();
     eprintln!("SCENARIO-4 PASS {:.1}s", start.elapsed().as_secs_f64());
 }
 
@@ -930,7 +928,7 @@ async fn scenario5_media_round_trip() {
         "s5 mk->wn plaintext matches"
     );
 
-    rig.relay.shutdown();
+    rig.shutdown();
     eprintln!("SCENARIO-5 PASS {:.1}s", start.elapsed().as_secs_f64());
 }
 
@@ -1100,7 +1098,7 @@ async fn scenario6_stream_anchors() {
         "s6 receive must produce no outbound"
     );
 
-    rig.relay.shutdown();
+    rig.shutdown();
     eprintln!("SCENARIO-6 PASS {:.1}s", start.elapsed().as_secs_f64());
 }
 
@@ -1189,7 +1187,7 @@ async fn scenario19_consumed_key_package_rotates() {
     member_says(&rig, &mut a, &gid2, &wn_gid2, "s19-hello-from-mk-core").await;
     wn_says(&rig, &mut a, &gid2, &wn_gid2, "s19-hello-from-wn").await;
 
-    rig.relay.shutdown();
+    rig.shutdown();
     eprintln!("SCENARIO-19 PASS {:.1}s", start.elapsed().as_secs_f64());
 }
 
@@ -1289,7 +1287,7 @@ async fn scenario17_second_device_signs_out() {
         "a1 roster {{wn, A}}: {roster:?}"
     );
 
-    rig.relay.shutdown();
+    rig.shutdown();
     eprintln!("SCENARIO-17 PASS {:.1}s", start.elapsed().as_secs_f64());
 }
 
@@ -1344,7 +1342,7 @@ async fn scenario21_post_join_self_update() {
     member_says(&rig, &mut a, &gid, &wn_gid, "s21-after-self-update").await;
     wn_says(&rig, &mut a, &gid, &wn_gid, "s21-wn-replies").await;
 
-    rig.relay.shutdown();
+    rig.shutdown();
     eprintln!("SCENARIO-21 PASS {:.1}s", start.elapsed().as_secs_f64());
 }
 
@@ -1452,15 +1450,13 @@ async fn scenario20_stall_and_repair() {
 
     // a2 installs its copy from its own wrap of the founding invite.
     let gid_a2 = gid.clone();
-    let account_hex2 = a_hex.clone();
     until_member(
         &mut a2,
         |a| {
             let gid = gid_a2.clone();
-            let account_hex = account_hex2.clone();
             let rig = Arc::clone(&rig);
             Box::pin(async move {
-                let wraps = fetch_welcomes(&rig, &account_hex).await;
+                let wraps = fetch_welcomes(&rig, &a.signer).await;
                 let events = ingest(&mut *a, wraps).await;
                 events
                     .iter()
@@ -1684,17 +1680,15 @@ async fn scenario20_stall_and_repair() {
     // Device 2's removed copy reinstalls from its new Welcome on its own —
     // no consent, no `RejoinOffered` across the whole repair.
     let gid_a2 = gid.clone();
-    let account_hex2 = a_hex.clone();
     let a2_events_ref = Arc::clone(&a2_events);
     until_member(
         &mut a2,
         |a| {
             let gid = gid_a2.clone();
-            let account_hex = account_hex2.clone();
             let rig = Arc::clone(&rig);
             let a2_events = Arc::clone(&a2_events_ref);
             Box::pin(async move {
-                let wraps = fetch_welcomes(&rig, &account_hex).await;
+                let wraps = fetch_welcomes(&rig, &a.signer).await;
                 let events = ingest(&mut *a, wraps).await;
                 a2_events
                     .lock()
@@ -1730,15 +1724,13 @@ async fn scenario20_stall_and_repair() {
     // Device 1's stalled copy cannot apply the removal commit, so the
     // re-add wrap parks a consent-required offer on it.
     let gid_a1 = gid.clone();
-    let account_hex1 = a_hex.clone();
     until_member(
         &mut a1,
         |a| {
             let gid = gid_a1.clone();
-            let account_hex = account_hex1.clone();
             let rig = Arc::clone(&rig);
             Box::pin(async move {
-                let wraps = fetch_welcomes(&rig, &account_hex).await;
+                let wraps = fetch_welcomes(&rig, &a.signer).await;
                 let events = ingest(&mut *a, wraps).await;
                 events
                     .iter()
@@ -1803,7 +1795,7 @@ async fn scenario20_stall_and_repair() {
     member_says(&rig, &mut a1, &gid, &wn_gid, "s20-d1-says").await;
     member_says(&rig, &mut a2, &gid, &wn_gid, "s20-d2-says").await;
 
-    rig.relay.shutdown();
+    rig.shutdown();
     eprintln!("SCENARIO-20 PASS {:.1}s", start.elapsed().as_secs_f64());
 }
 
@@ -1968,7 +1960,7 @@ async fn scenario22_readd_member() {
     member_says(&rig, &mut a, &gid, &wn_gid, "s22-after-readd").await;
     wn_says(&rig, &mut a, &gid, &wn_gid, "s22-wn-replies").await;
 
-    rig.relay.shutdown();
+    rig.shutdown();
     eprintln!("SCENARIO-22 PASS {:.1}s", start.elapsed().as_secs_f64());
 }
 
@@ -2137,7 +2129,7 @@ async fn scenario14_wn_invites_wn_and_mk_devices() {
     )
     .await;
 
-    rig.relay.shutdown();
+    rig.shutdown();
     eprintln!("SCENARIO-14 PASS {:.1}s", start.elapsed().as_secs_f64());
 }
 
@@ -2286,7 +2278,7 @@ async fn scenario16_found_with_own_devices() {
     wn_says(&rig, &mut a1, &gid, &wn_gid, "s16-wn-to-a1").await;
     wn_says(&rig, &mut a2, &gid, &wn_gid, "s16-wn-to-a2").await;
 
-    rig.relay.shutdown();
+    rig.shutdown();
     eprintln!("SCENARIO-16 PASS {:.1}s", start.elapsed().as_secs_f64());
 }
 
@@ -2364,7 +2356,7 @@ async fn scenario18_wn_removes_whole_account() {
     )
     .await;
 
-    rig.relay.shutdown();
+    rig.shutdown();
     eprintln!("SCENARIO-18 PASS {:.1}s", start.elapsed().as_secs_f64());
 }
 
@@ -2643,6 +2635,6 @@ async fn scenario15_invite_two_wn_devices() {
     )
     .await;
 
-    rig.relay.shutdown();
+    rig.shutdown();
     eprintln!("SCENARIO-15 PASS {:.1}s", start.elapsed().as_secs_f64());
 }

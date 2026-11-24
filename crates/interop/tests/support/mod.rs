@@ -32,12 +32,13 @@
     reason = "test harness code; each scenario uses a subset"
 )]
 
+use std::collections::HashMap;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::process::{Child, Command, Stdio};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use mk_bridge as _;
@@ -50,6 +51,7 @@ use nostr::prelude::{
     Event as NostrEvent, Filter, FromBech32, Kind, PublicKey, RelayUrl, SingleLetterTag, ToBech32,
 };
 use nostr_directory as _;
+use nostr_sdk::authenticator::SignerAuthenticator;
 use nostr_sdk::client::Client;
 use nostr_sdk::local_relay::{LocalRelay, RateLimit};
 use serde_json::Value;
@@ -461,16 +463,20 @@ fn is_nip11_probe(head: &[u8]) -> bool {
     accept && !upgrade
 }
 
-/// One full interop rig: in-process relay, nostr client, wnd daemon, and
-/// the wn account (created on first use, KeyPackage published to the
-/// relay).
+/// One full interop rig: in-process relay (or an external one under
+/// `INTEROP_RELAY_URL`), nostr client, wnd daemon, and the wn account
+/// (created on first use, KeyPackage published to the relay).
 #[derive(Debug)]
 pub struct Rig {
-    pub relay: LocalRelay,
+    /// `None` under `INTEROP_RELAY_URL`: the scenarios then drive an
+    /// external relay and nothing in-process exists to shut down.
+    relay: Option<LocalRelay>,
     pub client: Client,
-    /// The NIP-11 front URL as sessions and wn see it (no trailing slash):
-    /// document probes are answered there, WebSocket traffic is spliced
-    /// through to `relay`. Under `INTEROP_RELAY=bare` it is `relay`'s own.
+    /// The relay URL as sessions and wn see it (no trailing slash). With
+    /// the in-process relay it is the NIP-11 front's — document probes
+    /// are answered there, WebSocket traffic is spliced through to
+    /// `relay`; under `INTEROP_RELAY=bare` it is `relay`'s own. Under
+    /// `INTEROP_RELAY_URL` it is the external relay's.
     pub url: String,
     pub home: PathBuf,
     pub socket: PathBuf,
@@ -478,8 +484,13 @@ pub struct Rig {
     pub wn_npub: String,
     pub wn_pub: String,
     pub wnd: Wnd,
-    /// `None` under `INTEROP_RELAY=bare`.
+    /// `None` under `INTEROP_RELAY=bare` or `INTEROP_RELAY_URL`.
     front: Option<Nip11Front>,
+    /// Per-pubkey connections that answer NIP-42 as that account —
+    /// external relays that read-gate kind 1059 to author and recipient
+    /// (nosfry's `[relay.access]` default) serve a member's gift wraps
+    /// only to a connection authenticated as that pubkey.
+    authed_clients: Mutex<HashMap<String, Client>>,
 }
 
 impl Rig {
@@ -489,50 +500,103 @@ impl Rig {
             .as_ref()
             .map_or(0, |front| front.served.load(Ordering::Relaxed))
     }
+
+    /// Shut the in-process relay down (an external relay under
+    /// `INTEROP_RELAY_URL` is not ours to stop).
+    pub fn shutdown(&self) {
+        if let Some(relay) = &self.relay {
+            relay.shutdown();
+        }
+    }
+
+    /// A connection that answers NIP-42 as `signer`'s account, cached per
+    /// pubkey. Relays without AUTH never challenge, so the authenticator
+    /// stays unused there.
+    pub async fn authed_client(&self, signer: &LocalSigner) -> Client {
+        let account = signer.account().to_hex();
+        if let Some(client) = self
+            .authed_clients
+            .lock()
+            .expect("authed clients")
+            .get(&account)
+        {
+            return client.clone();
+        }
+        let client = Client::builder()
+            .authenticator(SignerAuthenticator::new(signer.keys().clone()))
+            .build();
+        client
+            .add_relay(RelayUrl::parse(&self.url).expect("relay url"))
+            .and_connect()
+            .await
+            .expect("authed client connect");
+        self.authed_clients
+            .lock()
+            .expect("authed clients")
+            .insert(account, client.clone());
+        client
+    }
 }
 
 /// Start relay + wnd and ensure a wn identity with a published KeyPackage.
+/// `INTEROP_RELAY_URL=<ws-url>` skips the in-process `LocalRelay` and the
+/// NIP-11 front entirely: the rig's public URL is the external relay's —
+/// the client, wnd and sessions all dial it and `rig.relay` is `None`.
 pub async fn rig(test_name: &str) -> Rig {
     assert_wn_version();
-    // A real relay's defaults (60 notes/min write cap, 500/filter read cap)
-    // would silently reject the bulk-traffic scenarios; lift both while
-    // keeping real NIP-01 storage/ordering semantics. The NIP-11 document
-    // the front serves must tell the truth about that read cap.
-    const MAX_FILTER_LIMIT: usize = 10_000;
-    let relay = LocalRelay::builder()
-        .rate_limit(RateLimit {
-            max_reqs: 500,
-            notes_per_minute: 1_000_000,
-        })
-        .max_filter_limit(MAX_FILTER_LIMIT)
-        .build();
-    relay.run().await.expect("local relay run");
-    // nostr-sdk's LocalRelay serves no NIP-11 document; wnd's post-join
-    // history sweep needs one, so the front answers document probes and
-    // passes WebSocket traffic through verbatim.
-    let document = serde_json::json!({
-        "name": "marmot-interop",
-        "supported_nips": [1, 11],
-        "limitation": {"max_limit": MAX_FILTER_LIMIT},
-    });
-    let backend = relay
-        .url()
-        .await
-        .as_str()
-        .strip_prefix("ws://")
-        .expect("local relay ws url")
-        .trim_end_matches('/')
-        .to_owned();
-    // `INTEROP_RELAY=bare` dials the LocalRelay directly, without the
-    // document — the shape that reproduces White Noise's sweep loss.
-    let front = match std::env::var("INTEROP_RELAY").as_deref() {
-        Ok("bare") => None,
-        Ok("nip11") | Err(_) => Some(Nip11Front::bind(backend.clone(), document.to_string()).await),
-        Ok(other) => panic!("INTEROP_RELAY must be nip11 or bare, got {other}"),
+    let external = std::env::var("INTEROP_RELAY_URL")
+        .ok()
+        .filter(|url| !url.is_empty());
+    assert!(
+        !(external.is_some() && std::env::var("INTEROP_RELAY").is_ok()),
+        "INTEROP_RELAY only shapes the in-process relay; unset it under INTEROP_RELAY_URL"
+    );
+    let (relay, front, url) = if let Some(url) = external {
+        (None, None, url.trim_end_matches('/').to_owned())
+    } else {
+        // A real relay's defaults (60 notes/min write cap, 500/filter read
+        // cap) would silently reject the bulk-traffic scenarios; lift both
+        // while keeping real NIP-01 storage/ordering semantics. The NIP-11
+        // document the front serves must tell the truth about that read cap.
+        const MAX_FILTER_LIMIT: usize = 10_000;
+        let relay = LocalRelay::builder()
+            .rate_limit(RateLimit {
+                max_reqs: 500,
+                notes_per_minute: 1_000_000,
+            })
+            .max_filter_limit(MAX_FILTER_LIMIT)
+            .build();
+        relay.run().await.expect("local relay run");
+        // nostr-sdk's LocalRelay serves no NIP-11 document; wnd's post-join
+        // history sweep needs one, so the front answers document probes and
+        // passes WebSocket traffic through verbatim.
+        let document = serde_json::json!({
+            "name": "marmot-interop",
+            "supported_nips": [1, 11],
+            "limitation": {"max_limit": MAX_FILTER_LIMIT},
+        });
+        let backend = relay
+            .url()
+            .await
+            .as_str()
+            .strip_prefix("ws://")
+            .expect("local relay ws url")
+            .trim_end_matches('/')
+            .to_owned();
+        // `INTEROP_RELAY=bare` dials the LocalRelay directly, without the
+        // document — the shape that reproduces White Noise's sweep loss.
+        let front = match std::env::var("INTEROP_RELAY").as_deref() {
+            Ok("bare") => None,
+            Ok("nip11") | Err(_) => {
+                Some(Nip11Front::bind(backend.clone(), document.to_string()).await)
+            }
+            Ok(other) => panic!("INTEROP_RELAY must be nip11 or bare, got {other}"),
+        };
+        let url = front
+            .as_ref()
+            .map_or_else(|| format!("ws://{backend}"), |front| front.url.clone());
+        (Some(relay), front, url)
     };
-    let url = front
-        .as_ref()
-        .map_or_else(|| format!("ws://{backend}"), |front| front.url.clone());
 
     let client = Client::builder().build();
     client
@@ -578,6 +642,7 @@ pub async fn rig(test_name: &str) -> Rig {
         wn_pub,
         wnd,
         front,
+        authed_clients: Mutex::new(HashMap::new()),
     }
 }
 
@@ -783,7 +848,13 @@ pub async fn publish_identity(member: &mut Member, rig: &Rig) {
 /// Fetch events for `filter` over the live WebSocket connection; the relay
 /// serves them newest-first, like a real relay.
 pub async fn fetch(rig: &Rig, filter: Filter) -> Vec<Event> {
-    rig.client
+    fetch_on(&rig.client, filter).await
+}
+
+/// `fetch` over an explicit connection — e.g. one authenticated via
+/// NIP-42 for restricted-kind reads.
+pub async fn fetch_on(client: &Client, filter: Filter) -> Vec<Event> {
+    client
         .fetch_events(filter)
         .timeout(Duration::from_secs(10))
         .await
@@ -819,9 +890,14 @@ pub async fn fetch_group(rig: &Rig, route_hex: &str) -> Vec<Event> {
     fetch(rig, group_filter(route_hex)).await
 }
 
-/// Kind-1059 gift wraps addressed to `account_hex`, newest-first.
-pub async fn fetch_welcomes(rig: &Rig, account_hex: &str) -> Vec<Event> {
-    fetch(rig, welcome_filter(account_hex)).await
+/// Kind-1059 gift wraps addressed to `signer`'s account, newest-first.
+/// Reads through a connection authed as the recipient: relays gating
+/// kind 1059 behind NIP-42 serve wraps only to the authenticated
+/// author/`p`-tagged recipient; relays that never challenge leave the
+/// authenticator unused.
+pub async fn fetch_welcomes(rig: &Rig, signer: &LocalSigner) -> Vec<Event> {
+    let client = rig.authed_client(signer).await;
+    fetch_on(&client, welcome_filter(&signer.account().to_hex())).await
 }
 
 /// The newest kind-30443 `KeyPackage` published by `account_hex`, if any.
@@ -1002,7 +1078,7 @@ pub fn npub_to_hex(npub: &str) -> String {
 struct BlossomState {
     /// `http://127.0.0.1:<port>` (no trailing slash).
     url: String,
-    blobs: Arc<std::sync::Mutex<std::collections::HashMap<String, Vec<u8>>>>,
+    blobs: Arc<Mutex<HashMap<String, Vec<u8>>>>,
 }
 
 /// A minimal Blossom (BUD-01/BUD-02) dev server on axum over the test's
@@ -1028,7 +1104,7 @@ impl BlossomServer {
         let listener = tokio::net::TcpListener::from_std(std_listener).expect("tokio listener");
         let state = BlossomState {
             url: format!("http://{address}"),
-            blobs: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            blobs: Arc::new(Mutex::new(HashMap::new())),
         };
         let app = axum::Router::new()
             .route("/upload", axum::routing::put(upload))
