@@ -1674,35 +1674,26 @@ impl Session {
                     .map_err(session_engine_error)?;
             }
         }
-        // A regenerated standalone artifact's durable intent ends on first
-        // acceptance or on all-terminal failure; ambiguous outcomes re-arm
-        // it (marmot-session `resolve_regenerated_queued_intent`,
-        // runtime.rs:4943). The association is the durable link row staged
-        // with the fanout, so a restart between stage and report still
-        // retires the intent exactly once.
-        if let Some((group_id, intent_id)) = self
-            .provider
-            .queued_intent_link(fanout.message_id())
-            .map_err(SessionError::Storage)?
+        // A drained application message or proposal retires its queued
+        // intent on first acceptance or once no target is outstanding
+        // (marmot-session `retire_drained_queued_intent`, runtime.rs:5741;
+        // idempotent in MDK — it deletes only while still queued). An
+        // outstanding fanout keeps naming the intent and the session's own
+        // retry re-offers the same artifact; a drained commit's intent
+        // retires with the commit inside the engine
+        // (`confirm_fanout_mls` / rollback), so pending fanouts need
+        // nothing here.
+        if matches!(
+            fanout.mls_state(),
+            cgka_traits::transport_adapter::FanoutMlsState::NotApplicable
+        ) && (outcome.accepted_targets > 0 || outcome.outstanding_targets == 0)
+            && let (Some(group_id), Some(intent_id)) =
+                (fanout.group_id(), fanout.queued_intent_id())
         {
-            self.provider
-                .delete_queued_intent_link(fanout.message_id())
-                .map_err(SessionError::Storage)?;
-            let final_outcome = fanout.outcome();
-            if final_outcome.accepted_targets > 0
-                || (final_outcome.fanout_complete && !fanout.possible_exposure())
-            {
-                self.engine
-                    .confirm_regenerated_queued_intent(&intent_id)
-                    .map_err(session_engine_error)?;
-            } else if !final_outcome.fanout_complete {
-                self.engine
-                    .retry_regenerated_queued_intent(&group_id, &intent_id);
-            } else {
-                self.engine
-                    .confirm_regenerated_queued_intent(&intent_id)
-                    .map_err(session_engine_error)?;
-            }
+            let (group_id, intent_id) = (group_id.clone(), intent_id.clone());
+            self.engine
+                .retire_drained_queued_intent(&group_id, &intent_id)
+                .map_err(session_engine_error)?;
         }
         if fanout.outcome().fanout_complete {
             self.provider
@@ -2320,8 +2311,8 @@ impl Session {
     /// Forget the group locally: `engine.forget_group_local` drops the
     /// engine's rows (leaving its `ForgottenGroup` tombstone so old
     /// Welcomes stay rejected), then one storage unit releases this
-    /// session's own group rows — queued-intent links and retry rows
-    /// whose outbound no longer exists.
+    /// session's own group rows — retry rows whose outbound no longer
+    /// exists.
     ///
     /// # Errors
     /// [`SessionError::GroupDisbanding`] while a disband is in progress;
@@ -2347,17 +2338,10 @@ impl Session {
             .map(|(id, _)| id)
             .filter(|id| !live.contains(id))
             .collect();
-        let links = self
-            .provider
-            .queued_intent_links_for_group(&group_id)
-            .map_err(SessionError::Storage)?;
         self.drop_group_memory(group);
         self.provider
             .store()
             .transact(|| -> Result<(), StorageError> {
-                for message_id in &links {
-                    self.provider.delete_queued_intent_link(message_id)?;
-                }
                 for id in &stale {
                     self.provider.delete_outbound_retry(id)?;
                 }
@@ -3039,24 +3023,29 @@ impl Session {
                     .map_err(|_| SessionError::Internal("fanout failure"))?;
             }
         }
-        // A queued intent regenerated into this artifact is linked durably
-        // in the same unit: the engine's `queued_intent_by_message`
-        // association is in-memory only, so the report path reads the link
-        // row instead of the map (restart keeps the obligation).
-        let link = self
-            .engine
-            .regenerated_queued_intent_for_message(fanout.message_id());
+        // The stored fanout is the durable record that the intent is in
+        // flight — the engine's drain guard
+        // (`intents_named_by_stored_fanouts`) and its pending-commit
+        // hydrate read `queued_intent_id()`, so neither a restart nor a
+        // re-arm prepares it again (mdk#2332).
+        let queued_intent = match fanout.pending_ref() {
+            Some(pending) => self.engine.drained_queued_intent_id(pending),
+            None => self
+                .engine
+                .regenerated_queued_intent_for_message(fanout.message_id())
+                .map(|(_, intent_id)| intent_id),
+        };
+        if let Some(intent_id) = queued_intent {
+            fanout
+                .set_queued_intent(intent_id)
+                .map_err(|_| SessionError::Internal("fanout queued intent"))?;
+        }
         self.provider
             .store()
             .transact(|| -> Result<(), SessionError> {
                 self.engine
                     .put_outbound_fanout(fanout)
                     .map_err(session_engine_error)?;
-                if let Some((group_id, intent_id)) = &link {
-                    self.provider
-                        .put_queued_intent_link(fanout.message_id(), group_id, intent_id)
-                        .map_err(SessionError::Storage)?;
-                }
                 Ok(())
             })?;
         let id = outbound_id_of(fanout.message_id())?;

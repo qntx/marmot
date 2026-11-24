@@ -488,6 +488,33 @@ fn open_rejects_version_seven_rows() {
 }
 
 #[test]
+fn open_rejects_version_eight_rows() {
+    // Version 8 predates naming a drained queued intent on its own fanout
+    // (`OutboundFanout::queued_intent_id`); its in-flight fanouts name
+    // none, so it is refused at open, never migrated.
+    let (_provider, host) = open_provider();
+    let mut rows = host.durable_rows();
+    let version_key = {
+        let mut k = vec![0u8]; // Table::Meta discriminant
+        k.extend_from_slice(&14u32.to_be_bytes()); // len of "schema-version"
+        k.extend_from_slice(b"schema-version");
+        k
+    };
+    let mut touched = false;
+    for (key, value) in &mut rows {
+        if *key == version_key {
+            *value = 8u32.to_be_bytes().to_vec();
+            touched = true;
+        }
+    }
+    assert!(touched, "schema-version row exists");
+    assert!(matches!(
+        KvStorageProvider::open(rows, host),
+        Err(OpenError::UnsupportedSchemaVersion { found: 8 })
+    ));
+}
+
+#[test]
 fn open_rejects_rows_without_version() {
     let host = TestHost::new();
     // A stray row but no schema-version row.

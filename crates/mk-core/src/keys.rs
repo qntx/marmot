@@ -88,11 +88,6 @@ pub(crate) enum Table {
     /// Reserved for the session layer's inbound record table (H2).
     #[allow(dead_code, reason = "reserved for the session inbox table (H2)")]
     SessionInbox = 34,
-    /// Session-layer link from a regenerated outbound artifact's message id
-    /// to the durable queued intent it carries — the restart-safe
-    /// replacement for the engine's in-memory `queued_intent_by_message`
-    /// (cgka-engine `message_processor/mod.rs:1773`).
-    QueuedIntentLink = 35,
     /// Epoch exporter secrets captured per delivered media message, keyed
     /// `group/transport_id` — the only custody of the key material
     /// `open_attachment` needs after the source epoch is pruned.
@@ -157,7 +152,11 @@ pub(crate) const META_PENDING_HIGH_WATER: &[u8] = b"pending-ref-high-water";
 /// gains `key_package_republish`.
 /// v8: `Table::GroupStall` (the D2 stall detector's per-group row) and
 /// `Table::Readd` (the D2 re-add intent bridging removal and invite).
-pub(crate) const SCHEMA_VERSION: u32 = 8;
+/// v9: `Table::QueuedIntentLink` is gone — a drained queued intent is
+/// named on its own fanout (`OutboundFanout::queued_intent_id`), the
+/// record MDK's drain and hydrate guards read; a v8 store's in-flight
+/// fanouts name none, so it must refuse to open.
+pub(crate) const SCHEMA_VERSION: u32 = 9;
 
 /// Whether `key` names a row the `OpenMLS` store owns — the write set the
 /// engine's write generation counts (provider.rs `mls_write_generation`).

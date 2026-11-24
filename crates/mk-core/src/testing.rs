@@ -11,6 +11,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Mutex;
 
 use cgka_traits::message::MessageRecord;
+use cgka_traits::storage::MaintenanceStorage;
 
 use crate::clock::{Clock, Time};
 use crate::keys::{self, Table};
@@ -510,6 +511,41 @@ impl crate::Session {
         content: String,
     ) -> Result<crate::SentMessage, crate::SessionError> {
         self.send_app_event(group, kind, tags, content, None).await
+    }
+
+    /// Rewrite `sampled_jitter_ms` on every stored `MaintenanceObligation`
+    /// of `group`, through the normal store so the write lands in host
+    /// batches and survives a reopen.
+    ///
+    /// The post-join jitter is sampled by the engine from OS entropy at
+    /// join; tests pin it to make the self-update schedule deterministic.
+    /// Call before the obligation leaves `Quiet` — `not_before` is computed
+    /// from `sampled_jitter_ms` on the `Quiet`→`Jitter` step
+    /// (`self_update`'s `drive_quiet`).
+    ///
+    /// # Errors
+    /// [`crate::SessionError`] for storage failures.
+    pub fn set_maintenance_jitter(
+        &self,
+        group: &crate::GroupId,
+        sampled_jitter_ms: u64,
+    ) -> Result<(), crate::SessionError> {
+        let gid = crate::session::engine_gid(group);
+        let provider = &self.provider;
+        provider
+            .store()
+            .transact(|| -> Result<(), crate::SessionError> {
+                for mut obligation in provider
+                    .list_maintenance_obligations_for_group(&gid)
+                    .map_err(crate::SessionError::Storage)?
+                {
+                    obligation.sampled_jitter_ms = sampled_jitter_ms;
+                    provider
+                        .put_maintenance_obligation(&obligation)
+                        .map_err(crate::SessionError::Storage)?;
+                }
+                Ok(())
+            })
     }
 }
 
