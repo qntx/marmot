@@ -467,8 +467,9 @@ impl Session {
     }
 
     /// `PendingPublication`: a `Confirmed` self-update evolution completes
-    /// the obligation; a live `Preparing`/`Prepared`/`Attempting` one waits
-    /// (C16 keeps it open across restart until the confirm re-derives);
+    /// the obligation; a live `Prepared`/`Attempting` one waits (C16 keeps
+    /// it open across restart until the confirm re-derives); a `Preparing`
+    /// row carries no signed artifact — crash residue that owns nothing —
     /// `SupersededByConvergence` or none — the leaf check decides between
     /// completing and a one-time re-arm to `Quiet`.
     fn drive_pending_publication(
@@ -501,9 +502,7 @@ impl Session {
             ours(evolution)
                 && matches!(
                     evolution.phase,
-                    GroupEvolutionPhase::Preparing
-                        | GroupEvolutionPhase::Prepared
-                        | GroupEvolutionPhase::Attempting
+                    GroupEvolutionPhase::Prepared | GroupEvolutionPhase::Attempting
                 )
         }) {
             fold_ms(due, now_ms + SELF_UPDATE_RECHECK_SECS * 1_000);
@@ -595,7 +594,12 @@ impl Session {
             return Ok(false);
         }
         // No outbound fanout whose MLS state is still pending — an own
-        // commit in flight holds the gate.
+        // commit in flight holds the gate. A `Preparing` row is not live:
+        // it carries no signed artifact, so it owns nothing (MDK
+        // maintenance.rs: "without a signed artifact, ordinary Preparing
+        // owns nothing"); it is only ever observed as the residue of a
+        // crash between the intent write and the staged commit, and
+        // marmot-session likewise counts only `Prepared`/`Attempting`.
         if self
             .provider
             .list_group_evolutions_for_group(gid)
@@ -604,9 +608,7 @@ impl Session {
             .any(|evolution| {
                 matches!(
                     evolution.phase,
-                    GroupEvolutionPhase::Preparing
-                        | GroupEvolutionPhase::Prepared
-                        | GroupEvolutionPhase::Attempting
+                    GroupEvolutionPhase::Prepared | GroupEvolutionPhase::Attempting
                 )
             })
         {

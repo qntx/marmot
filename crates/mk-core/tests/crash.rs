@@ -91,8 +91,10 @@
 //!   after the batch still owes the same signed kind-5 from the durable
 //!   outbound row.
 //! - 15 self-update jitter: the `Tick` entering `Jitter` persists
-//!   `not_before` — a cut either side of that batch reopens to the same
-//!   deadline; the sampled jitter is never resampled.
+//!   `not_before` — a cut after that batch reopens to the same deadline;
+//!   a cut before it re-arms the deadline after the restart (the sampled
+//!   jitter is never resampled), so the flow pins the joiner's jitter to
+//!   zero and every re-armed `not_before` is already due.
 //! - 16 self-update published-not-confirmed: cuts after the self-update
 //!   fanout's publish batches but before the confirm is observed reopen
 //!   to the open `PendingPublication` obligation; the identical durable
@@ -193,6 +195,10 @@ mod crash {
         SignOut(usize),
         /// `history_fetched(group)` — records the post-join fetch's EOSE.
         HistoryFetched(usize),
+        /// Pin the member's maintenance jitter (`set_maintenance_jitter`)
+        /// on every stored obligation — enforced again before each tick
+        /// so obligations created after a restart are pinned too.
+        SetJitter(usize, u64),
         /// Advance the injected clock by `ms` — no session call, so it
         /// emits no cuttable batch.
         Advance(usize, u64),
@@ -340,6 +346,9 @@ mod crash {
         /// published but never reach the wire — models "canonical write
         /// durable, the step's staged obligation rows not".
         withhold_step: Option<usize>,
+        /// `SetJitter` pins — re-enforced before each tick so
+        /// obligations (re)created after the pin are covered too.
+        pin_jitter: BTreeMap<usize, u64>,
     }
 
     impl Runner {
@@ -556,9 +565,34 @@ mod crash {
             }
         }
 
+        /// Rewrite the member's stored obligations to the `SetJitter`
+        /// pin when one differs — covers obligations (re)created after
+        /// the `SetJitter` step, e.g. a post-restart re-join.
+        fn pin_member_jitter(&self, member: usize) {
+            let Some(ms) = self.pin_jitter.get(&member).copied() else {
+                return;
+            };
+            let Some(gid) = self.gid_for(member) else {
+                return;
+            };
+            let pinned =
+                mk_core::testing::maintenance_rows(&self.world.members[member].host.durable_rows())
+                    .1
+                    .iter()
+                    .all(|obligation| obligation.sampled_jitter_ms == ms);
+            if pinned {
+                return;
+            }
+            self.world.members[member]
+                .session
+                .set_maintenance_jitter(&gid, ms)
+                .expect("set_maintenance_jitter");
+        }
+
         /// One `tick`, then advance the injected clock so time-armed
         /// convergence cutoffs come due — like a host timer.
         async fn tick(&mut self, member: usize) {
+            self.pin_member_jitter(member);
             self.world.members[member]
                 .session
                 .tick()
@@ -600,6 +634,7 @@ mod crash {
                 | Step::Leave(m)
                 | Step::SignOut(m)
                 | Step::HistoryFetched(m)
+                | Step::SetJitter(m, _)
                 | Step::Advance(m, _)
                 | Step::SelfUpdate(m)
                 | Step::UpdateProfile(m, ..)
@@ -745,6 +780,11 @@ mod crash {
                         .history_fetched(&gid)
                         .expect("history_fetched");
                     self.drain(m);
+                    self.probe(m);
+                }
+                Step::SetJitter(m, ms) => {
+                    self.pin_jitter.insert(m, ms);
+                    self.pin_member_jitter(m);
                     self.probe(m);
                 }
                 Step::Advance(m, ms) => {
@@ -977,6 +1017,7 @@ mod crash {
             restart_obligations: 0,
             suppress: suppress.clone(),
             withhold_step,
+            pin_jitter: BTreeMap::new(),
         };
 
         let mut steps = flow.iter().enumerate();
@@ -1299,8 +1340,11 @@ mod crash {
     /// walks `CatchUp` → `Quiet` → `Jitter` (`Advance` past the quiet
     /// window; the post-join sampled jitter is bounded by 30 s, so
     /// `Advance(31_000)` always reaches `not_before`) → gate →
-    /// `PendingPublication` → publish → confirm → `Complete`. Both cut
-    /// variants at every batch.
+    /// `PendingPublication` → publish → confirm → `Complete`. A cut
+    /// before the `Jitter` batch loses the armed deadline and re-arms it
+    /// after the restart — `SetJitter(1, 0)` keeps every re-armed
+    /// `not_before` in the past so the deadline never escapes the flow.
+    /// Both cut variants at every batch.
     #[tokio::test(flavor = "current_thread")]
     async fn restart_boundaries_self_update() {
         const FLOW: &[Step] = &[
@@ -1315,6 +1359,7 @@ mod crash {
             Step::Create(0, "crash-self-update", &[1], &[]),
             Step::Flush(0),
             Step::Deliver(1),
+            Step::SetJitter(1, 0),
             Step::HistoryFetched(1),
             Step::Advance(1, 61_000),
             Step::Tick(1),
@@ -1326,6 +1371,43 @@ mod crash {
             Step::Flush(1),
         ];
         matrix(FLOW, 2, 0, "self-update").await;
+        matrix(FLOW, 2, 1, "self-update-joiner").await;
+    }
+
+    /// A send queued behind the sender's own pending commit (D4): cuts
+    /// at every batch of the queueing send, the commit's publish/confirm,
+    /// the drain that regenerates the intent and its publish — a restart
+    /// re-offers the named fanout and never authors a second copy
+    /// (authored-event equality).
+    #[tokio::test(flavor = "current_thread")]
+    async fn restart_boundaries_queued_intent() {
+        const FLOW: &[Step] = &[
+            Step::KeyPackage(0),
+            Step::Flush(0),
+            Step::InboxRelays(0),
+            Step::Flush(0),
+            Step::KeyPackage(1),
+            Step::Flush(1),
+            Step::InboxRelays(1),
+            Step::Flush(1),
+            Step::Create(0, "crash-queued", &[1], &[]),
+            Step::Flush(0),
+            Step::Deliver(1),
+            Step::Tick(1),
+            Step::Flush(1),
+            Step::Deliver(0),
+            Step::Tick(0),
+            Step::SelfUpdate(0),
+            Step::Send(0, "queued"),
+            Step::Flush(0),
+            Step::Tick(0),
+            Step::Flush(0),
+            Step::Deliver(1),
+            Step::Tick(1),
+            Step::Settle(0),
+            Step::Settle(1),
+        ];
+        matrix(FLOW, 2, 0, "queued-intent").await;
     }
 
     /// Joiner-side cuts over the same flow — the multi-part apply of an
