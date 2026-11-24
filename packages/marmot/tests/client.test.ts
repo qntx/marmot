@@ -1619,10 +1619,8 @@ describe("MarmotClient", () => {
       Promise.reject(new Error(`upload to wss://${"e".repeat(63)}.example failed`));
     const error = await fixture.client
       .sendMedia(GROUP, { attachments, caption: "hi" }, upload)
-      .then(
-        () => undefined,
-        (error_: unknown) => error_,
-      );
+      .then(() => undefined)
+      .catch((error_: unknown) => error_);
     expect(error).toMatchObject({ kind: "upload_failed" });
     expect((error as Error).message).not.toContain("wss://");
     expect(callsOf(fixture.script, "discard_attachment")).toHaveLength(2);
@@ -1664,10 +1662,17 @@ describe("MarmotClient", () => {
     };
     await fixture.client
       .createGroup({ name: "x", description: "", relays: ["wss://10.0.0.1"] })
-      .then(() => undefined, collect);
-    await fixture.client.lookupInvitees("f".repeat(64), [LOOKUP]).then(() => undefined, collect);
+      .then(() => undefined)
+      .catch(collect);
+    await fixture.client
+      .lookupInvitees("f".repeat(64), [LOOKUP])
+      .then(() => undefined)
+      .catch(collect);
     await fixture.client.close();
-    await fixture.client.groups().then(() => undefined, collect);
+    await fixture.client
+      .groups()
+      .then(() => undefined)
+      .catch(collect);
     expect(messages.length).toBeGreaterThan(0);
     for (const message of messages) {
       expect(message).not.toMatch(/[0-9a-f]{64}/);
@@ -2023,10 +2028,9 @@ async function probeOpen(
     timer: manualTimer(),
     relays: fakeRelay().port("c"),
     allowLoopback: true,
-  }).then(
-    (client) => ({ client, error: undefined }),
-    (error: unknown) => ({ client: undefined, error }),
-  );
+  })
+    .then((client) => ({ client, error: undefined }))
+    .catch((error: unknown) => ({ client: undefined, error }));
   return { ...result, opened, cursors, kv };
 }
 
