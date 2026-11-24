@@ -18,7 +18,7 @@
     },
     "packages/marmot": {
       "name": "@qntx/marmot",
-      "version": "0.1.0",
+      "version": "0.2.0",
       "dependencies": {
         "@qntx/nostr": "^0.16.0",
       },
@@ -36,10 +36,10 @@
     },
     "packages/marmot-native": {
       "name": "@qntx/marmot-native",
-      "version": "0.1.0",
+      "version": "0.2.0",
       "devDependencies": {
         "@arethetypeswrong/cli": "0.18.5",
-        "@qntx/marmot": "0.1.0",
+        "@qntx/marmot": "0.2.0",
         "@qntx/tsconfig": "1.0.1",
         "@types/node": "26.6.6",
         "nitrogen": "0.37.2",
@@ -49,16 +49,16 @@
         "vite-plus": "1.6.0",
       },
       "peerDependencies": {
-        "@qntx/marmot": "^0.1.0",
+        "@qntx/marmot": "^0.2.0",
         "react-native": "*",
         "react-native-nitro-modules": "^0.37.1",
       },
     },
     "packages/marmot-wasm": {
       "name": "@qntx/marmot-wasm",
-      "version": "0.1.0",
+      "version": "0.2.0",
       "dependencies": {
-        "@qntx/marmot": "^0.1.0",
+        "@qntx/marmot": "^0.2.0",
       },
       "devDependencies": {
         "@arethetypeswrong/cli": "0.18.5",

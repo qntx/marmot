@@ -1,6 +1,6 @@
 {
   "name": "@qntx/marmot-wasm",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "WASM build of the marmot bridge: the mk-bridge byte protocol for JavaScript hosts",
   "keywords": [
     "marmot",
@@ -58,7 +58,7 @@
     "test:interop": "bun interop/wn.ts"
   },
   "dependencies": {
-    "@qntx/marmot": "^0.1.0"
+    "@qntx/marmot": "^0.2.0"
   },
   "devDependencies": {
     "@arethetypeswrong/cli": "0.18.5",
