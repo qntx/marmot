@@ -1108,7 +1108,7 @@ impl BlossomServer {
         };
         let app = axum::Router::new()
             .route("/upload", axum::routing::put(upload))
-            .route("/:sha256", axum::routing::get(download))
+            .route("/{sha256}", axum::routing::get(download))
             .with_state(state.clone());
         let task = tokio::spawn(async move {
             axum::serve(listener, app).await.expect("blossom serve");
