@@ -11,6 +11,36 @@ npm trusted publishing (OIDC).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-24
+
+### Changed (BREAKING)
+
+- Storage schema 9 (was 8): a store written by 0.1.0 is rejected at open
+  and must be recreated. In-flight outbound artifacts now carry the queued
+  intent they were drained from, which the old rows lack.
+
+### Fixed
+
+- A message or group change that was queued behind an in-flight commit
+  could be sent twice. The engine could not recognise the already staged
+  artifact as in flight after a restart, after a publish that was not yet
+  reported, or after a retryable publish failure, and prepared a second
+  one. Staged artifacts now name their queued intent, so the same artifact
+  is re-offered instead (#49).
+- A crash between the engine recording a self-update as preparing and
+  staging its commit left the maintenance obligation stuck and the group
+  epoch frozen for that device (#49).
+
+### Added
+
+- Advisory `interop-nosfry` workflow: the White Noise interop suite runs
+  against a pinned nosfry release with its Marmot profile (#43).
+
+### Dependencies
+
+- `@qntx/nostr` ^0.16.0 and the tooling group; `@qntx/oxlint` and
+  `@qntx/oxfmt` 2.0.0; axum 0.8.9 in the interop harness (#44, #46, #47).
+
 ## [0.1.0] - 2026-11-23
 
 First release. Marmot group messaging (MLS over Nostr) for web and React
