@@ -330,6 +330,32 @@ pub async fn reopen_member(member: &Member) -> Member {
     }
 }
 
+/// Reopen the member from an explicit durable row set — e.g. a prefix of
+/// the committed batch history (`RecordingHost::rows_after_batches`) for
+/// a crash that lost the tail. The same live `RecordingHost` keeps
+/// recording later commits, so rows the prefix dropped stay in
+/// `durable_rows`; do not reopen a second time when the dropped tail must
+/// stay lost.
+pub async fn reopen_member_from_rows(member: &Member, rows: Vec<(Vec<u8>, Vec<u8>)>) -> Member {
+    let opened = Session::open(session_config(
+        Arc::clone(&member.signer),
+        Arc::clone(&member.clock),
+        Arc::clone(&member.host),
+        rows,
+    ))
+    .expect("reopen");
+    let session = match opened {
+        Opened::Ready(session) => *session,
+        Opened::NeedsAccountProof(_) => panic!("restart must not need a proof"),
+    };
+    Member {
+        signer: Arc::clone(&member.signer),
+        clock: Arc::clone(&member.clock),
+        host: Arc::clone(&member.host),
+        session,
+    }
+}
+
 /// Drain the session's gated outbound: acknowledge the highest pending seq,
 /// take the outbound, publish to `relay`, and report the results. Returns
 /// the resolutions keyed by outbound id. Loops until nothing remains so

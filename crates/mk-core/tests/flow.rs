@@ -882,8 +882,9 @@ mod flow_tests {
 
     /// A queued app message regenerated behind a pending commit: crash
     /// between staging the regenerated artifact and reporting it; on reopen
-    /// the durable link resolves the publish report to the durable intent —
-    /// retired exactly once, never regenerated a second time.
+    /// the fanout's `queued_intent_id` resolves the publish report to the
+    /// durable intent — retired exactly once, never regenerated a second
+    /// time.
     #[tokio::test(flavor = "current_thread")]
     async fn queued_intent_retires_after_restart() {
         let relay = FakeRelay::new();

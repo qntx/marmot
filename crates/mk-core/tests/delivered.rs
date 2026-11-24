@@ -218,7 +218,7 @@ mod delivered_tests {
         Some(sent.message.id())
     }
 
-    async fn run_case(ops: Vec<Op>) -> Result<(), TestCaseError> {
+    async fn run_case(ops: Vec<Op>, jitter_ms: u64) -> Result<(), TestCaseError> {
         let relay = FakeRelay::new();
         let mut a = open_member().await;
         let mut b = open_member().await;
@@ -226,6 +226,12 @@ mod delivered_tests {
         publish_identity(&mut b, &relay, RELAY).await;
         let gid = group_with(&mut a, &relay, RELAY, &[&b], "delivered-prop").await;
         join_via_welcome(&mut b, &relay, RELAY).await;
+        // The engine samples this from OS entropy at join; making it part
+        // of the generated input keeps the self-update schedule inside the
+        // reproduced case.
+        b.session
+            .set_maintenance_jitter(&gid, jitter_ms)
+            .expect("pin jitter");
         sync_member(&mut a, &relay, RELAY, &gid).await;
         sync_member(&mut b, &relay, RELAY, &gid).await;
         enable_retention(&mut a, &mut b, &relay, &gid).await;
@@ -288,6 +294,10 @@ mod delivered_tests {
     /// forget / clock-advance+tick must leave the durable
     /// `DeliveredMessage` set equal to exactly the messages surfaced to B
     /// (plus own-sent rows) minus swept-expired rows.
+    ///
+    /// Replay a CI failure two ways: append the `cc` line proptest prints
+    /// to `tests/delivered.proptest-regressions`, or rerun with
+    /// `PROPTEST_RNG_SEED=<u64>`.
     #[test]
     fn delivered_rows_match_surfaced_messages() {
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -299,13 +309,49 @@ mod delivered_tests {
                 .ok()
                 .and_then(|value| value.parse().ok())
                 .unwrap_or(32),
+            source_file: Some(file!()),
             ..ProptestConfig::default()
         });
         runner
-            .run(&prop::collection::vec(op_strategy(), 4..40), |ops| {
-                runtime.block_on(run_case(ops))
-            })
+            .run(
+                &(prop::collection::vec(op_strategy(), 4..40), 0u64..=30_000),
+                |(ops, jitter_ms)| runtime.block_on(run_case(ops, jitter_ms)),
+            )
             .expect("delivered-index invariant holds");
+    }
+
+    /// Replay of the CI-shrunk case: B's post-join self-update jitter is
+    /// engine-sampled from OS entropy at join, so the failure only shows
+    /// when the sample lets the self-update commit stage before the first
+    /// post-restart send. Each pinned jitter runs the same op list; every
+    /// run must hold the invariant and every `report_publish` must
+    /// succeed.
+    #[test]
+    fn delivered_shrunk_ci_case() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let ops = || {
+            vec![
+                Op::Advance(105),
+                Op::Advance(82),
+                Op::Advance(50),
+                Op::Advance(39),
+                Op::Advance(60),
+                Op::Advance(23),
+                Op::Send(false),
+                Op::Deliver,
+                Op::Restart,
+                Op::Advance(105),
+                Op::Send(false),
+            ]
+        };
+        for jitter_ms in [0_u64, 23_000, 24_000, 30_000] {
+            runtime
+                .block_on(run_case(ops(), jitter_ms))
+                .expect("shrunk case at pinned jitter");
+        }
     }
 
     /// Row-size report for the `DeliveredMessage` table: one real row's
