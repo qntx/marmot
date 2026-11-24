@@ -91,10 +91,9 @@ describe("checkSignerNip44", () => {
   });
 
   test("a signer whose decrypt truncates fails at nip44Decrypt", async () => {
-    const failure = await checkSignerNip44(truncatingDecryptSigner(SECRET)).then(
-      () => undefined,
-      (error: unknown) => error,
-    );
+    const failure = await checkSignerNip44(truncatingDecryptSigner(SECRET))
+      .then(() => undefined)
+      .catch((error: unknown) => error);
     expect(failure).toBeInstanceOf(Nip44ConformanceError);
     expect((failure as Nip44ConformanceError).step).toBe("nip44Decrypt");
     expect((failure as Nip44ConformanceError).size).toBe(NIP44_EXTENDED_SIZES[0]);
