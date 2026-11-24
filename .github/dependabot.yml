@@ -43,6 +43,10 @@ updates:
       - dependency-name: "fs-private"
       - dependency-name: "openmls*"
       - dependency-name: "nostr*"
+      # MDK (transport-nostr-peeler) and the rust-nostr fork pin base64 0.22,
+      # so a newer line only adds a duplicate. Drop when the MDK pin moves.
+      - dependency-name: "base64"
+        versions: [">= 0.23"]
     groups:
       cargo-minor-patch:
         patterns: ["*"]
@@ -63,6 +67,10 @@ updates:
       - dependency-name: "fs-private"
       - dependency-name: "openmls*"
       - dependency-name: "nostr*"
+      # MDK (transport-nostr-peeler) and the rust-nostr fork pin base64 0.22,
+      # so a newer line only adds a duplicate. Drop when the MDK pin moves.
+      - dependency-name: "base64"
+        versions: [">= 0.23"]
     groups:
       cargo-minor-patch:
         patterns: ["*"]
@@ -83,6 +91,10 @@ updates:
       - dependency-name: "fs-private"
       - dependency-name: "openmls*"
       - dependency-name: "nostr*"
+      # MDK (transport-nostr-peeler) and the rust-nostr fork pin base64 0.22,
+      # so a newer line only adds a duplicate. Drop when the MDK pin moves.
+      - dependency-name: "base64"
+        versions: [">= 0.23"]
     groups:
       cargo-minor-patch:
         patterns: ["*"]
@@ -103,6 +115,10 @@ updates:
       - dependency-name: "fs-private"
       - dependency-name: "openmls*"
       - dependency-name: "nostr*"
+      # MDK (transport-nostr-peeler) and the rust-nostr fork pin base64 0.22,
+      # so a newer line only adds a duplicate. Drop when the MDK pin moves.
+      - dependency-name: "base64"
+        versions: [">= 0.23"]
     groups:
       cargo-minor-patch:
         patterns: ["*"]
