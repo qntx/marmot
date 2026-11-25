@@ -135,6 +135,7 @@ async fn every_request_variant() {
         "audit_key_package_slot",
         &a.call(Request::AuditKeyPackageSlot(AuditKeyPackageSlotRequest {
             events: Vec::new(),
+            empty_relays: vec![RELAY.to_owned()],
         }))
         .await,
     );

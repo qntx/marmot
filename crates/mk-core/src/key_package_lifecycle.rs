@@ -51,6 +51,11 @@ const KEY_PACKAGE_REFRESH_MIN_SECS: u64 = 6 * 24 * 60 * 60;
 const KEY_PACKAGE_REFRESH_MAX_SECS: u64 = 7 * 24 * 60 * 60;
 /// A current `KeyPackage` inside its last day is replaced before it lapses.
 const KEY_PACKAGE_NEAR_EXPIRY_SECS: u64 = 24 * 60 * 60;
+/// The emptied-slot refill waits until the accepted current publication
+/// is a day old (marmot-session `SLOT_REFILL_MIN_AGE_SECS`): a relay that
+/// keeps nothing in the slot costs one `KeyPackage` a day, not one per
+/// audit.
+const SLOT_REFILL_MIN_AGE_SECS: u64 = 24 * 60 * 60;
 /// Pending publish retry backoff: `min(60 s << attempts, 1 h)` from the
 /// row's last attempt (step-2 brief).
 const PUBLISH_RETRY_BASE_SECS: u64 = 60;
@@ -127,18 +132,34 @@ impl Session {
 
     /// Audit this account's `KeyPackage` slot against every kind-30443
     /// publication the host found on its write relays (spec
-    /// "a publication the device did not make", SHOULD).
+    /// "a publication the device did not make", SHOULD) and against the
+    /// relays whose read finished empty (marmot-session
+    /// `refill_emptied_slot`).
     ///
-    /// Events that fail signature verification, are not kind 30443, come
-    /// from another account, address another `d` slot, or are this
-    /// device's own current/pending publications are ignored. Of the
-    /// rest, publications within the future-skew window are outrankable:
-    /// a replacement stages with a `created_at` strictly newer than the
-    /// newest outrankable one and every prior publication — unless a
-    /// pending replacement already postdates it. Publications beyond
-    /// the skew window are ignored; the spec's delete-by-id is a MAY
-    /// this build does not implement. The finding stays in memory — the
-    /// host re-reads the slot at open.
+    /// `empty_relays` lists the relays whose read of the slot completed —
+    /// EOSE — and returned nothing; a failed, closed or timed-out read
+    /// must not be listed. When one of them accepted this device's
+    /// current publication (a `publication_targets` entry in
+    /// [`TransportFanoutAttemptState::Accepted`]) and that publication is
+    /// at least a day old, a refresh is made due durably and this call
+    /// stages and signs a new `KeyPackage` into the outbox. The 24 h
+    /// age gate on the current publication is the bound: a relay that
+    /// accepts `KeyPackage`s and keeps none costs at most one new
+    /// `KeyPackage` per day, never one per audit or per restart.
+    /// Idempotence comes from the durable `refresh_at` and the pending
+    /// replacement: a repeat audit while the staged replacement waits
+    /// for acknowledgement stages nothing.
+    ///
+    /// `found` runs first. Events that fail signature verification, are
+    /// not kind 30443, come from another account, address another `d`
+    /// slot, or are this device's own current/pending publications are
+    /// ignored. Of the rest, publications within the future-skew window
+    /// are outrankable: a replacement stages with a `created_at`
+    /// strictly newer than the newest outrankable one and every prior
+    /// publication — unless a pending replacement already postdates it.
+    /// Publications beyond the skew window are ignored; the spec's
+    /// delete-by-id is a MAY this build does not implement. The finding
+    /// stays in memory — the host re-reads the slot at open.
     ///
     /// # Errors
     /// [`SessionError::SignedOut`] when the slot was withdrawn;
@@ -146,6 +167,7 @@ impl Session {
     pub async fn audit_key_package_slot(
         &mut self,
         found: &[crate::Event],
+        empty_relays: &[String],
     ) -> Result<KeyPackageStatus, SessionError> {
         let mut lifecycle = self.lifecycle_or_seed()?;
         if lifecycle.slot_withdrawn_at.is_some() {
@@ -192,7 +214,57 @@ impl Session {
                 self.sign_pending(&mut lifecycle, SignMode::Strict).await?;
             }
         }
+        if self.refill_emptied_slot(empty_relays, now_secs)? {
+            self.drive_key_package(None, SignMode::Strict).await?;
+        }
         self.key_package_status()
+    }
+
+    /// marmot-session `runtime/own_slot.rs::refill_emptied_slot`: make
+    /// this device's `KeyPackage` refresh due — `refresh_at = now`,
+    /// durably — when a relay whose read of the slot finished empty
+    /// accepted this device's current publication, that publication is
+    /// a day old and no replacement is already on its way. Returns
+    /// whether a refill was made due; the caller then runs the driver
+    /// so the replacement stages and its signed event lands in the
+    /// durable outbox in this call.
+    fn refill_emptied_slot(
+        &self,
+        empty_relays: &[String],
+        now_secs: u64,
+    ) -> Result<bool, SessionError> {
+        let mut lifecycle = self.lifecycle_or_seed()?;
+        if empty_relays.is_empty() || lifecycle.slot_withdrawn_at.is_some() {
+            return Ok(false);
+        }
+        let Some(published) = lifecycle
+            .authored_event_id
+            .as_ref()
+            .and(lifecycle.authored_event_created_at)
+        else {
+            return Ok(false);
+        };
+        if lifecycle.pending_replacement.is_some() {
+            return Ok(false);
+        }
+        let emptied = lifecycle
+            .publication_targets
+            .iter()
+            .filter(|target| {
+                target.state == TransportFanoutAttemptState::Accepted
+                    && empty_relays.contains(&target.endpoint.0)
+            })
+            .count();
+        if emptied == 0 || now_secs < published.0.saturating_add(SLOT_REFILL_MIN_AGE_SECS) {
+            return Ok(false);
+        }
+        lifecycle.refresh_at = Some(Timestamp(now_secs));
+        let provider = &self.provider;
+        provider
+            .store()
+            .transact(|| provider.put_key_package_lifecycle(&lifecycle))
+            .map_err(SessionError::Storage)?;
+        Ok(true)
     }
 
     /// This device's `KeyPackage` slot standing, re-read from the durable

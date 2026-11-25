@@ -279,8 +279,10 @@ export class MarmotClient {
   /**
    * Audit this device's `KeyPackage` slot for publications it did not make: fetches every
    * kind-30443 for the slot from the account's NIP-65 write set and hands it to the engine, which
-   * outranks any foreign publication inside the skew window. `no_relay_list` when the lookup relays
-   * are missing or the list is empty.
+   * outranks any foreign publication inside the skew window. A write relay whose read completed
+   * empty (`eose`, nothing returned) is reported too: when it accepted this device's day-old
+   * current publication, the engine stages a new KeyPackage to refill the slot. `no_relay_list`
+   * when the lookup relays are missing or the list is empty.
    */
   async auditKeyPackageSlot(): Promise<KeyPackageStatusResult> {
     this.guard();
@@ -303,12 +305,17 @@ export class MarmotClient {
       throw new MarmotError("no_relay_list");
     }
     const status = await this.keyPackageStatus();
-    const events = await fetchEvents(this.options.relays, this.options.timer, write, {
-      kinds: [KEY_PACKAGE_KIND],
-      authors: [this.account],
-      "#d": [status.slot],
-    });
-    return this.op(async (engine) => engine.auditKeyPackageSlot(events));
+    const { events, emptyRelays } = await fetchEvents(
+      this.options.relays,
+      this.options.timer,
+      write,
+      {
+        kinds: [KEY_PACKAGE_KIND],
+        authors: [this.account],
+        "#d": [status.slot],
+      },
+    );
+    return this.op(async (engine) => engine.auditKeyPackageSlot(events, emptyRelays));
   }
 
   /**

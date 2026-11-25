@@ -1,5 +1,5 @@
 /**
- * TypeScript mirror of the mk-bridge JSON wire protocol (`PROTOCOL_VERSION` 7). Decoded
+ * TypeScript mirror of the mk-bridge JSON wire protocol (`PROTOCOL_VERSION` 8). Decoded
  * representation: `u64` fields arrive as decimal strings and decode to `bigint`; identifiers (event
  * ids, pubkeys, group ids, nostr group ids, signatures, outbound ids, hashes, nonces) decode to
  * validated lowercase hex `string`s; payload blobs (`key_package`, component `data`, attachment
@@ -17,7 +17,7 @@ import type { InputCategory } from "../core/errors.ts";
 export type Complete<T extends never> = T;
 
 /** Wire protocol version. Bumped on any breaking schema change. */
-export const PROTOCOL_VERSION = 7;
+export const PROTOCOL_VERSION = 8;
 
 /** One reading of the injected clock (decimal strings on the wire). */
 export type ClockReading = {
@@ -773,7 +773,12 @@ export type BridgeRequest =
   | { type: "take_outbound" }
   | { type: "report_publish"; id: string; results: RelayResult[] }
   | { type: "ensure_key_package"; writeRelays: string[] }
-  | { type: "audit_key_package_slot"; events: NostrEvent[] }
+  | {
+      type: "audit_key_package_slot";
+      events: NostrEvent[];
+      /** Write relays whose read of the slot completed (eose) and returned nothing. */
+      emptyRelays: string[];
+    }
   | { type: "key_package_status" }
   | { type: "sign_out"; writeRelays: string[] }
   | { type: "publish_inbox_relays"; relays: string[] }

@@ -6,7 +6,7 @@ import type { NostrEvent } from "../src/backend/protocol.ts";
 import { fakeRelay } from "../src/testing/relay.ts";
 import { manualTimer } from "../src/testing/timer.ts";
 import { FETCH_TIMEOUT_MS, fetchEvents } from "../src/transport/fetch.ts";
-import type { RelayFilter } from "../src/transport/port.ts";
+import type { RelayFilter, RelayPort } from "../src/transport/port.ts";
 
 const RELAY = "wss://r1.example";
 const RELAY2 = "wss://r2.example";
@@ -62,6 +62,14 @@ const flush = async (): Promise<void> => {
   await Promise.resolve();
 };
 
+/** A `RelayPort` that never answers subscriptions on `silent` and delegates the rest to `base`. */
+const silentOn = (base: RelayPort, silent: string): RelayPort => ({
+  publish: base.publish,
+  connect: base.connect,
+  subscribe: (relay, filters, handlers) =>
+    relay === silent ? () => undefined : base.subscribe(relay, filters, handlers),
+});
+
 describe("fetchEvents", () => {
   test("collects replayed events per relay until eose, deduplicated by id", async () => {
     const network = fakeRelay();
@@ -77,7 +85,7 @@ describe("fetchEvents", () => {
       kinds: [10002],
       authors: [KEYS.publicKey],
     });
-    const ids = result.map((e) => e.id).toSorted();
+    const ids = result.events.map((e) => e.id).toSorted();
     expect(ids).toStrictEqual([shared.id, second.id].toSorted());
     expect(timer.pending()).toBe(0);
   });
@@ -90,7 +98,7 @@ describe("fetchEvents", () => {
     network.mode(RELAY2, "down"); // subscribes → closed("down") immediately
     const timer = manualTimer();
     const result = await fetchEvents(port, timer, [RELAY, RELAY2], { kinds: [10002] });
-    expect(result.map((e) => e.id)).toStrictEqual([stored.id]);
+    expect(result.events.map((e) => e.id)).toStrictEqual([stored.id]);
     expect(timer.pending()).toBe(0);
   });
 
@@ -109,14 +117,14 @@ describe("fetchEvents", () => {
     expect(timer.pending()).toBe(1);
     timer.tick(FETCH_TIMEOUT_MS);
     const result = await pending;
-    expect(result).toStrictEqual([]);
+    expect(result).toStrictEqual({ events: [], emptyRelays: [] });
     void port;
   });
 
   test("an empty relay list resolves immediately with no subscriptions", async () => {
     const timer = manualTimer();
     const result = await fetchEvents(fakeRelay().port("t"), timer, [], { kinds: [1] });
-    expect(result).toStrictEqual([]);
+    expect(result).toStrictEqual({ events: [], emptyRelays: [] });
     expect(timer.pending()).toBe(0);
   });
 
@@ -144,7 +152,7 @@ describe("fetchEvents", () => {
     await port.publish(RELAY, genuine);
     await port.publish(RELAY, forgedWithNewId(genuine, "forged"));
     const result = await fetchEvents(port, manualTimer(), [RELAY], { kinds: [10002] });
-    expect(result).toStrictEqual([genuine]);
+    expect(result.events).toStrictEqual([genuine]);
   });
 
   test("a forged same-id copy arriving after the genuine KeyPackage does not replace it", async () => {
@@ -157,7 +165,7 @@ describe("fetchEvents", () => {
       kinds: [30_443],
       authors: [KEYS.publicKey],
     });
-    expect(result).toStrictEqual([genuine]);
+    expect(result.events).toStrictEqual([genuine]);
   });
 
   test("a forged same-id copy arriving before the genuine KeyPackage does not shadow it", async () => {
@@ -170,6 +178,35 @@ describe("fetchEvents", () => {
       kinds: [30_443],
       authors: [KEYS.publicKey],
     });
-    expect(result).toStrictEqual([genuine]);
+    expect(result.events).toStrictEqual([genuine]);
+  });
+
+  test("emptyRelays lists only relays that completed their read with nothing", async () => {
+    const RELAY_B = "wss://r3.example";
+    const RELAY_C = "wss://r4.example";
+    const RELAY_D = "wss://r5.example";
+    const RELAY_E = "wss://r6.example";
+    const network = fakeRelay();
+    const base = network.port("t");
+    // RELAY_B closed: the dial is refused and the sub closes immediately.
+    network.mode(RELAY_B, "down");
+    // RELAY_C silent: a subscribe that never answers, so only the timeout ends the fetch.
+    const port = silentOn(base, RELAY_C);
+    // RELAY_D delivers a verified event; RELAY_E delivers only a forged one before eose.
+    const genuine = event({ kind: 30_443, content: "genuine" });
+    await base.publish(RELAY_D, genuine);
+    await base.publish(RELAY_E, forgedWithNewId(genuine, "forged"));
+    const timer = manualTimer();
+    const pending = fetchEvents(port, timer, [RELAY_B, RELAY, RELAY_C, RELAY_E, RELAY_D], {
+      kinds: [30_443],
+      authors: [KEYS.publicKey],
+    });
+    await flush();
+    timer.tick(FETCH_TIMEOUT_MS);
+    const result = await pending;
+    expect(result.events).toStrictEqual([genuine]);
+    // A: eose with nothing → listed. B: closed → not. C: timed out → not.
+    // D: verified event → not. E: forged-only then eose → listed.
+    expect(result.emptyRelays).toStrictEqual([RELAY, RELAY_E]);
   });
 });

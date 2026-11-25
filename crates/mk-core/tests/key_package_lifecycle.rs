@@ -778,7 +778,7 @@ mod lifecycle_tests {
         // staged replacement's `created_at` is strictly newer.
         let foreign = slot_event(&signer, now + 10, &slot, 30_443).await;
         a.session
-            .audit_key_package_slot(&[own.event.clone(), foreign.clone()])
+            .audit_key_package_slot(&[own.event.clone(), foreign.clone()], &[])
             .await
             .expect("audit");
         let outbound = take(&mut a);
@@ -794,7 +794,7 @@ mod lifecycle_tests {
         // Own current publication alone is a no-op. (`own` is the
         // superseded publication now — foreign by id — so it stays out.)
         a.session
-            .audit_key_package_slot(&[current])
+            .audit_key_package_slot(&[current], &[])
             .await
             .expect("audit own");
         assert!(take(&mut a).is_empty(), "own publication is ignored");
@@ -807,7 +807,7 @@ mod lifecycle_tests {
         bad_sig.sig[0] ^= 0xff;
         let wrong_kind = slot_event(&signer, now + 20, &slot, 1).await;
         a.session
-            .audit_key_package_slot(&[wrong_d, wrong_author, bad_sig, wrong_kind])
+            .audit_key_package_slot(&[wrong_d, wrong_author, bad_sig, wrong_kind], &[])
             .await
             .expect("audit ignored");
         assert!(take(&mut a).is_empty(), "non-slot events are ignored");
@@ -815,7 +815,7 @@ mod lifecycle_tests {
         // Beyond the skew window the foreign publication is ignored too.
         let far = slot_event(&signer, now + 301, &slot, 30_443).await;
         a.session
-            .audit_key_package_slot(&[far])
+            .audit_key_package_slot(&[far], &[])
             .await
             .expect("audit far");
         assert!(take(&mut a).is_empty(), "beyond-skew is ignored");
@@ -832,7 +832,7 @@ mod lifecycle_tests {
         let b_slot = hex::encode(b.session.key_package_status().expect("status").slot);
         let older = slot_event(&Arc::clone(&b.signer), now - 100, &b_slot, 30_443).await;
         b.session
-            .audit_key_package_slot(&[older])
+            .audit_key_package_slot(&[older], &[])
             .await
             .expect("audit pending");
         assert!(
@@ -854,9 +854,168 @@ mod lifecycle_tests {
             .expect("sign_out");
         let error = a
             .session
-            .audit_key_package_slot(&[])
+            .audit_key_package_slot(&[], &[])
             .await
             .expect_err("audit after withdrawal");
         assert!(matches!(error, SessionError::SignedOut));
+    }
+
+    /// A write relay that accepted the current `KeyPackage` and now
+    /// serves nothing in the slot costs one replacement once the
+    /// publication is a day old (marmot-session `refill_emptied_slot`).
+    /// The 24 h gate is the bound: a relay that keeps dropping the
+    /// publication costs at most one `KeyPackage` per day, never one
+    /// per audit or restart.
+    #[tokio::test(flavor = "current_thread")]
+    async fn audit_refills_slot_emptied_of_current() {
+        let relay = FakeRelay::new();
+        let mut a = open_member().await;
+        let own = publish_promoted(&mut a, &relay).await;
+        a.clock.advance(25 * 3_600_000);
+        a.session
+            .audit_key_package_slot(&[], &[RELAY.to_owned()])
+            .await
+            .expect("audit");
+        let outbound = take(&mut a);
+        assert_eq!(outbound.len(), 1, "the emptied slot stages one replacement");
+        assert_eq!(outbound[0].event.kind, 30_443);
+        assert!(outbound[0].event.created_at > own.event.created_at);
+        assert_ne!(outbound[0].event.id, own.event.id);
+        accept(&mut a, &relay, &outbound[0]).await;
+        let status = a.session.key_package_status().expect("status");
+        assert_eq!(
+            status.current.map(|current| current.event_id),
+            Some(outbound[0].event.id),
+            "the refilled publication promotes on acknowledgement"
+        );
+        assert_bundle_invariant(&a);
+    }
+
+    /// The refill waits until the accepted current publication is a day
+    /// old: an emptied read at one hour stages nothing.
+    #[tokio::test(flavor = "current_thread")]
+    async fn audit_refill_waits_a_day() {
+        let relay = FakeRelay::new();
+        let mut a = open_member().await;
+        publish_promoted(&mut a, &relay).await;
+        a.clock.advance(3_600_000);
+        a.session
+            .audit_key_package_slot(&[], &[RELAY.to_owned()])
+            .await
+            .expect("audit");
+        assert!(take(&mut a).is_empty(), "under a day stages nothing");
+        assert!(!a.session.key_package_status().expect("status").pending);
+    }
+
+    /// Only a completed empty read counts: no `empty_relays` (the host
+    /// omits a failed or timed-out read) and an emptied relay that never
+    /// accepted the current publication both stage nothing.
+    #[tokio::test(flavor = "current_thread")]
+    async fn audit_refill_needs_an_accepted_empty_read() {
+        let relay = FakeRelay::new();
+        let mut a = open_member().await;
+        publish_promoted(&mut a, &relay).await;
+        a.clock.advance(25 * 3_600_000);
+        a.session
+            .audit_key_package_slot(&[], &[])
+            .await
+            .expect("audit without empty reads");
+        assert!(take(&mut a).is_empty(), "no emptied relay, no refill");
+        a.session
+            .audit_key_package_slot(&[], &[RELAY2.to_owned()])
+            .await
+            .expect("audit foreign relay");
+        assert!(
+            take(&mut a).is_empty(),
+            "a relay that never accepted the publication triggers nothing"
+        );
+    }
+
+    /// The staged replacement is durable: reopening before it publishes
+    /// and auditing the empty read again stages nothing — the pending
+    /// covers it, so the only outbound the reopened session re-serves is
+    /// the same still-unreported `KeyPackage` event.
+    #[tokio::test(flavor = "current_thread")]
+    async fn audit_refill_is_idempotent_across_restart() {
+        let relay = FakeRelay::new();
+        let mut a = open_member().await;
+        publish_promoted(&mut a, &relay).await;
+        a.clock.advance(25 * 3_600_000);
+        a.session
+            .audit_key_package_slot(&[], &[RELAY.to_owned()])
+            .await
+            .expect("audit");
+        let outbound = take(&mut a);
+        assert_eq!(outbound.len(), 1, "the refill stages one");
+        let staged = outbound[0].event.id;
+        let mut a = reopen_member(&a).await;
+        a.session
+            .audit_key_package_slot(&[], &[RELAY.to_owned()])
+            .await
+            .expect("audit after reopen");
+        let reserved = take(&mut a);
+        assert!(
+            reserved.iter().all(|item| item.event.id == staged),
+            "the pending replacement covers the repeat audit; the still-unreported \
+             publication is re-served, never re-staged"
+        );
+        assert_bundle_invariant(&a);
+    }
+
+    /// The one-per-day bound: a relay that keeps dropping the
+    /// publication gets at most one refill per 24 h of the current
+    /// publication's age.
+    #[tokio::test(flavor = "current_thread")]
+    async fn audit_refill_costs_one_per_day() {
+        let relay = FakeRelay::new();
+        let mut a = open_member().await;
+        publish_promoted(&mut a, &relay).await;
+        a.clock.advance(25 * 3_600_000);
+        a.session
+            .audit_key_package_slot(&[], &[RELAY.to_owned()])
+            .await
+            .expect("audit");
+        let outbound = take(&mut a);
+        assert_eq!(outbound.len(), 1, "first refill");
+        accept(&mut a, &relay, &outbound[0]).await;
+        a.session
+            .audit_key_package_slot(&[], &[RELAY.to_owned()])
+            .await
+            .expect("audit again");
+        assert!(
+            take(&mut a).is_empty(),
+            "the new publication is under a day old"
+        );
+        a.clock.advance(25 * 3_600_000);
+        a.session
+            .audit_key_package_slot(&[], &[RELAY.to_owned()])
+            .await
+            .expect("audit a day later");
+        assert_eq!(take(&mut a).len(), 1, "one more, a day later");
+        assert_bundle_invariant(&a);
+    }
+
+    /// A foreign publication and an emptied read in one audit stage one
+    /// replacement — the foreign path's — not two.
+    #[tokio::test(flavor = "current_thread")]
+    async fn audit_foreign_and_empty_stage_one() {
+        let relay = FakeRelay::new();
+        let mut a = open_member().await;
+        publish_promoted(&mut a, &relay).await;
+        a.clock.advance(25 * 3_600_000);
+        let slot = hex::encode(a.session.key_package_status().expect("status").slot);
+        let now = a.clock.now().unix_ms / 1_000;
+        let foreign = slot_event(&a.signer, now + 10, &slot, 30_443).await;
+        a.session
+            .audit_key_package_slot(&[foreign], &[RELAY.to_owned()])
+            .await
+            .expect("audit");
+        let outbound = take(&mut a);
+        assert_eq!(
+            outbound.len(),
+            1,
+            "foreign plus empty stages exactly one replacement"
+        );
+        assert_bundle_invariant(&a);
     }
 }

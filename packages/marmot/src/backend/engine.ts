@@ -426,12 +426,17 @@ export class Engine {
 
   /**
    * Audit the account `KeyPackage` slot for publications this device did not make: `events` is the
-   * host's read-back of kind-30443 for the slot, own and foreign alike. The session stages a
-   * strictly newer replacement when a foreign publication inside the skew window outranks the
-   * current one, and answers the slot's standing.
+   * host's read-back of kind-30443 for the slot, own and foreign alike. `emptyRelays` is the write
+   * relays whose read of the slot completed — eose — and returned nothing (a failed, closed or
+   * timed-out read must not be listed). The session stages a strictly newer replacement when a
+   * foreign publication inside the skew window outranks the current one, or when a listed relay
+   * accepted a day-old current publication, and answers the slot's standing.
    */
-  async auditKeyPackageSlot(events: NostrEvent[]): Promise<KeyPackageStatusResult> {
-    return this.op({ type: "audit_key_package_slot", events }, (r) =>
+  async auditKeyPackageSlot(
+    events: NostrEvent[],
+    emptyRelays: string[],
+  ): Promise<KeyPackageStatusResult> {
+    return this.op({ type: "audit_key_package_slot", events, emptyRelays }, (r) =>
       r.type === "key_package_status"
         ? {
             slot: r.slot,

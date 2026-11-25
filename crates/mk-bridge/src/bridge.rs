@@ -880,7 +880,9 @@ fn op_audit_key_package_slot(
     move |mut session| {
         Box::pin(async move {
             let events: Vec<core::Event> = args.events.into_iter().map(Into::into).collect();
-            let status = session.audit_key_package_slot(&events).await;
+            let status = session
+                .audit_key_package_slot(&events, &args.empty_relays)
+                .await;
             (
                 session,
                 status.map(|status| OpResult::KeyPackageStatus(status.into())),
