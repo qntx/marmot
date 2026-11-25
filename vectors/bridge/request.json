@@ -10,6 +10,9 @@
   "type": "acknowledge_messages"
  },
  "audit_key_package_slot": {
+  "empty_relays": [
+   "wss://relay1.example"
+  ],
   "events": [
    {
     "content": "hello",

@@ -883,7 +883,7 @@ describe("MarmotClient", () => {
     await fixture.client.close();
   });
 
-  /** The write-set NIP-65 list plus one slot publication for the audit. */
+  /** The write-set NIP-65 list (one serving relay, one empty) plus one slot publication. */
   const seedSlot = async (network: ReturnType<typeof fakeRelay>): Promise<void> => {
     const peer = network.port("peer");
     const list = {
@@ -891,7 +891,10 @@ describe("MarmotClient", () => {
       pubkey: ACCOUNT,
       createdAt: 1000n,
       kind: 10002,
-      tags: [["r", RELAY]],
+      tags: [
+        ["r", RELAY],
+        ["r", RELAY2],
+      ],
       content: "",
       sig: "5".repeat(128),
     };
@@ -907,7 +910,8 @@ describe("MarmotClient", () => {
     markVerified(list);
     markVerified(package_);
     await peer.publish(LOOKUP, list);
-    // The write set is normalized — `wss://r1.example/` is its store key.
+    // The write set is normalized — `wss://r1.example/` is its store key. RELAY2 serves
+    // nothing in the slot, so the audit's emptyRelays carries it.
     await peer.publish(`${RELAY}/`, package_);
   };
 
@@ -919,6 +923,7 @@ describe("MarmotClient", () => {
     expect(calls[0]).toMatchObject({
       type: "audit_key_package_slot",
       events: [{ id: "13".repeat(32) }],
+      emptyRelays: [`${RELAY2}/`],
     });
     await fixture.client.close();
   });

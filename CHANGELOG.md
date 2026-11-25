@@ -11,12 +11,25 @@ npm trusted publishing (OIDC).
 
 ## [Unreleased]
 
+### Added
+
+- Emptied-slot refill: a write relay that accepted this device's current
+  `KeyPackage` but now serves nothing in the slot gets a new `KeyPackage`
+  once the publication is a day old — at most one per day, never one per
+  audit or restart.
+
 ### Changed (BREAKING)
 
 - `groups()` now returns every local copy including removed and disbanded
   ones (with `access`/`state` telling them apart), in a stable order, until
   the host calls `forgetGroup`; hosts that want only live chats filter on
   `state`/`access`.
+- Bridge protocol 8: the `audit_key_package_slot` request carries
+  `emptyRelays` — the write relays whose read of the slot completed
+  (eose) and returned nothing.
+- `fetchEvents` returns `{ events, emptyRelays }` instead of the bare
+  event array; empty-finished reads are distinguished from closed or
+  timed-out ones.
 
 ### Fixed
 

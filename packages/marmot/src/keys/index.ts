@@ -59,7 +59,10 @@ async function fetchAuthored(
   allowLoopback: boolean,
 ): Promise<NostrEvent[]> {
   const relays = safe(lookupRelays, allowLoopback);
-  const events = await fetchEvents(port, timer, relays, { kinds: [kind], authors: [pubkey] });
+  const { events } = await fetchEvents(port, timer, relays, {
+    kinds: [kind],
+    authors: [pubkey],
+  });
   return events.filter((event) => event.pubkey === pubkey && event.kind === kind);
 }
 
@@ -144,7 +147,7 @@ export async function lookupInvitees(
       "#k": [String(KEY_PACKAGE_KIND)],
     }),
   ]);
-  const fetched = [...keyPackages, ...deletions].filter(
+  const fetched = [...keyPackages.events, ...deletions.events].filter(
     (event) =>
       event.pubkey === pubkey && (event.kind === KEY_PACKAGE_KIND || event.kind === DELETION_KIND),
   );

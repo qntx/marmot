@@ -38,7 +38,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::{BridgeError, invalid_reason};
 
 /// Wire protocol version. Bumped on any breaking schema change.
-pub const PROTOCOL_VERSION: u32 = 7;
+pub const PROTOCOL_VERSION: u32 = 8;
 
 /// Maximum accepted request/config byte length.
 pub const MAX_REQUEST_BYTES: usize = 64 * 1024 * 1024;

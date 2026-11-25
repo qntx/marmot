@@ -46,16 +46,23 @@ pub struct ReportPublishRequest {
     pub results: Vec<RelayResult>,
 }
 
-/// Audit the account's `KeyPackage` slot for foreign publications.
+/// Audit the account's `KeyPackage` slot for foreign publications and
+/// refill a slot a write relay emptied.
 ///
 /// `events` is every kind-30443 event the host read for this account's
 /// slot from its write relays; the session outranks any foreign
-/// publication inside the future-skew window.
+/// publication inside the future-skew window. `empty_relays` is the
+/// write relays whose read of the slot completed — EOSE — and returned
+/// nothing; a failed, closed or timed-out read must not be listed. When
+/// one accepted the device's current publication and it is a day old,
+/// the session makes a refresh due and stages a new `KeyPackage`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AuditKeyPackageSlotRequest {
     /// The read-back slot publications, own and foreign alike.
     pub events: Vec<Event>,
+    /// The write relays whose completed read returned nothing.
+    pub empty_relays: Vec<String>,
 }
 
 /// Ensure the account's `KeyPackage` slot carries a live publication.
