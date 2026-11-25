@@ -715,12 +715,16 @@ export class Engine {
     );
   }
 
-  /** Snapshot every live group. */
+  /**
+   * Snapshot every stored local copy — live and terminated (`removed`, `disbanded`) alike — in
+   * group-id byte order. A terminated copy stays listed until `forgetGroup`; hosts that want only
+   * live chats filter on `state`/`access`.
+   */
   async groups(): Promise<GroupSnapshot[]> {
     return this.op({ type: "groups" }, (r) => (r.type === "groups" ? r.groups : MISS));
   }
 
-  /** Snapshot one group, or `null` when not live. */
+  /** Snapshot one group, or `null` when the device holds no copy of it. */
   async group(id: string): Promise<GroupSnapshot | undefined> {
     return this.op({ type: "group", group: id }, (r) => (r.type === "group" ? r.group : MISS));
   }

@@ -58,7 +58,7 @@ mod app_surface_tests {
     use mk_core::media::EncryptedMediaPolicy;
     use mk_core::{
         AccountId, AppMessage, AttachmentInput, Clock, ComponentUpdate, CreateGroup, DropReason,
-        EventId, GroupAvatar, GroupChange, GroupId, GroupState, Invitee, MediaMessage,
+        EventId, GroupAccess, GroupAvatar, GroupChange, GroupId, GroupState, Invitee, MediaMessage,
         MessageIntent, OutboundPurpose, PublishResolution, ReceivedMessage, RelayResult,
         RelayStatus, Semantics, SendOutcome, SentMessage, SessionError, SessionEvent,
     };
@@ -1748,8 +1748,8 @@ mod app_surface_tests {
         let route1_bytes = snapshot(&a, &gid1).nostr_group_id;
         a.session.forget_group(&gid1).expect("forget_group");
         assert!(
-            !matches!(a.session.group(&gid1), Ok(Some(_))),
-            "forgotten group is gone from the snapshot surface"
+            matches!(a.session.group(&gid1), Ok(None)),
+            "forgotten group answers no copy"
         );
 
         // No remaining row's key or value carries the group id or the
@@ -1901,6 +1901,204 @@ mod app_surface_tests {
                 .open_attachment(&group, &transport_id, reference, fetched)
                 .expect("open after removal"),
             plaintext
+        );
+    }
+
+    /// `groups()` lists every stored local copy — a removed copy keeps its
+    /// row until `forget_group` erases it — in group-id byte order, stable
+    /// across calls and a restart. A post-forget Welcome re-joins the same
+    /// group id as a fresh active copy.
+    #[tokio::test(flavor = "current_thread")]
+    async fn groups_lists_removed_copy_until_forget() {
+        let relay = FakeRelay::new();
+        let mut a = open_member().await;
+        let mut b = open_member().await;
+        publish_identity(&mut a, &relay, RELAY).await;
+        publish_identity(&mut b, &relay, RELAY).await;
+        let live = group_with(&mut a, &relay, &[&b], "live").await;
+        let removed = group_with(&mut a, &relay, &[&b], "removed").await;
+        join_via_welcome(&mut b, &relay).await;
+        for gid in [&live, &removed] {
+            sync_member(&mut a, &relay, RELAY, gid).await;
+            sync_member(&mut b, &relay, RELAY, gid).await;
+        }
+        let route_removed = b.route_hex(&removed);
+
+        // A removes B: B's copy terminates but keeps its stored row.
+        a.session
+            .remove_members(&removed, &[b.signer.account()])
+            .await
+            .expect("remove B");
+        flush(&mut a, &relay).await;
+        a.session.tick().await.expect("tick");
+        flush(&mut a, &relay).await;
+        let _ = collect(&mut b, &relay, &route_removed).await;
+
+        let groups = b.session.groups().expect("groups");
+        let removed_copy = groups
+            .iter()
+            .find(|listed| listed.id == removed)
+            .expect("the removed copy is listed");
+        assert_eq!(removed_copy.state, GroupState::Removed);
+        assert_eq!(removed_copy.access, GroupAccess::Removed);
+        let live_copy = groups
+            .iter()
+            .find(|listed| listed.id == live)
+            .expect("the live copy is listed");
+        assert_eq!(live_copy.state, GroupState::Stable);
+        assert_eq!(live_copy.access, GroupAccess::Active);
+
+        // Group-id byte order, stable across calls and a restart.
+        let ids: Vec<GroupId> = groups.iter().map(|listed| listed.id.clone()).collect();
+        let mut sorted = ids.clone();
+        sorted.sort();
+        assert_eq!(ids, sorted, "group-id byte order");
+        assert_eq!(groups, b.session.groups().expect("groups"), "stable order");
+        let mut b = reopen_member(&b).await;
+        let ids_after: Vec<GroupId> = b
+            .session
+            .groups()
+            .expect("groups")
+            .iter()
+            .map(|listed| listed.id.clone())
+            .collect();
+        assert_eq!(ids_after, ids, "the same copies in the same order");
+        assert_eq!(
+            snapshot(&b, &removed).access,
+            GroupAccess::Removed,
+            "the removed projection survives the reopen"
+        );
+
+        // `forget_group` is durable: gone now, still gone after a restart.
+        b.session.forget_group(&removed).expect("forget_group");
+        assert!(
+            matches!(b.session.group(&removed), Ok(None)),
+            "a forgotten group answers no copy"
+        );
+        assert!(
+            !b.session
+                .groups()
+                .expect("groups")
+                .iter()
+                .any(|listed| listed.id == removed)
+        );
+        let mut b = reopen_member(&b).await;
+        assert!(
+            matches!(b.session.group(&removed), Ok(None)),
+            "a forgotten group answers no copy after restart"
+        );
+        assert!(
+            !b.session
+                .groups()
+                .expect("groups")
+                .iter()
+                .any(|listed| listed.id == removed),
+            "a forgotten copy stays forgotten"
+        );
+
+        // A fresh KeyPackage and a fresh Welcome re-join the same group id
+        // as one active copy.
+        publish_identity(&mut b, &relay, RELAY).await;
+        a.session
+            .invite(
+                &removed,
+                vec![Invitee {
+                    key_package: key_package_of(&relay, RELAY, &b.account_hex()),
+                    inbox_relays: inbox_relays_of(&relay, RELAY, &b.account_hex()),
+                }],
+            )
+            .await
+            .expect("re-invite");
+        flush(&mut a, &relay).await;
+        join_via_welcome(&mut b, &relay).await;
+        sync_member(&mut a, &relay, RELAY, &removed).await;
+        sync_member(&mut b, &relay, RELAY, &removed).await;
+
+        let copies: Vec<mk_core::GroupSnapshot> = b
+            .session
+            .groups()
+            .expect("groups")
+            .into_iter()
+            .filter(|listed| listed.id == removed)
+            .collect();
+        assert_eq!(copies.len(), 1, "one copy of the re-joined group id");
+        assert_eq!(copies[0].state, GroupState::Stable);
+        assert_eq!(copies[0].access, GroupAccess::Active);
+
+        // B reads fresh traffic on the new copy.
+        send_chat(&mut a, &relay, &removed, "welcome back").await;
+        let route = b.route_hex(&removed);
+        let events = collect(&mut b, &relay, &route).await;
+        message_with(&events, "welcome back");
+    }
+
+    /// A disbanded copy is a stored tombstone: `groups()` lists it until
+    /// `forget_group` erases it, across a restart.
+    #[tokio::test(flavor = "current_thread")]
+    async fn groups_lists_disbanded_copy() {
+        let relay = FakeRelay::new();
+        let mut a = open_member().await;
+        let mut b = open_member().await;
+        publish_identity(&mut a, &relay, RELAY).await;
+        publish_identity(&mut b, &relay, RELAY).await;
+        let gid = group_with(&mut a, &relay, &[&b], "disbanded").await;
+        join_via_welcome(&mut b, &relay).await;
+        sync_member(&mut a, &relay, RELAY, &gid).await;
+        sync_member(&mut b, &relay, RELAY, &gid).await;
+        let route = a.route_hex(&gid);
+
+        a.session.disband(&gid).await.expect("disband");
+        // Drive both members until the terminal commit lands everywhere.
+        let mut a_events = Vec::new();
+        for _ in 0..12 {
+            a_events.extend(cycle(&mut a, &relay, &route).await);
+            let _ = cycle(&mut b, &relay, &route).await;
+            let a_done = a_events.iter().any(|event| {
+                matches!(
+                    event,
+                    SessionEvent::GroupStateChanged {
+                        change: GroupChange::Disbanded,
+                        ..
+                    }
+                )
+            });
+            let b_done = matches!(
+                b.session.group(&gid),
+                Ok(Some(snap)) if snap.state == GroupState::Disbanded
+            );
+            if a_done && b_done {
+                break;
+            }
+        }
+        assert_eq!(snapshot(&b, &gid).state, GroupState::Disbanded);
+
+        let listed = b
+            .session
+            .groups()
+            .expect("groups")
+            .into_iter()
+            .find(|listed| listed.id == gid)
+            .expect("the disbanded copy is listed");
+        assert_eq!(listed.state, GroupState::Disbanded);
+
+        let mut b = reopen_member(&b).await;
+        let listed = b
+            .session
+            .groups()
+            .expect("groups")
+            .into_iter()
+            .find(|listed| listed.id == gid)
+            .expect("the disbanded copy survives the reopen");
+        assert_eq!(listed.state, GroupState::Disbanded);
+
+        b.session.forget_group(&gid).expect("forget_group");
+        assert!(
+            !b.session
+                .groups()
+                .expect("groups")
+                .iter()
+                .any(|listed| listed.id == gid),
+            "a forgotten disbanded copy is gone"
         );
     }
 

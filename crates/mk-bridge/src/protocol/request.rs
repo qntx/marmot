@@ -475,7 +475,9 @@ pub enum Request {
     Tick(NoArgs),
     /// Acknowledge delivered messages.
     AcknowledgeMessages(AcknowledgeMessagesRequest),
-    /// Snapshot every live group.
+    /// Snapshot every stored local copy — live and terminated alike — in
+    /// group-id byte order; a terminated copy stays listed until
+    /// `forget_group`.
     Groups(NoArgs),
     /// Snapshot one group.
     Group(GroupRequest),

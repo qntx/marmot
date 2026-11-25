@@ -73,7 +73,7 @@ use cgka_traits::error::EngineError;
 use cgka_traits::group::ProtocolProfile;
 use cgka_traits::maintenance::KeyPackageLifecycleState;
 use cgka_traits::storage::{
-    AccountDeviceSignerBinding, AccountDeviceSignerStorage, DisbandRequestStatus,
+    AccountDeviceSignerBinding, AccountDeviceSignerStorage, DisbandRequestStatus, GroupStorage,
     MaintenanceStorage, MessageStorage, OutboundFanoutStorage,
 };
 use cgka_traits::transport_adapter::{
@@ -3526,13 +3526,20 @@ impl Session {
 
     // ---- snapshots ----
 
-    /// Snapshots of every live group, for UI projection.
+    /// Snapshots of every stored local copy of a group — live and
+    /// terminated alike — in group-id byte order, for UI projection.
+    ///
+    /// A removed copy reports `state: Removed` with `access:
+    /// RemovedDevice|Removed`; a disbanded copy reports `state:
+    /// Disbanded`. A terminated copy stays listed until
+    /// [`Self::forget_group`]; quarantined copies are not listed (they
+    /// surface through `HydrationQuarantined`).
     ///
     /// # Errors
     /// [`SessionError`] for engine/storage failures.
     pub fn groups(&self) -> Result<Vec<GroupSnapshot>, SessionError> {
         let mut out = Vec::new();
-        for group_id in self.engine.live_group_ids().map_err(session_engine_error)? {
+        for group_id in self.provider.list_groups().map_err(SessionError::Storage)? {
             if let Some(snapshot) = self.group(&GroupId(group_id.as_slice().to_vec()))? {
                 out.push(snapshot);
             }
@@ -3571,7 +3578,9 @@ impl Session {
         Ok(group_access(removed, unrecoverable, stalled))
     }
 
-    /// Snapshot of one group. `Ok(None)` when the group is not live.
+    /// Snapshot of one group. `Ok(None)` when the device holds no copy of
+    /// it (unknown, quarantined or forgotten); a removed or disbanded copy
+    /// still snapshots.
     ///
     /// # Errors
     /// [`SessionError`] for engine/storage failures.
@@ -3579,7 +3588,11 @@ impl Session {
         let gid = engine_gid(id);
         let record = match self.engine.group_record(&gid) {
             Ok(record) => record,
-            Err(EngineError::UnknownGroup(_)) => return Ok(None),
+            // A forgotten copy's row is gone (`forget_group_local`): the
+            // engine surfaces the record-level miss, not `UnknownGroup`.
+            Err(EngineError::UnknownGroup(_) | EngineError::Storage(StorageError::NotFound)) => {
+                return Ok(None);
+            }
             Err(error) => return Err(session_engine_error(error)),
         };
         // A disbanded copy keeps its durable record (name, epoch, the

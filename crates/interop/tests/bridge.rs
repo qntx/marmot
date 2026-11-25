@@ -403,7 +403,7 @@ impl BridgeMember {
         drained
     }
 
-    /// Union every live group's `#h` route into `routes_seen` so routes stay
+    /// Union every stored copy's `#h` route into `routes_seen` so routes stay
     /// fetchable after a removal ends membership.
     fn refresh_routes(&mut self) {
         if let OpResult::Groups(result) = self.call_blocking(Request::Groups(NoArgs {})) {

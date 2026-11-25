@@ -509,6 +509,9 @@ const callsOf = (script: Script, type: BridgeRequest["type"]): BridgeRequest[] =
 const ingests = (script: Script): NostrEvent[][] =>
   script.calls.flatMap((call) => (call.type === "ingest" ? [call.events] : []));
 
+/** The `#h` routes of a relay filter (empty for non-group filters). */
+const routesOf = (filter: RelayFilter): string[] => filter["#h"] ?? [];
+
 describe("MarmotClient", () => {
   test("open subscribes for gift wraps on the persisted inbox relays", async () => {
     const fixture = await open(
@@ -562,6 +565,38 @@ describe("MarmotClient", () => {
     expect(groupChanges).toContain("group_joined");
     // Reconcile opened a kind-445 subscription for the group's route.
     expect(fixture.network.openSubscriptions("c")).toBe(2);
+    await fixture.client.close();
+  });
+
+  test("groups() lists a removed copy while subscriptions stay live-only", async () => {
+    const removedId = "ee".repeat(32);
+    const removedRoute = "ff".repeat(32);
+    const script = freshScript();
+    script.groups = [
+      snapshot(),
+      {
+        ...snapshot(),
+        id: removedId,
+        nostrGroupId: removedRoute,
+        state: "removed",
+        access: "removed",
+      },
+    ];
+    const fixture = await open(
+      script,
+      encodeClientState({ nip44Extended: true, cursors: {}, inbox: [RELAY] }),
+    );
+    await settle(fixture.timer, 5000);
+
+    const groups = await fixture.client.groups();
+    expect(groups.map((g) => g.state)).toStrictEqual(["stable", "removed"]);
+    expect(groups[1]?.access).toBe("removed");
+
+    // Only the live group's route gets a kind-445 subscription.
+    const routes = fixture.subs
+      .filter((sub) => sub.filters.some((filter) => filter.kinds?.includes(445) === true))
+      .flatMap((sub) => sub.filters.flatMap(routesOf));
+    expect(routes).toStrictEqual([ROUTE]);
     await fixture.client.close();
   });
 

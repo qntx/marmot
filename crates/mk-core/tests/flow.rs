@@ -1248,7 +1248,7 @@ mod flow_tests {
                 "a refused ingest commits no durable batch"
             );
             assert!(
-                b.session.group(&gid).is_err(),
+                matches!(b.session.group(&gid), Ok(None)),
                 "no group before the unwrap succeeds"
             );
 
