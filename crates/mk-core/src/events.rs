@@ -16,7 +16,7 @@
 //! | `Buffered` | `Deferred { None }` | parked pending a local transition; no protocol category yet |
 //! | `Ignored { category }` | `Rejected { mapped }` | pre-convergence routing/dedup rejection |
 //! | `LocalState { state }` | `Local(mapped)` | canonical local condition, not a protocol verdict |
-//! | `TransportDeferred` | `Unavailable { TransportDeferred }` | undecodable now, recoverable later |
+//! | `TransportDeferred` | `Unavailable { TransportDeferred }` | undecodable now, recoverable later — or `PredatesLocalCopy` when the stamp precedes this copy's Welcome |
 //! | `ResourceRefused` | `Unavailable { ResourceRefused }` | local bound, never a duplicate |
 //! | `Stale { reason }` | `Stale`/`Rejected`/`Local` (mapped) | epoch-history cause, or a deprecated arm's documented replacement |
 //! | `Rejected { category }` | `Rejected { mapped }` | semantic admission failure |
@@ -177,6 +177,11 @@ impl Disposition {
 pub enum Availability {
     /// `transport_deferred` — undecodable now, recoverable later.
     TransportDeferred,
+    /// `predates_local_copy` — a deferred kind-445 stamped before this copy's
+    /// Welcome (+300 s skew margin, MDK `Group::transport_message_predates_local_copy`);
+    /// the engine still retains and re-peels it like any deferral — only the
+    /// classification differs.
+    PredatesLocalCopy,
     /// `resource_refused` — a local bound refused it.
     ResourceRefused,
     /// `signer_refused` — the account signer declined the unwrap.
@@ -187,8 +192,9 @@ pub enum Availability {
 
 impl Availability {
     /// Every variant, in declaration order.
-    pub const ALL: [Self; 4] = [
+    pub const ALL: [Self; 5] = [
         Self::TransportDeferred,
+        Self::PredatesLocalCopy,
         Self::ResourceRefused,
         Self::SignerRefused,
         Self::SignerFailed,
@@ -199,6 +205,7 @@ impl Availability {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::TransportDeferred => "transport_deferred",
+            Self::PredatesLocalCopy => "predates_local_copy",
             Self::ResourceRefused => "resource_refused",
             Self::SignerRefused => "signer_refused",
             Self::SignerFailed => "signer_failed",
@@ -208,7 +215,7 @@ impl Availability {
     /// The spec category this cause reports under.
     const fn spec_category(self) -> InputCategory {
         match self {
-            Self::TransportDeferred => InputCategory::TransportDeferred,
+            Self::TransportDeferred | Self::PredatesLocalCopy => InputCategory::TransportDeferred,
             Self::ResourceRefused | Self::SignerRefused | Self::SignerFailed => {
                 InputCategory::ResourceRefused
             }

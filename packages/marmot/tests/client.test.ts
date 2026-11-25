@@ -1468,6 +1468,140 @@ describe("MarmotClient", () => {
     await fixture.client.close();
   });
 
+  /**
+   * A deferred kind-445 stamped before this copy's Welcome reports `predates_local_copy`: the
+   * engine still retains it for re-peel, but the relay copy is redundant while retained — so the
+   * report credits the cursor like an accepted one and a restart's `since` skips the pre-join range
+   * instead of re-fetching it on every reconnect.
+   */
+  const predatesReport = (event: NostrEvent): InputReport => ({
+    event: event.id,
+    outcome: {
+      type: "unavailable",
+      category: "predates_local_copy",
+    },
+  });
+
+  test("a predates_local_copy outcome credits the backlog cursor like an accepted one", async () => {
+    const script = freshScript();
+    script.groups = [snapshot()];
+    const e1 = groupEvent(1000n);
+    const e2 = groupEvent(1100n);
+    const e3 = groupEvent(6000n);
+    script.reports = [
+      predatesReport(e1),
+      predatesReport(e2),
+      { event: e3.id, outcome: { type: "accepted" } },
+    ];
+    // The events sit on the relay before the group sub opens: EOSE folds them as backlog.
+    const fixture = await open(
+      script,
+      encodeClientState({ nip44Extended: true, cursors: {}, inbox: [RELAY] }),
+      undefined,
+      undefined,
+      async (network) => {
+        const peer = network.port("peer");
+        await peer.publish(RELAY, e1);
+        await peer.publish(RELAY, e2);
+        await peer.publish(RELAY, e3);
+      },
+    );
+    await settle(fixture.timer, 25);
+    const key = groupCursorKey(ROUTE, RELAY);
+    expect(decodeClientState(fixture.cursors.bytes()).cursors[key]).toBe(6000);
+    await fixture.client.close();
+
+    // Reopen on the persisted cursors: the kind-445 resubscribe's since skips the pre-join range.
+    const reopened = await open(script, fixture.cursors.bytes());
+    await settle(reopened.timer, 5000);
+    const groupSub = reopened.subs.find((sub) =>
+      sub.filters.some((filter) => filter.kinds?.includes(445) === true),
+    );
+    expect(groupSub?.filters[0]?.since).toBe(6000 - 600);
+    await reopened.client.close();
+  });
+
+  test("a predates_local_copy outcome credits the live cursor like an accepted one", async () => {
+    const script = freshScript();
+    script.groups = [snapshot()];
+    const fixture = await open(
+      script,
+      encodeClientState({ nip44Extended: true, cursors: {}, inbox: [RELAY] }),
+    );
+    await settle(fixture.timer, 5000);
+    const key = groupCursorKey(ROUTE, RELAY);
+    const e1 = groupEvent(1000n);
+    const e2 = groupEvent(1100n);
+    const e3 = groupEvent(6000n);
+    script.reports = [
+      predatesReport(e1),
+      predatesReport(e2),
+      { event: e3.id, outcome: { type: "accepted" } },
+    ];
+    const peer = fixture.network.port("peer");
+    await peer.publish(RELAY, e1);
+    await peer.publish(RELAY, e2);
+    await peer.publish(RELAY, e3);
+    await settle(fixture.timer, 25);
+    expect(decodeClientState(fixture.cursors.bytes()).cursors[key]).toBe(6000);
+    await fixture.client.close();
+  });
+
+  test("a transport_deferred outcome caps the backlog cursor at createdAt − 1", async () => {
+    const script = freshScript();
+    script.groups = [snapshot()];
+    const e1 = groupEvent(1000n);
+    const e2 = groupEvent(6000n);
+    script.reports = [
+      { event: e1.id, outcome: { type: "unavailable", category: "transport_deferred" } },
+      { event: e2.id, outcome: { type: "accepted" } },
+    ];
+    const fixture = await open(
+      script,
+      encodeClientState({ nip44Extended: true, cursors: {}, inbox: [RELAY] }),
+      undefined,
+      undefined,
+      async (network) => {
+        const peer = network.port("peer");
+        await peer.publish(RELAY, e1);
+        await peer.publish(RELAY, e2);
+      },
+    );
+    await settle(fixture.timer, 25);
+    const key = groupCursorKey(ROUTE, RELAY);
+    expect(decodeClientState(fixture.cursors.bytes()).cursors[key]).toBe(999);
+    await fixture.client.close();
+  });
+
+  test("a transport_deferred mixed with predates_local_copy caps the cursor at the deferred one", async () => {
+    const script = freshScript();
+    script.groups = [snapshot()];
+    const e1 = groupEvent(1000n);
+    const e2 = groupEvent(1100n);
+    const e3 = groupEvent(6000n);
+    script.reports = [
+      predatesReport(e1),
+      { event: e2.id, outcome: { type: "unavailable", category: "transport_deferred" } },
+      { event: e3.id, outcome: { type: "accepted" } },
+    ];
+    const fixture = await open(
+      script,
+      encodeClientState({ nip44Extended: true, cursors: {}, inbox: [RELAY] }),
+      undefined,
+      undefined,
+      async (network) => {
+        const peer = network.port("peer");
+        await peer.publish(RELAY, e1);
+        await peer.publish(RELAY, e2);
+        await peer.publish(RELAY, e3);
+      },
+    );
+    await settle(fixture.timer, 25);
+    const key = groupCursorKey(ROUTE, RELAY);
+    expect(decodeClientState(fixture.cursors.bytes()).cursors[key]).toBe(1099);
+    await fixture.client.close();
+  });
+
   test("a future createdAt clamps the cursor to now", async () => {
     const script = freshScript();
     script.groups = [snapshot()];

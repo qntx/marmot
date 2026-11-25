@@ -102,6 +102,29 @@ impl Session {
         Ok(Some(GroupId(group)))
     }
 
+    /// Whether a deferred kind-445 on `transport_group_id` was stamped before
+    /// this local copy's Welcome — MDK
+    /// `Group::transport_message_predates_local_copy`, the one test of the
+    /// rule shared by the `predates_local_copy` reclassification and the
+    /// stall counter's own skip. An unrouted id or a copy the engine does
+    /// not know answers `false`; a copy created here carries no Welcome
+    /// stamp, so it can never answer `true`.
+    pub(crate) fn deferred_predates_local_copy(
+        &self,
+        transport_group_id: &[u8],
+        created_at: u64,
+    ) -> Result<bool, SessionError> {
+        let Some(group) = self.group_of_route(transport_group_id)? else {
+            return Ok(false);
+        };
+        let record = match self.engine.group_record(&engine_gid(&group)) {
+            Ok(record) => record,
+            Err(EngineError::UnknownGroup(_)) => return Ok(false),
+            Err(error) => return Err(session_engine_error(error)),
+        };
+        Ok(record.transport_message_predates_local_copy(Timestamp(created_at)))
+    }
+
     /// D2 counting, per admitted kind-445 event whose outcome is
     /// `unavailable{transport_deferred}`. `transport_group_id` is the
     /// event's `#h` routing id; skips unknown groups, ended or broken
@@ -124,7 +147,7 @@ impl Session {
         if record.removed || record.unrecoverable || record.disbanded.is_some() {
             return Ok(());
         }
-        if record.transport_message_predates_local_copy(Timestamp(created_at)) {
+        if self.deferred_predates_local_copy(transport_group_id, created_at)? {
             return Ok(());
         }
         let welcome = record.local_copy_welcome_created_at.map(|stamp| stamp.0);

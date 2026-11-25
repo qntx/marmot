@@ -1,5 +1,6 @@
 {
   "transport_deferred": "transport_deferred",
+  "predates_local_copy": "predates_local_copy",
   "resource_refused": "resource_refused",
   "signer_refused": "signer_refused",
   "signer_failed": "signer_failed",

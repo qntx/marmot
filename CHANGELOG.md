@@ -30,10 +30,18 @@ npm trusted publishing (OIDC).
 - `fetchEvents` returns `{ events, emptyRelays }` instead of the bare
   event array; empty-finished reads are distinguished from closed or
   timed-out ones.
+- Bridge protocol 9: ingest reports can carry the new availability cause
+  `predates_local_copy` — a deferred kind-445 stamped before this copy's
+  Welcome. The pump credits it like an accepted event; every other
+  `unavailable` report still caps the cursor at `createdAt − 1`.
 
 ### Fixed
 
 - `group(id)` on a forgotten copy answers `undefined` instead of failing.
+- A newly joined device no longer re-fetches the group's pre-join history
+  on every reconnect: those deferred kind-445s report
+  `predates_local_copy`, which credits the group cursor instead of
+  capping it under the pre-join range.
 
 ## [0.2.0] - 2026-11-24
 

@@ -5,7 +5,7 @@
  * and `memoryKv`/`memoryCursorStore` persistence.
  */
 
-import type { Backend, Clock, Signer, GroupSnapshot } from "@qntx/marmot/backend";
+import type { Backend, Clock, Signer, GroupSnapshot, NostrEvent } from "@qntx/marmot/backend";
 import { SignerRefusedError } from "@qntx/marmot/backend";
 import {
   GROUP_OVERLAP_SECS,
@@ -21,6 +21,7 @@ import type {
   GroupEvent,
   InviteEvent,
   MarmotErrorKind,
+  RelayFilter,
   RelayPort,
 } from "@qntx/marmot/client";
 import { countingTimer, fakeRelay, memoryCursorStore, memoryKv } from "@qntx/marmot/testing";
@@ -985,5 +986,154 @@ export async function scenarioOfflineCommitRollback(): Promise<ScenarioReport> {
     peaks: peaksOf([a, b], network),
   };
   await closeAll([a, b], network);
+  return report;
+}
+
+/**
+ * Scenario 10: B's five chats sit on the group relays before C joins; every pre-join kind-445 C
+ * ingests reports `predates_local_copy` — the engine retains it for re-peel but the relay copy is
+ * redundant — so the group cursor credits it like an accepted event: after a restart C's kind-445
+ * `since` clears the newest pre-join stamp and the range is never replayed.
+ */
+export async function scenarioPreJoinCursor(): Promise<ScenarioReport> {
+  const start = Date.now();
+  // The whole pre-join era runs three days in the past: the Welcome rumor's `created_at` comes
+  // from the ambient wall clock at wrap build (the engine stamps it, not the injected clock), so
+  // only events stamped well below real `now + 300 s` classify `predates_local_copy`
+  // deterministically.
+  const skew: Skew = { offsetMs: -259_200_000 };
+  const network = fakeRelay(101);
+  const { a, b, group } = await openPair(network, { a: { skew }, b: { skew } });
+  const snapshot = await a.client.group(group);
+  const route = snapshot?.nostrGroupId;
+  if (snapshot === undefined || route === undefined) {
+    throw new Error("a holds no group snapshot");
+  }
+  // The pre-join feed spans ~20 minutes, so its older half sits outside the 600 s resubscribe
+  // overlap — giving the replay check below a cohort the fixed cursor must protect.
+  for (let i = 0; i < 2; i += 1) {
+    // oxlint-disable-next-line no-await-in-loop -- ordered pre-join feed
+    await send(b, group, `pre-join#${i}`);
+  }
+  skew.offsetMs += 1_200_000;
+  for (let i = 2; i < 5; i += 1) {
+    // oxlint-disable-next-line no-await-in-loop -- ordered pre-join feed
+    await send(b, group, `pre-join#${i}`);
+  }
+  await waitFor(() => contents(a, group).includes("pre-join#4"), "a received the pre-join chats");
+  let newestPreJoin = 0;
+  let earliestPreJoin = Number.MAX_SAFE_INTEGER;
+  for (const relay of snapshot.relays) {
+    for (const event of network.events(relay)) {
+      if (event.kind !== 445) {
+        continue;
+      }
+      if (Number(event.createdAt) > newestPreJoin) {
+        newestPreJoin = Number(event.createdAt);
+      }
+      if (Number(event.createdAt) < earliestPreJoin) {
+        earliestPreJoin = Number(event.createdAt);
+      }
+    }
+  }
+  // Clocks return to real time, so the invite's Welcome rumor stamps real `now` — ~3 days after
+  // the newest feed stamp and ~3 days before C's own traffic.
+  skew.offsetMs = 0;
+
+  // C's port records every subscribe call and, per sub, every delivered event — across restarts.
+  const cSubs: Array<{ relay: string; filters: RelayFilter[] }> = [];
+  const cDeliveries: Array<{ sub: number; event: NostrEvent }> = [];
+  const inner = network.port("c");
+  const c = await startClient({
+    name: "c",
+    network,
+    skew,
+    port: {
+      publish: async (relay, event) => inner.publish(relay, event),
+      connect: async (relay) => inner.connect(relay),
+      subscribe: (relay, filters, handlers) => {
+        const sub = cSubs.push({ relay, filters }) - 1;
+        return inner.subscribe(relay, filters, {
+          ...handlers,
+          event: (event) => {
+            cDeliveries.push({ sub, event });
+            handlers.event(event);
+          },
+        });
+      },
+    },
+  });
+  await identity(c);
+  const invitees = await a.client.lookupInvitees(c.signer.pubkey, [LOOKUP]);
+  await a.client.invite(group, invitees);
+  await waitFor(
+    () => c.invites.some((event) => event.type === "joined" && event.group === group),
+    "c joined invite",
+  );
+  const isRoute445 = (filter: RelayFilter): boolean =>
+    filter.kinds?.includes(445) === true && (filter["#h"] ?? []).includes(route);
+  // C has saved a group cursor for the route. Its value is the discriminator: a credited
+  // `predates_local_copy` backlog lets it reach the newest stamped event (the invite commit
+  // credits it further still), while a capped `transport_deferred` backlog pins it at the
+  // earliest deferred `createdAt − 1` — no post-join traffic is sent, precisely so nothing newer
+  // re-credits past a cap.
+  await waitFor(() => {
+    const sub = cSubs.find((entry) => entry.filters.some(isRoute445));
+    const bytes = c.stores.cursors.bytes();
+    return (
+      sub !== undefined &&
+      bytes !== undefined &&
+      decodeClientState(bytes).cursors[`group|${route}|${sub.relay}`] !== undefined
+    );
+  }, "c saved a group cursor for the route");
+
+  const subsBefore = cSubs.length;
+  await restart(c);
+  await waitFor(
+    () => cSubs.slice(subsBefore).some((entry) => entry.filters.some(isRoute445)),
+    "c reopened the kind-445 subscription for the route",
+  );
+  let reopened: { relay: string; filters: RelayFilter[] } | undefined;
+  let reopenedIndex = -1;
+  for (const [index, entry] of cSubs.entries()) {
+    if (index >= subsBefore && entry.filters.some(isRoute445)) {
+      reopened = entry;
+      reopenedIndex = index;
+    }
+  }
+  if (reopened === undefined) {
+    throw new Error("c reopened no kind-445 subscription for the route");
+  }
+  // The discriminating observable is the reopened filter's `since`. A credited
+  // `predates_local_copy` backlog leaves the cursor at or past the newest stamped event, so
+  // `since = cursor − 600` reaches the pre-join overlap boundary; a capped `transport_deferred`
+  // backlog pins the cursor at the earliest deferred `createdAt − 1`, so `since` sits below the
+  // whole range and refetches all of it.
+  const since = reopened.filters.find(isRoute445)?.since;
+  const overlapBoundary = newestPreJoin - GROUP_OVERLAP_SECS;
+  if (earliestPreJoin >= overlapBoundary) {
+    throw new Error(`the pre-join feed does not span the overlap boundary ${overlapBoundary}`);
+  }
+  if (since === undefined || since < overlapBoundary) {
+    throw new Error(
+      `reopened since ${String(since)} does not reach the pre-join overlap boundary ${overlapBoundary}`,
+    );
+  }
+  const replayed = cDeliveries.filter(
+    (delivery) =>
+      delivery.sub === reopenedIndex && Number(delivery.event.createdAt) < overlapBoundary,
+  );
+  if (replayed.length > 0) {
+    throw new Error(`the reopened sub replayed ${replayed.length} events older than the overlap`);
+  }
+
+  assertQuiet([a, b, c]);
+  assertPeaks([a, b, c], network);
+  const report = {
+    ms: Date.now() - start,
+    delivered: deliveredOf([a, b, c], group),
+    peaks: peaksOf([a, b, c], network),
+  };
+  await closeAll([a, b, c], network);
   return report;
 }

@@ -1090,6 +1090,9 @@ impl From<core::InputCategory> for InputCategory {
 pub enum AvailabilityCategory {
     /// Undecodable now, recoverable later.
     TransportDeferred,
+    /// A deferred kind-445 stamped before this copy's Welcome (+300 s skew
+    /// margin) — retained for re-peel, but not evidence the copy trails.
+    PredatesLocalCopy,
     /// A local bound refused it.
     ResourceRefused,
     /// The account signer declined the unwrap.
@@ -1104,6 +1107,7 @@ impl From<core::Availability> for AvailabilityCategory {
     fn from(category: core::Availability) -> Self {
         match category {
             core::Availability::TransportDeferred => Self::TransportDeferred,
+            core::Availability::PredatesLocalCopy => Self::PredatesLocalCopy,
             core::Availability::ResourceRefused => Self::ResourceRefused,
             core::Availability::SignerRefused => Self::SignerRefused,
             core::Availability::SignerFailed => Self::SignerFailed,

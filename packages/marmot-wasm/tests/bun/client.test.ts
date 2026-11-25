@@ -10,6 +10,7 @@ import {
   scenarioMode,
   scenarioOfflineCommitRollback,
   scenarioOfflineSend,
+  scenarioPreJoinCursor,
   RELAY_1,
   RELAY_2,
 } from "../shared/client-e2e.ts";
@@ -83,5 +84,12 @@ describe("client e2e (bun)", () => {
     const result = await scenarioOfflineCommitRollback();
     report("offline-commit-rollback", result);
     expect(result.delivered).toStrictEqual({ a: 0, b: 1 });
+  }, 300_000);
+
+  test("pre-join cursor: a joiner's restart `since` clears the pre-join range", async () => {
+    const result = await scenarioPreJoinCursor();
+    report("pre-join-cursor", result);
+    // A received B's five pre-join chats; C delivered nothing pre-join and nothing after.
+    expect(result.delivered).toStrictEqual({ a: 5, b: 0, c: 0 });
   }, 300_000);
 });

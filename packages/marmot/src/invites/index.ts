@@ -57,8 +57,8 @@ export function observeSigner(signer: Signer): {
 
 /**
  * One `pending` invite per distinct signer-unavailable reason among `reports`. The wraps stay
- * undelivered — any `unavailable` report caps its cursor at its earliest `createdAt − 1`, so a
- * reopened subscription replays them.
+ * undelivered — any `unavailable` report except `predates_local_copy` caps its cursor at its
+ * earliest `createdAt − 1`, so a reopened subscription replays them.
  */
 export function pendingInvites(reports: InputReport[]): InviteEvent[] {
   const reasons = new Set<"signer_refused" | "signer_failed">();
