@@ -3206,6 +3206,16 @@ impl Session {
                     category: crate::events::Availability::TransportDeferred,
                 })
         {
+            // A deferred event stamped before this copy's Welcome is
+            // retained for re-peel like any deferral but is not evidence
+            // this copy trails the group: classify it so the host's fetch
+            // cursor advances past the pre-join range instead of pinning
+            // under it and re-fetching on every reconnect.
+            if self.deferred_predates_local_copy(&transport_group_id, event.created_at)? {
+                return Ok(InputOutcome::Unavailable {
+                    category: crate::events::Availability::PredatesLocalCopy,
+                });
+            }
             self.stall_note_deferred(&transport_group_id, &event.id, event.created_at)?;
         }
         Ok(input)

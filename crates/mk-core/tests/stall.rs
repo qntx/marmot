@@ -80,6 +80,16 @@ mod stall_tests {
         )
     }
 
+    /// True for `Unavailable{PredatesLocalCopy}`.
+    const fn predates(report: &InputReport) -> bool {
+        matches!(
+            report.outcome,
+            InputOutcome::Unavailable {
+                category: Availability::PredatesLocalCopy,
+            }
+        )
+    }
+
     /// The `GroupStallSuspected`/`GroupStalled` drain counts.
     fn stall_counts(events: &[SessionEvent]) -> (usize, usize) {
         let suspected = events
@@ -365,12 +375,169 @@ mod stall_tests {
 
         let (reports, drained) = ingest(&mut a, pre_join).await;
         assert!(
-            reports.iter().all(|report| deferred(report)
+            reports.iter().all(|report| predates(report)
                 || matches!(report.outcome, InputOutcome::Rejected { .. })),
-            "pre-join traffic is deferred or deduped, never counted"
+            "pre-join traffic predates the copy or dedups, never counted"
         );
         assert_eq!(stall_counts(&drained), (0, 0));
         assert_eq!(access(&a, &gid), GroupAccess::Active);
+    }
+
+    /// A deferred kind-445 stamped before this copy's Welcome is retained for
+    /// re-peel like any deferral but is not evidence this copy trails the
+    /// group, so it must report `predates_local_copy` — never
+    /// `transport_deferred`, which would pin the fetch cursor under the
+    /// pre-join range forever.
+    #[tokio::test(flavor = "current_thread")]
+    async fn pre_join_history_reports_predates_local_copy() {
+        let relay = FakeRelay::new();
+        let mut b = open_member().await;
+        let mut a = open_member().await;
+        publish_identity(&mut b, &relay, RELAY).await;
+        publish_identity(&mut a, &relay, RELAY).await;
+        let gid = group_with(&mut b, &relay, RELAY, &[], "pre-join").await;
+        sync_member(&mut b, &relay, RELAY, &gid).await;
+        for i in 0..4 {
+            send_chat(&mut b, &relay, &gid, &format!("pre{i}")).await;
+        }
+        // Snapshot the pre-join feed before the invite.
+        let route = b.route_hex(&gid);
+        let pre_join = group_events(&relay, RELAY, &route);
+
+        // Invite A; it joins and then sees the pre-join backlog.
+        let kp = key_package_of(&relay, RELAY, &a.account_hex());
+        b.session
+            .invite(
+                &gid,
+                vec![mk_core::Invitee {
+                    key_package: kp,
+                    inbox_relays: inbox_relays_of(&relay, RELAY, &a.account_hex()),
+                }],
+            )
+            .await
+            .expect("invite");
+        flush(&mut b, &relay).await;
+        join_via_welcome(&mut a, &relay, RELAY).await;
+        sync_member(&mut a, &relay, RELAY, &gid).await;
+
+        let (reports, drained) = ingest(&mut a, pre_join).await;
+        assert!(
+            reports.iter().any(predates),
+            "pre-join kind-445s report predates_local_copy: {reports:?}"
+        );
+        assert!(
+            reports.iter().all(|report| predates(report)
+                || matches!(report.outcome, InputOutcome::Rejected { .. })),
+            "every non-deduped pre-join report is predates_local_copy: {reports:?}"
+        );
+        assert!(
+            !reports.iter().any(deferred),
+            "pre-join history must not report transport_deferred: {reports:?}"
+        );
+        assert_eq!(stall_counts(&drained), (0, 0));
+        assert_eq!(access(&a, &gid), GroupAccess::Active);
+    }
+
+    /// The reclassification is a durable property of the copy, not of the
+    /// session lifetime: after a restart the same pre-join events dedup or
+    /// report `predates_local_copy`, never `transport_deferred`.
+    #[tokio::test(flavor = "current_thread")]
+    async fn pre_join_history_survives_restart() {
+        let relay = FakeRelay::new();
+        let mut b = open_member().await;
+        let mut a = open_member().await;
+        publish_identity(&mut b, &relay, RELAY).await;
+        publish_identity(&mut a, &relay, RELAY).await;
+        let gid = group_with(&mut b, &relay, RELAY, &[], "pre-join").await;
+        sync_member(&mut b, &relay, RELAY, &gid).await;
+        for i in 0..4 {
+            send_chat(&mut b, &relay, &gid, &format!("pre{i}")).await;
+        }
+        let route = b.route_hex(&gid);
+        let pre_join = group_events(&relay, RELAY, &route);
+
+        let kp = key_package_of(&relay, RELAY, &a.account_hex());
+        b.session
+            .invite(
+                &gid,
+                vec![mk_core::Invitee {
+                    key_package: kp,
+                    inbox_relays: inbox_relays_of(&relay, RELAY, &a.account_hex()),
+                }],
+            )
+            .await
+            .expect("invite");
+        flush(&mut b, &relay).await;
+        join_via_welcome(&mut a, &relay, RELAY).await;
+        sync_member(&mut a, &relay, RELAY, &gid).await;
+        let (_reports, _drained) = ingest(&mut a, pre_join.clone()).await;
+
+        // Reopen from the durable rows and re-ingest the same feed.
+        let mut a = reopen_member(&a).await;
+        let (reports, _drained) = ingest(&mut a, pre_join).await;
+        assert!(
+            !reports.is_empty(),
+            "the re-ingested feed reports at least once: {reports:?}"
+        );
+        assert!(
+            reports.iter().all(|report| predates(report)
+                || matches!(report.outcome, InputOutcome::Rejected { .. })),
+            "after restart every report is a dedup or predates_local_copy: {reports:?}"
+        );
+        assert!(
+            !reports.iter().any(deferred),
+            "after restart nothing reports transport_deferred: {reports:?}"
+        );
+    }
+
+    /// A genuinely deferred current-epoch kind-445 — stamped after this
+    /// copy's Welcome — still reports `transport_deferred` and counts toward
+    /// the stall detector; only the pre-Welcome case reclassifies. And a
+    /// creator-side copy carries no Welcome stamp, so it can never report
+    /// `predates_local_copy`.
+    #[tokio::test(flavor = "current_thread")]
+    async fn current_epoch_deferral_still_reports_transport_deferred() {
+        let relay = FakeRelay::new();
+        let mut b = open_member().await;
+        let mut a = open_member().await;
+        let (gid, c1, msgs) = behind(&mut b, &mut a, &relay, 3).await;
+
+        // A's post-Welcome deferrals: `transport_deferred`, counted once.
+        let (reports, drained) = ingest(&mut a, msgs).await;
+        assert!(
+            reports.iter().all(deferred),
+            "a post-Welcome deferral reports transport_deferred: {reports:?}"
+        );
+        assert_eq!(stall_counts(&drained), (1, 0));
+
+        // B's creator-side copy carries no Welcome stamp, so a deferral
+        // there is never `predates_local_copy`: A catches up on the
+        // withheld commit, moves the epoch and chats; B ingests only the
+        // chat — a clean epoch gap, still `transport_deferred`.
+        let (_reports, _drained) = ingest(&mut a, vec![c1]).await;
+        a.session.self_update(&gid).await.expect("self_update");
+        flush(&mut a, &relay).await;
+        let route = a.route_hex(&gid);
+        let before: std::collections::BTreeSet<mk_core::EventId> =
+            group_events(&relay, RELAY, &route)
+                .into_iter()
+                .map(|event| event.id)
+                .collect();
+        send_chat(&mut a, &relay, &gid, "a-post").await;
+        let chat: Vec<Event> = group_events(&relay, RELAY, &route)
+            .into_iter()
+            .filter(|event| event.kind == 445 && !before.contains(&event.id))
+            .collect();
+        assert_eq!(chat.len(), 1, "the post-commit chat is the only new event");
+        let (reports, _drained) = ingest(&mut b, chat).await;
+        assert!(
+            reports.iter().all(deferred),
+            "the creator's copy never reports predates_local_copy: {reports:?}"
+        );
+        assert!(
+            !reports.iter().any(predates),
+            "a copy with no Welcome stamp cannot report predates_local_copy: {reports:?}"
+        );
     }
 
     /// A removed device that still shares the account with a live leaf is

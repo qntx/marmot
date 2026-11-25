@@ -10,6 +10,7 @@
 
 import type { Clock, Engine } from "../backend/engine.ts";
 import type {
+  InputOutcome,
   InputReport,
   NostrEvent,
   Outbound,
@@ -129,6 +130,15 @@ function capTracked<K, V>(entries: Map<K, V> | Set<K>): void {
     entries.delete(oldest);
   }
 }
+
+/**
+ * Whether an ingest outcome holds its cursor key: every `unavailable` report caps the key at
+ * `createdAt` − 1 except `predates_local_copy` — a deferred kind-445 stamped before this copy's
+ * Welcome stays durably retained for re-peel, so its relay copy is redundant while retained and the
+ * report credits the key like an accepted event.
+ */
+const holdsCursor = (outcome: InputOutcome): boolean =>
+  outcome.type === "unavailable" && outcome.category !== "predates_local_copy";
 
 export class Pump {
   private readonly engine: Engine;
@@ -293,7 +303,8 @@ export class Pump {
   /**
    * Close every active kind-1059 subscription and reconcile, so the inbox subscriptions reopen with
    * `since` taken from the capped cursor (an `unavailable` ingest report caps its key at the
-   * earliest `createdAt − 1`) and the relays replay the withheld wraps. Stores no wraps.
+   * earliest `createdAt − 1`; `predates_local_copy` credits instead) and the relays replay the
+   * withheld wraps. Stores no wraps.
    */
   async retryInvites(): Promise<void> {
     await this.run(async () => {
@@ -737,13 +748,13 @@ export class Pump {
   }
 
   /**
-   * Cursor advance, per key: `max(old, min(createdAt, nowSecs))` over events whose outcome is not
-   * `unavailable`; any `unavailable` event caps the key at its earliest `createdAt` − 1 — the range
-   * is not synchronized, so the cursor may move back. Keys an event reached after its
-   * subscription's EOSE apply to `state.cursors` here; keys it reached from the stored-event
-   * backlog fold into the delivering sub's `backlog` instead and land only when that sub's EOSE job
-   * runs — a sub closed or tainted before then drops its aggregate and the next `since` refetches
-   * the range.
+   * Cursor advance, per key: `max(old, min(createdAt, nowSecs))` over events whose outcome does not
+   * hold the cursor; any event that does (`holdsCursor` — every `unavailable` report except
+   * `predates_local_copy`) caps the key at its earliest `createdAt` − 1 — the range is not
+   * synchronized, so the cursor may move back. Keys an event reached after its subscription's EOSE
+   * apply to `state.cursors` here; keys it reached from the stored-event backlog fold into the
+   * delivering sub's `backlog` instead and land only when that sub's EOSE job runs — a sub closed
+   * or tainted before then drops its aggregate and the next `since` refetches the range.
    */
   private advanceCursors(batch: Buffered[], reports: InputReport[]): void {
     const outcomes = new Map(reports.map((report) => [report.event, report.outcome] as const));
@@ -761,7 +772,7 @@ export class Pump {
             aggregate = {};
             sub.backlog.set(key, aggregate);
           }
-          if (outcome.type === "unavailable") {
+          if (holdsCursor(outcome)) {
             const at = Number(entry.event.createdAt) - 1;
             aggregate.cap = aggregate.cap === undefined ? at : Math.min(aggregate.cap, at);
           } else {
@@ -777,7 +788,7 @@ export class Pump {
         }
         list.push({
           createdAt: entry.event.createdAt,
-          unavailable: outcome.type === "unavailable",
+          unavailable: holdsCursor(outcome),
         });
       }
     }
