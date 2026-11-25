@@ -664,6 +664,97 @@ async fn full_flow() {
     );
 }
 
+/// `groups` keeps listing a terminated copy (`"state":"removed"`,
+/// `"access":"removed"`) until `forget_group` erases it.
+#[tokio::test(flavor = "current_thread")]
+async fn groups_keeps_removed_copy_until_forget() {
+    let mut relay = FakeRelay::new();
+    let mut a = Member::new();
+    let mut b = Member::new();
+    a.open().await;
+    b.open().await;
+    a.publish_identity(&mut relay).await;
+    b.publish_identity(&mut relay).await;
+
+    let response = a
+        .call(Request::CreateGroup(CreateGroupRequest {
+            name: "g".to_owned(),
+            description: String::new(),
+            relays: vec![RELAY.to_owned()],
+            invitees: vec![Invitee {
+                key_package: key_package_of(&relay, &b.account_hex()),
+                inbox_relays: vec![RELAY.to_owned()],
+            }],
+            own_devices: Vec::new(),
+            admins: Vec::new(),
+            components: Vec::new(),
+        }))
+        .await;
+    let OpResult::GroupCreated(created) = ok_result(response) else {
+        panic!("create_group")
+    };
+    let group = created.group.id.clone();
+    a.publish(&mut relay).await;
+    let welcomes = welcomes_for(&relay, &b.account_hex());
+    b.call(Request::Ingest(IngestRequest { events: welcomes }))
+        .await;
+    b.sync(&mut relay, &group).await;
+    a.sync(&mut relay, &group).await;
+
+    // A removes B; the termination commit reaches B.
+    let response = a
+        .call(Request::RemoveMembers(RemoveMembersRequest {
+            group: group.clone(),
+            members: vec![b.signer.account().0],
+        }))
+        .await;
+    assert!(
+        matches!(response, Response::Ok { .. }),
+        "remove_members: {response:?}"
+    );
+    a.publish(&mut relay).await;
+    a.sync(&mut relay, &group).await;
+    b.sync(&mut relay, &group).await;
+
+    // The removed copy is still listed.
+    let response = b.call(Request::Groups(NoArgs {})).await;
+    let OpResult::Groups(GroupsResult { groups }) = ok_result(response) else {
+        panic!("groups")
+    };
+    let listed = groups
+        .iter()
+        .find(|snapshot| snapshot.id == group)
+        .expect("the removed copy is listed");
+    assert!(matches!(listed.state, GroupState::Removed));
+    assert!(matches!(listed.access, GroupAccess::Removed));
+
+    let response = b
+        .call(Request::ForgetGroup(ForgetGroupRequest {
+            group: group.clone(),
+        }))
+        .await;
+    assert!(
+        matches!(ok_result(response), OpResult::Done),
+        "forget_group answers done"
+    );
+    let response = b.call(Request::Groups(NoArgs {})).await;
+    let OpResult::Groups(GroupsResult { groups }) = ok_result(response) else {
+        panic!("groups")
+    };
+    assert!(
+        !groups.iter().any(|snapshot| snapshot.id == group),
+        "a forgotten group is absent"
+    );
+    let response = b
+        .call(Request::Group(GroupRequest {
+            group: group.clone(),
+        }))
+        .await;
+    let OpResult::Group(GroupResult { group: None }) = ok_result(response) else {
+        panic!("a forgotten group answers null")
+    };
+}
+
 /// Two-phase identity proof: fresh account → needs_account_proof → wrong
 /// account / wrong event → proof_rejected → correct → ready → reopen
 /// ready directly.

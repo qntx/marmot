@@ -531,5 +531,23 @@ mod stall_tests {
         let snap = snapshot(&a2, &gid);
         assert_eq!(snap.state, GroupState::Removed);
         assert_eq!(snap.access, GroupAccess::RemovedDevice);
+
+        // `groups()` keeps listing terminated copies until
+        // `forget_group`: a1's account removal and a2's device
+        // tombstone both appear.
+        for (member, want) in [
+            (&a1, GroupAccess::Removed),
+            (&a2, GroupAccess::RemovedDevice),
+        ] {
+            let listed = member
+                .session
+                .groups()
+                .expect("groups")
+                .into_iter()
+                .find(|listed| listed.id == gid)
+                .expect("the removed copy is listed");
+            assert_eq!(listed.state, GroupState::Removed);
+            assert_eq!(listed.access, want);
+        }
     }
 }

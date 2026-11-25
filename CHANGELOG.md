@@ -11,6 +11,17 @@ npm trusted publishing (OIDC).
 
 ## [Unreleased]
 
+### Changed (BREAKING)
+
+- `groups()` now returns every local copy including removed and disbanded
+  ones (with `access`/`state` telling them apart), in a stable order, until
+  the host calls `forgetGroup`; hosts that want only live chats filter on
+  `state`/`access`.
+
+### Fixed
+
+- `group(id)` on a forgotten copy answers `undefined` instead of failing.
+
 ## [0.2.0] - 2026-11-24
 
 ### Changed (BREAKING)

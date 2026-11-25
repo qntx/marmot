@@ -612,6 +612,11 @@ export class MarmotClient {
     await this.pump.retryInvites();
   }
 
+  /**
+   * Every stored local copy — live and terminated (`removed`, `disbanded`) alike — in group-id byte
+   * order. A terminated copy stays listed until `forgetGroup`; hosts that want only live chats
+   * filter on `state`/`access`.
+   */
   async groups(): Promise<GroupSnapshot[]> {
     return this.op(async (engine) => {
       const snapshots = await engine.groups();

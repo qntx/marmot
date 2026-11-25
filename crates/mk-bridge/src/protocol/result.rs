@@ -159,7 +159,9 @@ pub struct TickedResult {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GroupsResult {
-    /// Snapshots of every live group.
+    /// Snapshots of every stored local copy — live and terminated
+    /// (`removed`, `disbanded`) alike — in group-id byte order; a
+    /// terminated copy stays listed until `forget_group`.
     pub groups: Vec<GroupSnapshot>,
 }
 
@@ -167,7 +169,8 @@ pub struct GroupsResult {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GroupResult {
-    /// The group's snapshot, or `null` when not live.
+    /// The group's snapshot, or `null` when the device holds no copy of
+    /// it (unknown, quarantined or forgotten).
     pub group: Option<Box<GroupSnapshot>>,
 }
 
