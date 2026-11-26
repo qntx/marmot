@@ -51,6 +51,11 @@ npm trusted publishing (OIDC).
 
 ### Fixed
 
+- `auditKeyPackageSlot`'s `emptyRelays` matching no longer depends on URL
+  spelling: entries and accepted publication targets compare as parsed
+  relay URLs (`nostr::types::RelayUrl`), so a host that reports
+  `wss://Relay.Example/` where the write set said `wss://relay.example`
+  still refills the emptied slot; entries that do not parse are ignored.
 - A gift wrap the signer refused or failed to open is no longer lost when
   a later invite or message wrap is opened more than two days after it:
   its inbox cursor stays below the unopened wrap (a sticky floor

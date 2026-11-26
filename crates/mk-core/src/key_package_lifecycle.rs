@@ -138,7 +138,10 @@ impl Session {
     ///
     /// `empty_relays` lists the relays whose read of the slot completed —
     /// EOSE — and returned nothing; a failed, closed or timed-out read
-    /// must not be listed. When one of them accepted this device's
+    /// must not be listed. Entries match accepted publication targets as
+    /// parsed relay URLs (`nostr::types::RelayUrl`), so host case, a default
+    /// port or the root `/` do not decide the match and an entry that
+    /// does not parse is ignored. When one of them accepted this device's
     /// current publication (a `publication_targets` entry in
     /// [`TransportFanoutAttemptState::Accepted`]) and that publication is
     /// at least a day old, a refresh is made due durably and this call
@@ -247,12 +250,21 @@ impl Session {
         if lifecycle.pending_replacement.is_some() {
             return Ok(false);
         }
+        // Spelling is not identity: match parsed relay URLs so host case,
+        // a default port and the root `/` do not decide the refill, while
+        // `/feed` and `/feed/` stay distinct. An entry or endpoint that
+        // does not parse never matches — fail-safe, no refill.
+        let emptied_relays: HashSet<nostr::types::RelayUrl> = empty_relays
+            .iter()
+            .filter_map(|relay| nostr::types::RelayUrl::parse(relay).ok())
+            .collect();
         let emptied = lifecycle
             .publication_targets
             .iter()
             .filter(|target| {
                 target.state == TransportFanoutAttemptState::Accepted
-                    && empty_relays.contains(&target.endpoint.0)
+                    && nostr::types::RelayUrl::parse(&target.endpoint.0)
+                        .is_ok_and(|endpoint| emptied_relays.contains(&endpoint))
             })
             .count();
         if emptied == 0 || now_secs < published.0.saturating_add(SLOT_REFILL_MIN_AGE_SECS) {
