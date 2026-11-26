@@ -257,6 +257,7 @@ async function spawn(w: World, script: Script, name: string): Promise<Fixture> {
     clock: w.clock,
     timer,
     relays: port,
+    inbox: "client",
     allowLoopback: true,
   });
   const invites: InviteEvent[] = [];
@@ -268,7 +269,14 @@ async function spawn(w: World, script: Script, name: string): Promise<Fixture> {
 
 const seed = async (w: World, state: Partial<ClientState>): Promise<void> => {
   await w.cursors.save(
-    encodeClientState({ cursors: {}, floors: {}, inbox: [RELAY], nip44Extended: true, ...state }),
+    encodeClientState({
+      cursors: {},
+      floors: {},
+      inbox: "client",
+      inboxRelays: [RELAY],
+      nip44Extended: true,
+      ...state,
+    }),
   );
 };
 
@@ -299,7 +307,13 @@ async function settle(timer: ManualTimer, ms = 0): Promise<void> {
   }
 }
 
-const persisted = (w: World): ClientState => decodeClientState(w.cursors.bytes());
+const persisted = (w: World): ClientState => {
+  const state = decodeClientState(w.cursors.bytes());
+  if (state === undefined) {
+    throw new Error("persisted blob did not decode");
+  }
+  return state;
+};
 
 const inboxSubs = (w: World, relay = RELAY): Sub[] =>
   w.subs.filter(
@@ -445,7 +459,8 @@ describe("sticky inbox floor", () => {
     await seed(w, {
       cursors: { [KEY]: old - 1, [KEY2]: recent - 1 },
       floors: { [KEY]: old, [KEY2]: recent },
-      inbox: [RELAY, RELAY2],
+      inbox: "client",
+      inboxRelays: [RELAY, RELAY2],
     });
     const oldWrap = wrap(old);
     const recentWrap = wrap(recent);
@@ -546,7 +561,7 @@ describe("sticky inbox floor", () => {
   test("group keys never carry a floor and keep the per-batch cap", async () => {
     const w = world();
     const key = groupCursorKey(ROUTE, RELAY);
-    await seed(w, { cursors: { [key]: C0 }, inbox: [] });
+    await seed(w, { cursors: { [key]: C0 }, inbox: "client", inboxRelays: [] });
     const s = freshScript();
     s.groups = [
       {

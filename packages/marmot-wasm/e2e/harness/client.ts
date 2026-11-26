@@ -198,6 +198,7 @@ const api: ClientHarness = {
       clock,
       timer,
       relays: nostrRelayPort(pool),
+      inbox: "client",
       lookupRelays: [relayUrl],
       allowLoopback: true,
     });

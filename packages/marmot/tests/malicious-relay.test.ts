@@ -407,6 +407,7 @@ async function open(script: Script, blob?: Uint8Array, hostSigner?: Signer): Pro
     clock,
     timer,
     relays: network.port,
+    inbox: "client",
     allowLoopback: true,
   });
   return { client, script, timer, network, cursors, kv, clock };
@@ -430,6 +431,15 @@ async function settle(timer: ManualTimer, ms = 0): Promise<void> {
     await macrotask();
   }
 }
+
+/** The persisted cursor map; the blob always decodes in these fixtures. */
+const savedCursors = (cursors: ReturnType<typeof memoryCursorStore>): Record<string, number> => {
+  const state = decodeClientState(cursors.bytes());
+  if (state === undefined) {
+    throw new Error("persisted blob did not decode");
+  }
+  return state.cursors;
+};
 
 /** The events of every `ingest` call, in order. */
 const ingested = (script: Script): NostrEvent[] =>
@@ -484,7 +494,8 @@ describe("malicious relay", () => {
         floors: {},
         nip44Extended: true,
         cursors: { [key]: 10_000 },
-        inbox: [RELAY],
+        inbox: "client",
+        inboxRelays: [RELAY],
       }),
     );
     await settle(fixture.timer, 5000);
@@ -517,7 +528,13 @@ describe("malicious relay", () => {
     script.groups = [snapshot()];
     const fixture = await open(
       script,
-      encodeClientState({ floors: {}, nip44Extended: true, cursors: {}, inbox: [RELAY] }),
+      encodeClientState({
+        floors: {},
+        nip44Extended: true,
+        cursors: {},
+        inbox: "client",
+        inboxRelays: [RELAY],
+      }),
     );
     await settle(fixture.timer, 5000);
     const sub = mustSub(groupSubs(fixture.network));
@@ -545,7 +562,13 @@ describe("malicious relay", () => {
     const key = groupCursorKey(ROUTE, RELAY);
     const fixture = await open(
       script,
-      encodeClientState({ floors: {}, nip44Extended: true, cursors: { [key]: 500 }, inbox: [] }),
+      encodeClientState({
+        floors: {},
+        nip44Extended: true,
+        cursors: { [key]: 500 },
+        inbox: "client",
+        inboxRelays: [],
+      }),
     );
     await settle(fixture.timer, 5000);
     const sub = mustSub(groupSubs(fixture.network));
@@ -561,7 +584,7 @@ describe("malicious relay", () => {
     await settle(fixture.timer, RESUBSCRIBE_DELAY_MS);
 
     // The persisted cursor is untouched — nothing past it was ever confirmed.
-    expect(decodeClientState(fixture.cursors.bytes()).cursors[key]).toBe(500);
+    expect(decodeClientState(fixture.cursors.bytes())?.cursors[key]).toBe(500);
     const reopened = groupSubs(fixture.network).at(-1);
     expect(reopened).not.toBe(sub);
     expect(reopened?.filters[0]?.since).toBe(Math.max(0, 500 - GROUP_OVERLAP_SECS));
@@ -577,7 +600,8 @@ describe("malicious relay", () => {
         floors: {},
         nip44Extended: true,
         cursors: { [key]: 200_000 },
-        inbox: [RELAY],
+        inbox: "client",
+        inboxRelays: [RELAY],
       }),
     );
     await settle(fixture.timer, 5000);
@@ -592,7 +616,7 @@ describe("malicious relay", () => {
     terminate(sub);
     await settle(fixture.timer, RESUBSCRIBE_DELAY_MS);
 
-    expect(decodeClientState(fixture.cursors.bytes()).cursors[key]).toBe(200_000);
+    expect(decodeClientState(fixture.cursors.bytes())?.cursors[key]).toBe(200_000);
     const reopened = inboxSubs(fixture.network).at(-1);
     expect(reopened).not.toBe(sub);
     expect(reopened?.filters[0]?.since).toBe(200_000 - GIFT_WRAP_OVERLAP_SECS);
@@ -606,7 +630,13 @@ describe("malicious relay", () => {
     const key = groupCursorKey(ROUTE, RELAY);
     const fixture = await open(
       script,
-      encodeClientState({ floors: {}, nip44Extended: true, cursors: { [key]: 500 }, inbox: [] }),
+      encodeClientState({
+        floors: {},
+        nip44Extended: true,
+        cursors: { [key]: 500 },
+        inbox: "client",
+        inboxRelays: [],
+      }),
     );
     await settle(fixture.timer, 5000);
     const sub = mustSub(groupSubs(fixture.network));
@@ -620,12 +650,12 @@ describe("malicious relay", () => {
     expect(ingested(script)).toHaveLength(3);
     pushEose(sub);
     await settle(fixture.timer, 0);
-    expect(decodeClientState(fixture.cursors.bytes()).cursors[key]).toBe(500);
+    expect(decodeClientState(fixture.cursors.bytes())?.cursors[key]).toBe(500);
 
     // Once durable, the EOSE job folds the backlog max in.
     fixture.kv.release();
     await settle(fixture.timer, 0);
-    expect(decodeClientState(fixture.cursors.bytes()).cursors[key]).toBe(2000);
+    expect(decodeClientState(fixture.cursors.bytes())?.cursors[key]).toBe(2000);
     await fixture.client.close();
   });
 
@@ -635,7 +665,13 @@ describe("malicious relay", () => {
     const key = groupCursorKey(ROUTE, RELAY);
     const fixture = await open(
       script,
-      encodeClientState({ floors: {}, nip44Extended: true, cursors: { [key]: 500 }, inbox: [] }),
+      encodeClientState({
+        floors: {},
+        nip44Extended: true,
+        cursors: { [key]: 500 },
+        inbox: "client",
+        inboxRelays: [],
+      }),
     );
     await settle(fixture.timer, 5000);
     const sub = mustSub(groupSubs(fixture.network));
@@ -663,7 +699,7 @@ describe("malicious relay", () => {
     await settle(fixture.timer, 0);
 
     const cursor = (): number | undefined =>
-      decodeClientState(fixture.cursors.bytes()).cursors[key];
+      decodeClientState(fixture.cursors.bytes())?.cursors[key];
     // Release batches one at a time: nothing persists until the last one is durable.
     popGate(gates).ok();
     await settle(fixture.timer, 0);
@@ -680,7 +716,13 @@ describe("malicious relay", () => {
     const key = groupCursorKey(ROUTE, RELAY);
     const fixture = await open(
       script,
-      encodeClientState({ floors: {}, nip44Extended: true, cursors: { [key]: 500 }, inbox: [] }),
+      encodeClientState({
+        floors: {},
+        nip44Extended: true,
+        cursors: { [key]: 500 },
+        inbox: "client",
+        inboxRelays: [],
+      }),
     );
     await settle(fixture.timer, 5000);
     const sub = mustSub(groupSubs(fixture.network));
@@ -709,7 +751,7 @@ describe("malicious relay", () => {
     await settle(fixture.timer, 0);
     popGate(gates).fail();
     await settle(fixture.timer, 0);
-    expect(decodeClientState(fixture.cursors.bytes()).cursors[key]).toBe(500);
+    expect(decodeClientState(fixture.cursors.bytes())?.cursors[key]).toBe(500);
     await fixture.client.close();
   });
 
@@ -721,7 +763,8 @@ describe("malicious relay", () => {
       floors: {},
       nip44Extended: true,
       cursors: { [key]: 500 },
-      inbox: [],
+      inbox: "client",
+      inboxRelays: [],
     });
     const fixture = await open(script, seeded);
     await settle(fixture.timer, 5000);
@@ -729,7 +772,7 @@ describe("malicious relay", () => {
 
     pushEose(sub);
     await settle(fixture.timer, 25);
-    expect(decodeClientState(fixture.cursors.bytes()).cursors[key]).toBe(500);
+    expect(decodeClientState(fixture.cursors.bytes())?.cursors[key]).toBe(500);
     // An empty backlog never schedules a save — the persisted blob is the seeded one.
     expect(fixture.cursors.bytes()).toStrictEqual(seeded);
     await fixture.client.close();
@@ -741,7 +784,13 @@ describe("malicious relay", () => {
     const key = groupCursorKey(ROUTE, RELAY);
     const fixture = await open(
       script,
-      encodeClientState({ floors: {}, nip44Extended: true, cursors: { [key]: 500 }, inbox: [] }),
+      encodeClientState({
+        floors: {},
+        nip44Extended: true,
+        cursors: { [key]: 500 },
+        inbox: "client",
+        inboxRelays: [],
+      }),
     );
     await settle(fixture.timer, 5000);
     const sub = mustSub(groupSubs(fixture.network));
@@ -750,7 +799,7 @@ describe("malicious relay", () => {
     pushEose(sub);
     pushEose(sub);
     await settle(fixture.timer, 25);
-    expect(decodeClientState(fixture.cursors.bytes()).cursors[key]).toBe(2000);
+    expect(decodeClientState(fixture.cursors.bytes())?.cursors[key]).toBe(2000);
     expect(ingested(script)).toHaveLength(1);
     await fixture.client.close();
   });
@@ -760,7 +809,13 @@ describe("malicious relay", () => {
     script.groups = [snapshot([RELAY, RELAY2])];
     const fixture = await open(
       script,
-      encodeClientState({ floors: {}, nip44Extended: true, cursors: {}, inbox: [] }),
+      encodeClientState({
+        floors: {},
+        nip44Extended: true,
+        cursors: {},
+        inbox: "client",
+        inboxRelays: [],
+      }),
     );
     await settle(fixture.timer, 5000);
     const history = (): BridgeRequest[] =>
@@ -791,7 +846,13 @@ describe("malicious relay", () => {
     const key = groupCursorKey(ROUTE, RELAY);
     const fixture = await open(
       script,
-      encodeClientState({ floors: {}, nip44Extended: true, cursors: { [key]: 500 }, inbox: [] }),
+      encodeClientState({
+        floors: {},
+        nip44Extended: true,
+        cursors: { [key]: 500 },
+        inbox: "client",
+        inboxRelays: [],
+      }),
     );
     await settle(fixture.timer, 5000);
     const sub = mustSub(groupSubs(fixture.network));
@@ -799,7 +860,7 @@ describe("malicious relay", () => {
     pushEose(sub);
     push(sub, groupEvent(3000n));
     await settle(fixture.timer, 25);
-    expect(decodeClientState(fixture.cursors.bytes()).cursors[key]).toBe(3000);
+    expect(decodeClientState(fixture.cursors.bytes())?.cursors[key]).toBe(3000);
     await fixture.client.close();
   });
 
@@ -809,7 +870,13 @@ describe("malicious relay", () => {
     const key = groupCursorKey(ROUTE, RELAY);
     const fixture = await open(
       script,
-      encodeClientState({ floors: {}, nip44Extended: true, cursors: { [key]: 500 }, inbox: [] }),
+      encodeClientState({
+        floors: {},
+        nip44Extended: true,
+        cursors: { [key]: 500 },
+        inbox: "client",
+        inboxRelays: [],
+      }),
     );
     await settle(fixture.timer, 5000);
     const sub = mustSub(groupSubs(fixture.network));
@@ -830,7 +897,7 @@ describe("malicious relay", () => {
 
     expect(ingested(script).length).toBeLessThanOrEqual(4 * INGEST_BATCH_MAX);
     // No EOSE ever arrived on either sub — nothing folded, the seed cursor stands.
-    expect(decodeClientState(fixture.cursors.bytes()).cursors[key]).toBe(500);
+    expect(decodeClientState(fixture.cursors.bytes())?.cursors[key]).toBe(500);
     await fixture.client.close();
   }, 30_000);
 
@@ -840,7 +907,13 @@ describe("malicious relay", () => {
     const key = groupCursorKey(ROUTE, RELAY);
     const fixture = await open(
       script,
-      encodeClientState({ floors: {}, nip44Extended: true, cursors: { [key]: 5000 }, inbox: [] }),
+      encodeClientState({
+        floors: {},
+        nip44Extended: true,
+        cursors: { [key]: 5000 },
+        inbox: "client",
+        inboxRelays: [],
+      }),
     );
     await settle(fixture.timer, 5000);
     const sub = mustSub(groupSubs(fixture.network));
@@ -848,7 +921,7 @@ describe("malicious relay", () => {
     pushEose(sub);
     push(sub, groupEvent(4000n));
     await settle(fixture.timer, 25);
-    expect(decodeClientState(fixture.cursors.bytes()).cursors[key]).toBe(5000);
+    expect(decodeClientState(fixture.cursors.bytes())?.cursors[key]).toBe(5000);
     await fixture.client.close();
   });
 
@@ -863,7 +936,8 @@ describe("malicious relay", () => {
         floors: {},
         nip44Extended: true,
         cursors: { [key1]: 500, [key2]: 500 },
-        inbox: [],
+        inbox: "client",
+        inboxRelays: [],
       }),
     );
     await settle(fixture.timer, 5000);
@@ -881,7 +955,7 @@ describe("malicious relay", () => {
       pushEose(sub);
     }
     await settle(fixture.timer, 25);
-    const { cursors } = decodeClientState(fixture.cursors.bytes());
+    const cursors = savedCursors(fixture.cursors);
     expect(cursors[key1]).toBe(3000);
     expect(cursors[key2]).toBe(3000);
     await fixture.client.close();
@@ -893,7 +967,13 @@ describe("malicious relay", () => {
     const key = groupCursorKey(ROUTE, RELAY);
     const fixture = await open(
       script,
-      encodeClientState({ floors: {}, nip44Extended: true, cursors: { [key]: 500 }, inbox: [] }),
+      encodeClientState({
+        floors: {},
+        nip44Extended: true,
+        cursors: { [key]: 500 },
+        inbox: "client",
+        inboxRelays: [],
+      }),
     );
     await settle(fixture.timer, 5000);
     const sub = mustSub(groupSubs(fixture.network));
@@ -902,7 +982,7 @@ describe("malicious relay", () => {
     push(sub, event({ kind: 1059, createdAt: 3000n, tags: [["h", ROUTE]] }));
     await settle(fixture.timer, 25);
     expect(ingested(script)).toHaveLength(0);
-    expect(decodeClientState(fixture.cursors.bytes()).cursors[key]).toBe(500);
+    expect(decodeClientState(fixture.cursors.bytes())?.cursors[key]).toBe(500);
     await fixture.client.close();
   });
 
@@ -912,7 +992,13 @@ describe("malicious relay", () => {
     const key = groupCursorKey(ROUTE, RELAY);
     const fixture = await open(
       script,
-      encodeClientState({ floors: {}, nip44Extended: true, cursors: { [key]: 500 }, inbox: [] }),
+      encodeClientState({
+        floors: {},
+        nip44Extended: true,
+        cursors: { [key]: 500 },
+        inbox: "client",
+        inboxRelays: [],
+      }),
     );
     await settle(fixture.timer, 5000);
     const sub = mustSub(groupSubs(fixture.network));
@@ -920,7 +1006,7 @@ describe("malicious relay", () => {
     pushEose(sub);
     push(sub, groupEvent(1_800_000_000n));
     await settle(fixture.timer, 25);
-    expect(decodeClientState(fixture.cursors.bytes()).cursors[key]).toBe(1_700_000_000);
+    expect(decodeClientState(fixture.cursors.bytes())?.cursors[key]).toBe(1_700_000_000);
     await fixture.client.close();
   });
 
@@ -939,7 +1025,13 @@ describe("malicious relay", () => {
     const key = groupCursorKey(ROUTE, RELAY);
     const fixture = await open(
       script,
-      encodeClientState({ floors: {}, nip44Extended: true, cursors: { [key]: 5000 }, inbox: [] }),
+      encodeClientState({
+        floors: {},
+        nip44Extended: true,
+        cursors: { [key]: 5000 },
+        inbox: "client",
+        inboxRelays: [],
+      }),
     );
     await settle(fixture.timer, 5000);
     const sub = mustSub(groupSubs(fixture.network));
@@ -948,11 +1040,11 @@ describe("malicious relay", () => {
     push(sub, deferred);
     await settle(fixture.timer, 25);
     // The backlog folds only at EOSE.
-    expect(decodeClientState(fixture.cursors.bytes()).cursors[key]).toBe(5000);
+    expect(decodeClientState(fixture.cursors.bytes())?.cursors[key]).toBe(5000);
     pushEose(sub);
     await settle(fixture.timer, 25);
     // max(5000, 6000) capped at 2000 − 1.
-    expect(decodeClientState(fixture.cursors.bytes()).cursors[key]).toBe(1999);
+    expect(decodeClientState(fixture.cursors.bytes())?.cursors[key]).toBe(1999);
     await fixture.client.close();
   });
 
@@ -975,7 +1067,8 @@ describe("malicious relay", () => {
         floors: {},
         nip44Extended: true,
         cursors: { [key]: 200_000 },
-        inbox: [RELAY],
+        inbox: "client",
+        inboxRelays: [RELAY],
       }),
       { ...signer(), nip44Decrypt: async () => Promise.reject(new SignerInvalidPayloadError()) },
     );
@@ -1000,7 +1093,7 @@ describe("malicious relay", () => {
     expect(invites).toStrictEqual([]);
     // A permanent rejection folds into the cursor normally (an unavailable
     // outcome would cap it at createdAt − 1 instead).
-    expect(decodeClientState(fixture.cursors.bytes()).cursors[key]).toBe(300_000);
+    expect(decodeClientState(fixture.cursors.bytes())?.cursors[key]).toBe(300_000);
     await fixture.client.close();
   });
 
@@ -1015,7 +1108,8 @@ describe("malicious relay", () => {
         floors: {},
         nip44Extended: true,
         cursors: { [honestKey]: 400, [hostileKey]: 400 },
-        inbox: [],
+        inbox: "client",
+        inboxRelays: [],
       }),
     );
     await settle(fixture.timer, 5000);
@@ -1045,7 +1139,7 @@ describe("malicious relay", () => {
     expect(ingested(script).map((e) => e.id)).toStrictEqual([genuine.id]);
     expect(ingested(script)[0]?.sig).toBe(genuine.sig);
     expect(ingested(script)[0]?.createdAt).toBe(500n);
-    const { cursors } = decodeClientState(fixture.cursors.bytes());
+    const cursors = savedCursors(fixture.cursors);
     // The honest relay is credited the genuine createdAt; the hostile relay's forgery
     // credited nothing.
     expect(cursors[honestKey]).toBe(500);
@@ -1059,7 +1153,13 @@ describe("malicious relay", () => {
     const key = groupCursorKey(ROUTE, RELAY);
     const fixture = await open(
       script,
-      encodeClientState({ floors: {}, nip44Extended: true, cursors: { [key]: 500 }, inbox: [] }),
+      encodeClientState({
+        floors: {},
+        nip44Extended: true,
+        cursors: { [key]: 500 },
+        inbox: "client",
+        inboxRelays: [],
+      }),
     );
     await settle(fixture.timer, 5000);
     const sub = mustSub(groupSubs(fixture.network));
@@ -1074,7 +1174,7 @@ describe("malicious relay", () => {
 
     // Neither entered the buffer: no ingest, no cursor credit, the sub stays open.
     expect(ingested(script)).toHaveLength(0);
-    expect(decodeClientState(fixture.cursors.bytes()).cursors[key]).toBe(500);
+    expect(decodeClientState(fixture.cursors.bytes())?.cursors[key]).toBe(500);
     expect(sub.open).toBe(true);
     await fixture.client.close();
   });
@@ -1088,7 +1188,8 @@ describe("malicious relay", () => {
         floors: {},
         nip44Extended: true,
         cursors: { [key]: 100 },
-        inbox: [RELAY],
+        inbox: "client",
+        inboxRelays: [RELAY],
       }),
     );
     await settle(fixture.timer, 5000);
@@ -1117,7 +1218,8 @@ describe("malicious relay", () => {
         floors: {},
         nip44Extended: true,
         cursors: { [key]: 100 },
-        inbox: [RELAY],
+        inbox: "client",
+        inboxRelays: [RELAY],
       }),
     );
     await settle(fixture.timer, 5000);
@@ -1131,7 +1233,7 @@ describe("malicious relay", () => {
     await settle(fixture.timer, 0);
     // The fold ran after the 32-wrap batch went durable: the still-buffered tail caps the
     // cursor at min(deferred createdAt) − 1, not the backlog's 639.
-    expect(decodeClientState(fixture.cursors.bytes()).cursors[key]).toBe(599);
+    expect(decodeClientState(fixture.cursors.bytes())?.cursors[key]).toBe(599);
 
     // Closing before the window resets is safe: the reopened `since` covers the deferred tail.
     const saved = fixture.cursors.bytes();
@@ -1152,7 +1254,8 @@ describe("malicious relay", () => {
         floors: {},
         nip44Extended: true,
         cursors: { [key]: 100 },
-        inbox: [RELAY],
+        inbox: "client",
+        inboxRelays: [RELAY],
       }),
     );
     await settle(fixture.timer, 5000);
@@ -1165,16 +1268,16 @@ describe("malicious relay", () => {
       push(sub, wrapEvent(BigInt(639 - i), `live${i}`));
     }
     await settle(fixture.timer, 25);
-    expect(decodeClientState(fixture.cursors.bytes()).cursors[key]).toBe(599);
+    expect(decodeClientState(fixture.cursors.bytes())?.cursors[key]).toBe(599);
 
     // A newer live wrap buffers under the same spent budget; the cursor stays capped.
     push(sub, wrapEvent(700n, "tail"));
     await settle(fixture.timer, 0);
-    expect(decodeClientState(fixture.cursors.bytes()).cursors[key]).toBe(599);
+    expect(decodeClientState(fixture.cursors.bytes())?.cursors[key]).toBe(599);
 
     fixture.clock.advance(GIFT_WRAP_WINDOW_MS);
     await settle(fixture.timer, GIFT_WRAP_WINDOW_MS);
-    expect(decodeClientState(fixture.cursors.bytes()).cursors[key]).toBe(700);
+    expect(decodeClientState(fixture.cursors.bytes())?.cursors[key]).toBe(700);
     await fixture.client.close();
   });
 
@@ -1183,7 +1286,13 @@ describe("malicious relay", () => {
     script.groups = [snapshot()];
     const fixture = await open(
       script,
-      encodeClientState({ floors: {}, nip44Extended: true, cursors: {}, inbox: [RELAY] }),
+      encodeClientState({
+        floors: {},
+        nip44Extended: true,
+        cursors: {},
+        inbox: "client",
+        inboxRelays: [RELAY],
+      }),
     );
     await settle(fixture.timer, 5000);
     const wrapSub = mustSub(inboxSubs(fixture.network));
@@ -1209,7 +1318,13 @@ describe("malicious relay", () => {
     const key = groupCursorKey(ROUTE, RELAY);
     const fixture = await open(
       script,
-      encodeClientState({ floors: {}, nip44Extended: true, cursors: { [key]: 1000 }, inbox: [] }),
+      encodeClientState({
+        floors: {},
+        nip44Extended: true,
+        cursors: { [key]: 1000 },
+        inbox: "client",
+        inboxRelays: [],
+      }),
     );
     await settle(fixture.timer, 5000);
     const sub = mustSub(groupSubs(fixture.network));
@@ -1227,7 +1342,7 @@ describe("malicious relay", () => {
       });
     };
     const cursor = (): number | undefined =>
-      decodeClientState(fixture.cursors.bytes()).cursors[key];
+      decodeClientState(fixture.cursors.bytes())?.cursors[key];
 
     // A newer live event ingests while an out-of-order older event is still buffered.
     push(sub, groupEvent(1500n));
@@ -1257,7 +1372,8 @@ describe("malicious relay", () => {
         floors: {},
         nip44Extended: true,
         cursors: { [groupKey1]: 1000, [groupKey2]: 1000, [inboxKey]: 500 },
-        inbox: [RELAY],
+        inbox: "client",
+        inboxRelays: [RELAY],
       }),
     );
     await settle(fixture.timer, 5000);
@@ -1279,7 +1395,7 @@ describe("malicious relay", () => {
     });
     await fixture.client.groups();
     await settle(fixture.timer, 25);
-    const saved = decodeClientState(fixture.cursors.bytes()).cursors;
+    const saved = savedCursors(fixture.cursors);
     expect(saved[groupKey1]).toBeUndefined();
     expect(saved[groupKey2]).toBeUndefined();
     expect(saved[inboxKey]).toBe(500);
@@ -1316,7 +1432,8 @@ describe("malicious relay", () => {
         floors: {},
         nip44Extended: true,
         cursors: { [groupCursorKey(ROUTE, RELAY)]: 1000 },
-        inbox: [],
+        inbox: "client",
+        inboxRelays: [],
       }),
     );
     await settle(fixture.timer, 5000);
@@ -1369,7 +1486,13 @@ describe("malicious relay", () => {
     script.groups = [snapshot()];
     const fixture = await open(
       script,
-      encodeClientState({ floors: {}, nip44Extended: true, cursors: {}, inbox: [] }),
+      encodeClientState({
+        floors: {},
+        nip44Extended: true,
+        cursors: {},
+        inbox: "client",
+        inboxRelays: [],
+      }),
     );
     await settle(fixture.timer, 5000);
     const changes: string[] = [];
@@ -1388,7 +1511,13 @@ describe("malicious relay", () => {
     script.groups = [snapshot()];
     const fixture = await open(
       script,
-      encodeClientState({ floors: {}, nip44Extended: true, cursors: {}, inbox: [] }),
+      encodeClientState({
+        floors: {},
+        nip44Extended: true,
+        cursors: {},
+        inbox: "client",
+        inboxRelays: [],
+      }),
     );
     await settle(fixture.timer, 5000);
     const changes: string[] = [];

@@ -76,6 +76,42 @@ that it is given up on this device. Nothing retries on its own: call
 `retryInvites()` once the signer is available again (an unlocked
 extension, an approved remote signer).
 
+### Host-owned inbox
+
+`MarmotClient.open` takes a required `inbox` — who unwraps this account's
+NIP-17 gift wraps. `inbox: "client"` (the usual choice) opens the kind-1059
+subscription itself. `inbox: "host"` is for a host that already runs its
+own NIP-17 inbox (for example one inbox covering several accounts or
+devices): the client opens no kind-1059 subscription, keeps no inbox
+cursor or floor, and the host's own kind-10050 — which the client's
+`publishInboxRelays` would overwrite — stays authoritative. In host mode
+`retryInvites()` and `publishInboxRelays()` reject with
+`wrong_inbox_owner`.
+
+In host mode the host unwraps each kind-1059 wrap itself; when the rumor
+is kind 444 it forwards the untouched wrap to `ingestWrap`, which verifies
+the event id and signature, then peels and validates it through the same
+engine path a subscription-delivered wrap takes — `joined`,
+`message_received` and the other session events dispatch after the ingest
+is durable. There is no gift-wrap budget and no retry state on this side:
+delivery is entirely the host's forwarding.
+
+- Forwarding a Welcome costs one NIP-59 unwrap — two signer NIP-44
+  decrypts (outer wrap, then seal) — per forwarded wrap, not per message.
+- Re-feeding the same wrap is answered by the ingress dedup ring as
+  `rejected{duplicate}` — no signer calls, no second join.
+- A non-Welcome wrap must not be forwarded; if it is, the outcome is
+  `rejected{invalid_encoding}` — one unwrap, no state change — and the
+  wrap is still dedup-marked, so a re-feed is `rejected{duplicate}`.
+- A signer refusal or failure reports `unavailable{signer_refused}` /
+  `unavailable{signer_failed}` and emits `pending` — with no floor on this
+  device: re-delivery is the host re-forwarding the wrap.
+
+The mode is recorded in the cursor blob at open; reopening in the other
+mode is `wrong_inbox_owner`. Switching deliberately means clearing the
+`CursorStore` — one full refetch and one signer probe — while an
+undecodable blob adopts the option's mode.
+
 A White Noise device of the same account lists each Meowl device as an
 unrecognized sign-in; tell users to answer "Not now" there — "This
 wasn't me" makes White Noise warn that the account's key may be
