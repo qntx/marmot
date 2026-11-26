@@ -11,6 +11,8 @@ npm trusted publishing (OIDC).
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-27
+
 ### Added
 
 - Host-owned inbox (`inbox: "host"`): for a host that already runs the

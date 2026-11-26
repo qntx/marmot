@@ -23,7 +23,7 @@ test-panic = []
 
 [dependencies]
 js-sys         = "0.3"
-mk-bridge      = { path = "../mk-bridge", version = "=0.3.0" }
+mk-bridge      = { path = "../mk-bridge", version = "=0.4.0" }
 universal-time = "0.3"
 wasm-bindgen   = "=0.2.130"
 web-time       = "1"
