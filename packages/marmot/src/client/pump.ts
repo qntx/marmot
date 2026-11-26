@@ -5,7 +5,9 @@
  * with the cursor keys that delivered them, ingested in bounded batches, and cursors advance only
  * after `whenDurable`: an event delivered after its subscription's EOSE counts immediately; an
  * event from the stored-event backlog folds in only when that EOSE arrives, so a subscription lost
- * mid-replay cannot persist a cursor past events never received.
+ * mid-replay cannot persist a cursor past events never received. A wrap the signer refused or
+ * failed to open sets its inbox key's sticky floor (`ClientState.floors`), which holds that cursor
+ * below the wrap across later batches and restarts until a covering replay settles it.
  */
 
 import type { Clock, Engine } from "../backend/engine.ts";
@@ -91,6 +93,15 @@ export const GIFT_WRAP_WINDOW_MS = 10_000;
  * (mdk#2332). The client knows no relay limits, so every relay counts as unknown-limit.
  */
 export const COMMIT_SIZE_FLOOR_BYTES: number = 64 * 1024;
+/**
+ * How long a signer-unavailable wrap holds its inbox floor — MDK
+ * `cgka_engine::message_processor::MAX_DEFERRED_PEEL_RESIDENCE_MS` (30 days, the engine's bound on
+ * retaining input it cannot open yet), in seconds. A floor or a refused wrap whose `createdAt` is
+ * older than this is given up: the floor is dropped at reconcile and the wrap credits its key like
+ * a permanent rejection, so a signer that refuses forever cannot pin a key indefinitely. The
+ * mk-core `ts_mirrors` test pins this literal to the MDK constant.
+ */
+export const DEFERRED_PEEL_RESIDENCE_SECS = 2_592_000;
 /** What the pump needs to drive one client session. */
 export type PumpOptions = {
   engine: Engine;
@@ -108,10 +119,15 @@ type ActiveSub = {
   relay: string;
   kind: 445 | 1059;
   routes: string[];
+  /** The inbox filter's `since` (`undefined` = unfloored); group subs leave it unset. */
+  since: number | undefined;
   /** The relay signalled end of stored events; later deliveries count live. */
   eose: boolean;
-  /** Per cursor key the pre-EOSE aggregate, folded into `state.cursors` at EOSE. */
-  backlog: Map<string, { max?: number; cap?: number }>;
+  /**
+   * Per cursor key the pre-EOSE aggregate, folded into `state.cursors` at EOSE; `refused` is the
+   * earliest `createdAt` of a wrap in this pass that ended signer-unavailable.
+   */
+  backlog: Map<string, { max?: number; cap?: number; refused?: number }>;
   /** An ingest covering this sub's backlog failed — its EOSE job applies nothing. */
   tainted: boolean;
   close: () => void;
@@ -135,10 +151,16 @@ function capTracked<K, V>(entries: Map<K, V> | Set<K>): void {
  * Whether an ingest outcome holds its cursor key: every `unavailable` report caps the key at
  * `createdAt` − 1 except `predates_local_copy` — a deferred kind-445 stamped before this copy's
  * Welcome stays durably retained for re-peel, so its relay copy is redundant while retained and the
- * report credits the key like an accepted event.
+ * report credits the key like an accepted event. `advanceCursors` also exempts a given-up wrap
+ * (signer-unavailable and older than `DEFERRED_PEEL_RESIDENCE_SECS`).
  */
 const holdsCursor = (outcome: InputOutcome): boolean =>
   outcome.type === "unavailable" && outcome.category !== "predates_local_copy";
+
+/** A signer verdict on a wrap unwrap that a later replay may still open. */
+const signerUnavailable = (outcome: InputOutcome): boolean =>
+  outcome.type === "unavailable" &&
+  (outcome.category === "signer_refused" || outcome.category === "signer_failed");
 
 export class Pump {
   private readonly engine: Engine;
@@ -302,9 +324,9 @@ export class Pump {
 
   /**
    * Close every active kind-1059 subscription and reconcile, so the inbox subscriptions reopen with
-   * `since` taken from the capped cursor (an `unavailable` ingest report caps its key at the
-   * earliest `createdAt − 1`; `predates_local_copy` credits instead) and the relays replay the
-   * withheld wraps. Stores no wraps.
+   * `since` taken from the floored cursor (a signer-unavailable wrap holds its key at `createdAt −
+   * 1` until a covering replay settles it) and the relays replay the withheld wraps. Stores no
+   * wraps; never runs on its own — only on this call, a reconnect or a restart.
    */
   async retryInvites(): Promise<void> {
     await this.run(async () => {
@@ -722,7 +744,13 @@ export class Pump {
         }
         throw error;
       }
-      for (const invite of pendingInvites(reports)) {
+      const horizon = this.horizonSecs();
+      const stamped = new Map(batch.map((entry) => [entry.event.id, entry.event] as const));
+      const retryable = reports.filter((report) => {
+        const event = stamped.get(report.event);
+        return event === undefined || !this.givenUp(event, report.outcome, horizon);
+      });
+      for (const invite of pendingInvites(retryable)) {
         this.emitInvite(invite);
       }
       await this.engine.whenDurable();
@@ -755,24 +783,43 @@ export class Pump {
    * apply to `state.cursors` here; keys it reached from the stored-event backlog fold into the
    * delivering sub's `backlog` instead and land only when that sub's EOSE job runs — a sub closed
    * or tainted before then drops its aggregate and the next `since` refetches the range.
+   *
+   * A wrap that ended signer-unavailable also lowers its inbox key's floor to its `createdAt` right
+   * away — live or backlog — and every cursor write clamps to `floor − 1`, so no later batch, fold
+   * or restart moves the cursor past it; one older than `DEFERRED_PEEL_RESIDENCE_SECS` is given up
+   * instead and credits its key like a permanent rejection.
    */
   private advanceCursors(batch: Buffered[], reports: InputReport[]): void {
     const outcomes = new Map(reports.map((report) => [report.event, report.outcome] as const));
     const nowSecs = Number(this.clock.now().unixMs / 1000n);
+    const horizon = this.horizonSecs();
     const perKey = new Map<string, Array<{ createdAt: bigint; unavailable: boolean }>>();
     for (const entry of batch) {
       const outcome = outcomes.get(entry.event.id);
       if (outcome === undefined) {
         continue;
       }
+      const givenUp = this.givenUp(entry.event, outcome, horizon);
+      const holds = holdsCursor(outcome) && !givenUp;
+      const refused =
+        entry.event.kind === GIFT_WRAP_KIND && signerUnavailable(outcome) && !givenUp
+          ? Number(entry.event.createdAt)
+          : undefined;
       for (const [key, sub] of entry.keys) {
+        if (refused !== undefined) {
+          this.lowerFloor(key, refused);
+        }
         if (sub !== undefined) {
           let aggregate = sub.backlog.get(key);
           if (aggregate === undefined) {
             aggregate = {};
             sub.backlog.set(key, aggregate);
           }
-          if (holdsCursor(outcome)) {
+          if (refused !== undefined) {
+            aggregate.refused =
+              aggregate.refused === undefined ? refused : Math.min(aggregate.refused, refused);
+          }
+          if (holds) {
             const at = Number(entry.event.createdAt) - 1;
             aggregate.cap = aggregate.cap === undefined ? at : Math.min(aggregate.cap, at);
           } else {
@@ -786,10 +833,7 @@ export class Pump {
           list = [];
           perKey.set(key, list);
         }
-        list.push({
-          createdAt: entry.event.createdAt,
-          unavailable: holdsCursor(outcome),
-        });
+        list.push({ createdAt: entry.event.createdAt, unavailable: holds });
       }
     }
     for (const [key, entries] of perKey) {
@@ -818,7 +862,75 @@ export class Pump {
       if (cap !== undefined) {
         value = Math.max(0, Math.min(value, cap));
       }
-      this.state.cursors[key] = value;
+      this.state.cursors[key] = this.floored(key, value);
+    }
+  }
+
+  /** Now minus `DEFERRED_PEEL_RESIDENCE_SECS`, unix seconds: older floors and wraps are given up. */
+  private horizonSecs(): number {
+    return Number(this.clock.now().unixMs / 1000n) - DEFERRED_PEEL_RESIDENCE_SECS;
+  }
+
+  /** A signer-unavailable wrap stamped before `horizon`: no floor, no cap, no `pending`. */
+  private givenUp(event: NostrEvent, outcome: InputOutcome, horizon: number): boolean {
+    return (
+      event.kind === GIFT_WRAP_KIND &&
+      signerUnavailable(outcome) &&
+      Number(event.createdAt) < horizon
+    );
+  }
+
+  /** Lower `key`'s floor to `createdAt` and pull its persisted cursor under it at once. */
+  private lowerFloor(key: string, createdAt: number): void {
+    const floor = this.state.floors[key];
+    if (floor !== undefined && floor <= createdAt) {
+      return;
+    }
+    this.state.floors[key] = createdAt;
+    const cursor = this.state.cursors[key];
+    if (cursor !== undefined) {
+      this.state.cursors[key] = this.floored(key, cursor);
+    }
+  }
+
+  /** `value` clamped to `floor − 1` while `key` carries a floor. */
+  private floored(key: string, value: number): number {
+    const floor = this.state.floors[key];
+    return floor === undefined ? value : Math.max(0, Math.min(value, floor - 1));
+  }
+
+  /**
+   * Settle an inbox key's floor at its sub's EOSE: a pass whose `since` covered the floor is the
+   * evidence — the floor becomes the earliest wrap of that pass that ended signer-unavailable, or
+   * clears when none did (the floor wraps were opened, permanently rejected or are gone). A pass
+   * that did not cover the floor changes nothing. The caller already dropped closed and tainted
+   * subs. Budget-deferred wraps of the pass still buffered need no floor yet: `bufferedCap` holds
+   * the cursor under them and their own ingest lowers the floor again.
+   */
+  private settleFloor(sub: ActiveSub): boolean {
+    const key = inboxCursorKey(sub.relay);
+    const floor = this.state.floors[key];
+    if (floor === undefined || (sub.since !== undefined && sub.since > floor)) {
+      return false;
+    }
+    const refused = sub.backlog.get(key)?.refused;
+    if (refused === undefined) {
+      this.state.floors = Object.fromEntries(
+        Object.entries(this.state.floors).filter(([entry]) => entry !== key),
+      );
+    } else {
+      this.state.floors[key] = refused;
+    }
+    return true;
+  }
+
+  /** Drop every floor older than the horizon (at open and on each reconcile). */
+  private dropExpiredFloors(): void {
+    const horizon = this.horizonSecs();
+    const kept = Object.entries(this.state.floors).filter(([, floor]) => floor >= horizon);
+    if (kept.length !== Object.keys(this.state.floors).length) {
+      this.state.floors = Object.fromEntries(kept);
+      this.scheduleSave();
     }
   }
 
@@ -845,7 +957,11 @@ export class Pump {
 
   /** Apply a settled backlog aggregate (`sub.backlog` entries) at EOSE; used only by the EOSE job. */
   private applyBacklog(sub: ActiveSub): void {
-    if (this.active.get(sub.key) !== sub || sub.tainted || sub.backlog.size === 0) {
+    if (this.active.get(sub.key) !== sub || sub.tainted) {
+      return;
+    }
+    const settled = sub.kind === GIFT_WRAP_KIND && this.settleFloor(sub);
+    if (!settled && sub.backlog.size === 0) {
       return;
     }
     for (const [key, aggregate] of sub.backlog) {
@@ -862,7 +978,7 @@ export class Pump {
       if (cap !== undefined) {
         value = Math.max(0, Math.min(value, cap));
       }
-      this.state.cursors[key] = value;
+      this.state.cursors[key] = this.floored(key, value);
     }
     sub.backlog.clear();
     this.scheduleSave();
@@ -965,6 +1081,7 @@ export class Pump {
     if (this.closed) {
       return;
     }
+    this.dropExpiredFloors();
     const snapshots = await this.engine.groups();
     const routable: Array<{ id: string; route: string; relays: string[] }> = [];
     for (const snapshot of snapshots) {
@@ -1026,6 +1143,7 @@ export class Pump {
       relay: planned.relay,
       kind: planned.kind,
       routes: planned.routes,
+      since: planned.kind === GIFT_WRAP_KIND ? planned.filters[0]?.since : undefined,
       eose: false,
       backlog: new Map(),
       tainted: false,

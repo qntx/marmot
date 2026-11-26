@@ -193,6 +193,7 @@ describe("decoder fuzz", () => {
     const valid = Array.from({ length: 4 }, () =>
       encodeClientState({
         cursors: { [`group|${pick(100)}|r`]: pick(2_000_000_000) },
+        floors: { [`inbox|wss://r${pick(9)}.example`]: pick(2_000_000_000) },
         inbox: [`wss://r${pick(9)}.example`],
         nip44Extended: true,
       }),
@@ -202,6 +203,9 @@ describe("decoder fuzz", () => {
     );
     expect(states).toHaveLength(ITERATIONS);
     expect(states.every((state) => Object.values(state.cursors).every(nonNegativeInteger))).toBe(
+      true,
+    );
+    expect(states.every((state) => Object.values(state.floors).every(nonNegativeInteger))).toBe(
       true,
     );
     expect(states.every((state) => state.inbox.every((relay) => typeof relay === "string"))).toBe(

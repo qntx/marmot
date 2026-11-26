@@ -9,6 +9,7 @@ export * from "./state.ts";
 export type { ClientMessage, DeliveryEvent, DropEvent, GroupEvent } from "./pump.ts";
 export {
   COMMIT_SIZE_FLOOR_BYTES,
+  DEFERRED_PEEL_RESIDENCE_SECS,
   INGEST_BATCH_MAX,
   INGEST_DELAY_MS,
   RESUBSCRIBE_DELAY_MS,
