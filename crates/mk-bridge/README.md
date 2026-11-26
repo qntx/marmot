@@ -44,7 +44,7 @@ reopened from durable rows.
 
 ## Protocol
 
-`PROTOCOL_VERSION = 9`. Requests over `MAX_REQUEST_BYTES` (64 MiB) are
+`PROTOCOL_VERSION = 10`. Requests over `MAX_REQUEST_BYTES` (64 MiB) are
 refused with `too_large`. Encoding rules: UTF-8 JSON; bytes as lowercase hex;
 `u64` as decimal strings; `u8`/`u16`/`u32` as JSON numbers; options always
 emitted and decoding to `null`; internally-tagged enums with snake_case
