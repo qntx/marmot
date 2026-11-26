@@ -892,6 +892,93 @@ mod lifecycle_tests {
         assert_bundle_invariant(&a);
     }
 
+    /// The emptied-slot match compares parsed relay URLs: the empty read
+    /// reports the same relay spelled with the root slash and the refill
+    /// still fires.
+    #[tokio::test(flavor = "current_thread")]
+    async fn audit_refills_emptied_spelling_root_slash() {
+        let relay = FakeRelay::new();
+        let mut a = open_member().await;
+        publish_promoted(&mut a, &relay).await;
+        a.clock.advance(25 * 3_600_000);
+        a.session
+            .audit_key_package_slot(&[], &[format!("{RELAY}/")])
+            .await
+            .expect("audit");
+        assert_eq!(
+            take(&mut a).len(),
+            1,
+            "the root-slash spelling of an emptied relay still refills"
+        );
+        assert_bundle_invariant(&a);
+    }
+
+    /// Host case is URL punctuation, not identity: the slot published to
+    /// `wss://Relay.Example` and the empty read reported
+    /// `wss://relay.example` — the refill still fires.
+    #[tokio::test(flavor = "current_thread")]
+    async fn audit_refills_emptied_spelling_host_case() {
+        const DOMAIN_RELAY: &str = "wss://Relay.Example";
+        let relay = FakeRelay::new();
+        let mut a = open_member().await;
+        a.session
+            .ensure_key_package(&[DOMAIN_RELAY.to_owned()])
+            .await
+            .expect("ensure_key_package");
+        let outbound = take(&mut a);
+        assert_eq!(outbound.len(), 1, "one staged publication");
+        accept(&mut a, &relay, &outbound[0]).await;
+        a.clock.advance(25 * 3_600_000);
+        a.session
+            .audit_key_package_slot(&[], &["wss://relay.example".to_owned()])
+            .await
+            .expect("audit");
+        assert_eq!(
+            take(&mut a).len(),
+            1,
+            "the host-case spelling of an emptied relay still refills"
+        );
+        assert_bundle_invariant(&a);
+    }
+
+    /// The parsed-URL match keeps paths distinct: the slot published to
+    /// the relay root and the empty read names `…/feed` — no refill.
+    #[tokio::test(flavor = "current_thread")]
+    async fn audit_refill_ignores_emptied_different_path() {
+        let relay = FakeRelay::new();
+        let mut a = open_member().await;
+        publish_promoted(&mut a, &relay).await;
+        a.clock.advance(25 * 3_600_000);
+        a.session
+            .audit_key_package_slot(&[], &[format!("{RELAY}/feed")])
+            .await
+            .expect("audit");
+        assert!(
+            take(&mut a).is_empty(),
+            "an emptied read on a different path does not refill"
+        );
+        assert_bundle_invariant(&a);
+    }
+
+    /// An `empty_relays` entry that does not parse as a relay URL is
+    /// ignored — the audit neither errors nor refills on it.
+    #[tokio::test(flavor = "current_thread")]
+    async fn audit_refill_ignores_unparseable_empty_relay() {
+        let relay = FakeRelay::new();
+        let mut a = open_member().await;
+        publish_promoted(&mut a, &relay).await;
+        a.clock.advance(25 * 3_600_000);
+        a.session
+            .audit_key_package_slot(&[], &["not a relay url".to_owned()])
+            .await
+            .expect("audit");
+        assert!(
+            take(&mut a).is_empty(),
+            "an unparseable empty-relay entry never matches"
+        );
+        assert_bundle_invariant(&a);
+    }
+
     /// The refill waits until the accepted current publication is a day
     /// old: an emptied read at one hour stages nothing.
     #[tokio::test(flavor = "current_thread")]

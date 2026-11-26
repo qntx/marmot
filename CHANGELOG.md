@@ -49,6 +49,11 @@ npm trusted publishing (OIDC).
 
 ### Fixed
 
+- `auditKeyPackageSlot`'s `emptyRelays` matching no longer depends on URL
+  spelling: entries and accepted publication targets compare as parsed
+  relay URLs (`nostr::types::RelayUrl`), so a host that reports
+  `wss://Relay.Example/` where the write set said `wss://relay.example`
+  still refills the emptied slot; entries that do not parse are ignored.
 - The pump now reconciles on `hydration_quarantined` and
   `hydration_recovered`: a quarantined copy's subscription is dropped and
   a recovered group's kind-445 subscription opens without waiting for an
