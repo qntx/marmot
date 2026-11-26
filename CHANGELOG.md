@@ -42,6 +42,8 @@ npm trusted publishing (OIDC).
 - `fetchEvents` returns `{ events, emptyRelays }` instead of the bare
   event array; empty-finished reads are distinguished from closed or
   timed-out ones.
+- Client cursor blob v3: it gains `floors`, so a v2 blob decodes as the
+  empty state (one full refetch at the next open, no migration).
 - Bridge protocol 9: ingest reports can carry the new availability cause
   `predates_local_copy` — a deferred kind-445 stamped before this copy's
   Welcome. The pump credits it like an accepted event; every other
@@ -49,6 +51,14 @@ npm trusted publishing (OIDC).
 
 ### Fixed
 
+- A gift wrap the signer refused or failed to open is no longer lost when
+  a later invite or message wrap is opened more than two days after it:
+  its inbox cursor stays below the unopened wrap (a sticky floor
+  persisted with the cursors), so it re-surfaces as `pending` after any
+  restart or `retryInvites()` until it is opened, permanently rejected,
+  or its `createdAt` is 30 days old. A signer that keeps refusing causes
+  no resubscription loop — replays happen only on `retryInvites()`, a
+  reconnect or a restart.
 - The pump now reconciles on `hydration_quarantined` and
   `hydration_recovered`: a quarantined copy's subscription is dropped and
   a recovered group's kind-445 subscription opens without waiting for an

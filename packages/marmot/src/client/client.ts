@@ -113,7 +113,7 @@ export class MarmotClient {
     try {
       state = decodeClientState(await options.cursors.load());
     } catch {
-      state = { cursors: {}, inbox: [], nip44Extended: false };
+      state = { cursors: {}, floors: {}, inbox: [], nip44Extended: false };
     }
     // The spec requires NIP-44 extended length of every signer a client uses: probe once per
     // client state, before anything opens, and cache the pass as `nip44Extended`.
@@ -189,6 +189,7 @@ export class MarmotClient {
     return this.pump.onGroupChange(listener);
   }
 
+  /** `joined` per installed Welcome; `pending` per refused/failed unwrap (see `InviteEvent`). */
   onInvite(listener: (event: InviteEvent) => void): () => void {
     return this.pump.onInvite(listener);
   }
@@ -610,9 +611,14 @@ export class MarmotClient {
   }
 
   /**
-   * Replay pending invites: close the kind-1059 inbox subscriptions and reopen them at the capped
+   * Replay pending invites: close the kind-1059 inbox subscriptions and reopen them at the floored
    * cursor, so the relays redeliver wraps the signer refused or failed to unwrap. The client stores
-   * no wraps; redelivery goes through the normal ingest path.
+   * no wraps, only each inbox key's floor (the earliest unopened wrap's `createdAt`, persisted with
+   * the cursors), so a refused invite re-surfaces as `pending` after any restart or this call until
+   * it is opened, permanently rejected, or its `createdAt` is 30 days old; redelivery goes through
+   * the normal ingest path, and a floor older than 30 days is dropped, so an invite left unopened
+   * that long is lost on this device. Nothing retries on its own: a signer that keeps refusing
+   * costs one replay per call, reconnect or restart.
    */
   async retryInvites(): Promise<void> {
     this.guard();

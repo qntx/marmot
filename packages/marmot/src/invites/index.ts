@@ -3,8 +3,9 @@
  * signer-refused/failed gift-wrap unwraps as retryable `pending` events, and `observeSigner`, which
  * records signer refusals/failures so client ops map them to typed errors. A refused or failed
  * unwrap is `unavailable` in the engine — rolled back and retryable — so the client emits `pending`
- * and offers `retryInvites`, which reopens the inbox subscriptions at the capped cursor and lets
- * the relays replay the wraps. A `SignerInvalidPayloadError` unwrap is a successful signer
+ * and holds that inbox cursor under the wrap (a sticky floor in the client state), so it
+ * re-surfaces after any restart or `retryInvites` until it is opened, permanently rejected, or its
+ * `createdAt` is 30 days old. A `SignerInvalidPayloadError` unwrap is a successful signer
  * invocation whose verdict is on the payload: the engine rejects the wrap permanently, so it is
  * neither a `pending` condition nor a recorded verdict.
  */
@@ -13,6 +14,13 @@ import { SignerInvalidPayloadError, SignerRefusedError } from "../backend/engine
 import type { Signer } from "../backend/engine.ts";
 import type { InputReport } from "../backend/protocol.ts";
 
+/**
+ * `joined`: a Welcome was installed. `pending`: the signer refused or failed to open a gift wrap;
+ * nothing is stored but the wrap's inbox cursor floor, so the same invite re-surfaces as `pending`
+ * after any restart or `retryInvites()` until it is opened (`joined`), permanently rejected, or its
+ * `createdAt` is 30 days old (`DEFERRED_PEEL_RESIDENCE_SECS`) — then it is given up and never
+ * replayed again by this device.
+ */
 export type InviteEvent =
   | { type: "joined"; group: string }
   | { type: "pending"; reason: "signer_refused" | "signer_failed" };
@@ -57,8 +65,8 @@ export function observeSigner(signer: Signer): {
 
 /**
  * One `pending` invite per distinct signer-unavailable reason among `reports`. The wraps stay
- * undelivered — any `unavailable` report except `predates_local_copy` caps its cursor at its
- * earliest `createdAt − 1`, so a reopened subscription replays them.
+ * undelivered — the pump holds each one's inbox cursor under it (a sticky floor), so a reopened
+ * subscription replays them; the pump leaves out wraps it has given up on (30 days old).
  */
 export function pendingInvites(reports: InputReport[]): InviteEvent[] {
   const reasons = new Set<"signer_refused" | "signer_failed">();

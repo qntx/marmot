@@ -480,7 +480,12 @@ describe("malicious relay", () => {
     const key = groupCursorKey(ROUTE, RELAY);
     const fixture = await open(
       script,
-      encodeClientState({ nip44Extended: true, cursors: { [key]: 10_000 }, inbox: [RELAY] }),
+      encodeClientState({
+        floors: {},
+        nip44Extended: true,
+        cursors: { [key]: 10_000 },
+        inbox: [RELAY],
+      }),
     );
     await settle(fixture.timer, 5000);
     const sub = mustSub(groupSubs(fixture.network));
@@ -512,7 +517,7 @@ describe("malicious relay", () => {
     script.groups = [snapshot()];
     const fixture = await open(
       script,
-      encodeClientState({ nip44Extended: true, cursors: {}, inbox: [RELAY] }),
+      encodeClientState({ floors: {}, nip44Extended: true, cursors: {}, inbox: [RELAY] }),
     );
     await settle(fixture.timer, 5000);
     const sub = mustSub(groupSubs(fixture.network));
@@ -540,7 +545,7 @@ describe("malicious relay", () => {
     const key = groupCursorKey(ROUTE, RELAY);
     const fixture = await open(
       script,
-      encodeClientState({ nip44Extended: true, cursors: { [key]: 500 }, inbox: [] }),
+      encodeClientState({ floors: {}, nip44Extended: true, cursors: { [key]: 500 }, inbox: [] }),
     );
     await settle(fixture.timer, 5000);
     const sub = mustSub(groupSubs(fixture.network));
@@ -568,7 +573,12 @@ describe("malicious relay", () => {
     const key = inboxCursorKey(RELAY);
     const fixture = await open(
       script,
-      encodeClientState({ nip44Extended: true, cursors: { [key]: 200_000 }, inbox: [RELAY] }),
+      encodeClientState({
+        floors: {},
+        nip44Extended: true,
+        cursors: { [key]: 200_000 },
+        inbox: [RELAY],
+      }),
     );
     await settle(fixture.timer, 5000);
     const sub = mustSub(inboxSubs(fixture.network));
@@ -596,7 +606,7 @@ describe("malicious relay", () => {
     const key = groupCursorKey(ROUTE, RELAY);
     const fixture = await open(
       script,
-      encodeClientState({ nip44Extended: true, cursors: { [key]: 500 }, inbox: [] }),
+      encodeClientState({ floors: {}, nip44Extended: true, cursors: { [key]: 500 }, inbox: [] }),
     );
     await settle(fixture.timer, 5000);
     const sub = mustSub(groupSubs(fixture.network));
@@ -625,7 +635,7 @@ describe("malicious relay", () => {
     const key = groupCursorKey(ROUTE, RELAY);
     const fixture = await open(
       script,
-      encodeClientState({ nip44Extended: true, cursors: { [key]: 500 }, inbox: [] }),
+      encodeClientState({ floors: {}, nip44Extended: true, cursors: { [key]: 500 }, inbox: [] }),
     );
     await settle(fixture.timer, 5000);
     const sub = mustSub(groupSubs(fixture.network));
@@ -670,7 +680,7 @@ describe("malicious relay", () => {
     const key = groupCursorKey(ROUTE, RELAY);
     const fixture = await open(
       script,
-      encodeClientState({ nip44Extended: true, cursors: { [key]: 500 }, inbox: [] }),
+      encodeClientState({ floors: {}, nip44Extended: true, cursors: { [key]: 500 }, inbox: [] }),
     );
     await settle(fixture.timer, 5000);
     const sub = mustSub(groupSubs(fixture.network));
@@ -707,7 +717,12 @@ describe("malicious relay", () => {
     const script = freshScript();
     script.groups = [snapshot()];
     const key = groupCursorKey(ROUTE, RELAY);
-    const seeded = encodeClientState({ nip44Extended: true, cursors: { [key]: 500 }, inbox: [] });
+    const seeded = encodeClientState({
+      floors: {},
+      nip44Extended: true,
+      cursors: { [key]: 500 },
+      inbox: [],
+    });
     const fixture = await open(script, seeded);
     await settle(fixture.timer, 5000);
     const sub = mustSub(groupSubs(fixture.network));
@@ -726,7 +741,7 @@ describe("malicious relay", () => {
     const key = groupCursorKey(ROUTE, RELAY);
     const fixture = await open(
       script,
-      encodeClientState({ nip44Extended: true, cursors: { [key]: 500 }, inbox: [] }),
+      encodeClientState({ floors: {}, nip44Extended: true, cursors: { [key]: 500 }, inbox: [] }),
     );
     await settle(fixture.timer, 5000);
     const sub = mustSub(groupSubs(fixture.network));
@@ -745,7 +760,7 @@ describe("malicious relay", () => {
     script.groups = [snapshot([RELAY, RELAY2])];
     const fixture = await open(
       script,
-      encodeClientState({ nip44Extended: true, cursors: {}, inbox: [] }),
+      encodeClientState({ floors: {}, nip44Extended: true, cursors: {}, inbox: [] }),
     );
     await settle(fixture.timer, 5000);
     const history = (): BridgeRequest[] =>
@@ -776,7 +791,7 @@ describe("malicious relay", () => {
     const key = groupCursorKey(ROUTE, RELAY);
     const fixture = await open(
       script,
-      encodeClientState({ nip44Extended: true, cursors: { [key]: 500 }, inbox: [] }),
+      encodeClientState({ floors: {}, nip44Extended: true, cursors: { [key]: 500 }, inbox: [] }),
     );
     await settle(fixture.timer, 5000);
     const sub = mustSub(groupSubs(fixture.network));
@@ -794,7 +809,7 @@ describe("malicious relay", () => {
     const key = groupCursorKey(ROUTE, RELAY);
     const fixture = await open(
       script,
-      encodeClientState({ nip44Extended: true, cursors: { [key]: 500 }, inbox: [] }),
+      encodeClientState({ floors: {}, nip44Extended: true, cursors: { [key]: 500 }, inbox: [] }),
     );
     await settle(fixture.timer, 5000);
     const sub = mustSub(groupSubs(fixture.network));
@@ -825,7 +840,7 @@ describe("malicious relay", () => {
     const key = groupCursorKey(ROUTE, RELAY);
     const fixture = await open(
       script,
-      encodeClientState({ nip44Extended: true, cursors: { [key]: 5000 }, inbox: [] }),
+      encodeClientState({ floors: {}, nip44Extended: true, cursors: { [key]: 5000 }, inbox: [] }),
     );
     await settle(fixture.timer, 5000);
     const sub = mustSub(groupSubs(fixture.network));
@@ -844,7 +859,12 @@ describe("malicious relay", () => {
     const key2 = groupCursorKey(ROUTE, RELAY2);
     const fixture = await open(
       script,
-      encodeClientState({ nip44Extended: true, cursors: { [key1]: 500, [key2]: 500 }, inbox: [] }),
+      encodeClientState({
+        floors: {},
+        nip44Extended: true,
+        cursors: { [key1]: 500, [key2]: 500 },
+        inbox: [],
+      }),
     );
     await settle(fixture.timer, 5000);
     const subs = groupSubs(fixture.network);
@@ -873,7 +893,7 @@ describe("malicious relay", () => {
     const key = groupCursorKey(ROUTE, RELAY);
     const fixture = await open(
       script,
-      encodeClientState({ nip44Extended: true, cursors: { [key]: 500 }, inbox: [] }),
+      encodeClientState({ floors: {}, nip44Extended: true, cursors: { [key]: 500 }, inbox: [] }),
     );
     await settle(fixture.timer, 5000);
     const sub = mustSub(groupSubs(fixture.network));
@@ -892,7 +912,7 @@ describe("malicious relay", () => {
     const key = groupCursorKey(ROUTE, RELAY);
     const fixture = await open(
       script,
-      encodeClientState({ nip44Extended: true, cursors: { [key]: 500 }, inbox: [] }),
+      encodeClientState({ floors: {}, nip44Extended: true, cursors: { [key]: 500 }, inbox: [] }),
     );
     await settle(fixture.timer, 5000);
     const sub = mustSub(groupSubs(fixture.network));
@@ -919,7 +939,7 @@ describe("malicious relay", () => {
     const key = groupCursorKey(ROUTE, RELAY);
     const fixture = await open(
       script,
-      encodeClientState({ nip44Extended: true, cursors: { [key]: 5000 }, inbox: [] }),
+      encodeClientState({ floors: {}, nip44Extended: true, cursors: { [key]: 5000 }, inbox: [] }),
     );
     await settle(fixture.timer, 5000);
     const sub = mustSub(groupSubs(fixture.network));
@@ -951,7 +971,12 @@ describe("malicious relay", () => {
     const key = inboxCursorKey(RELAY);
     const fixture = await open(
       script,
-      encodeClientState({ nip44Extended: true, cursors: { [key]: 200_000 }, inbox: [RELAY] }),
+      encodeClientState({
+        floors: {},
+        nip44Extended: true,
+        cursors: { [key]: 200_000 },
+        inbox: [RELAY],
+      }),
       { ...signer(), nip44Decrypt: async () => Promise.reject(new SignerInvalidPayloadError()) },
     );
     const invites: unknown[] = [];
@@ -987,6 +1012,7 @@ describe("malicious relay", () => {
     const fixture = await open(
       script,
       encodeClientState({
+        floors: {},
         nip44Extended: true,
         cursors: { [honestKey]: 400, [hostileKey]: 400 },
         inbox: [],
@@ -1033,7 +1059,7 @@ describe("malicious relay", () => {
     const key = groupCursorKey(ROUTE, RELAY);
     const fixture = await open(
       script,
-      encodeClientState({ nip44Extended: true, cursors: { [key]: 500 }, inbox: [] }),
+      encodeClientState({ floors: {}, nip44Extended: true, cursors: { [key]: 500 }, inbox: [] }),
     );
     await settle(fixture.timer, 5000);
     const sub = mustSub(groupSubs(fixture.network));
@@ -1058,7 +1084,12 @@ describe("malicious relay", () => {
     const key = inboxCursorKey(RELAY);
     const fixture = await open(
       script,
-      encodeClientState({ nip44Extended: true, cursors: { [key]: 100 }, inbox: [RELAY] }),
+      encodeClientState({
+        floors: {},
+        nip44Extended: true,
+        cursors: { [key]: 100 },
+        inbox: [RELAY],
+      }),
     );
     await settle(fixture.timer, 5000);
     const sub = mustSub(inboxSubs(fixture.network));
@@ -1082,7 +1113,12 @@ describe("malicious relay", () => {
     const key = inboxCursorKey(RELAY);
     const fixture = await open(
       script,
-      encodeClientState({ nip44Extended: true, cursors: { [key]: 100 }, inbox: [RELAY] }),
+      encodeClientState({
+        floors: {},
+        nip44Extended: true,
+        cursors: { [key]: 100 },
+        inbox: [RELAY],
+      }),
     );
     await settle(fixture.timer, 5000);
     const sub = mustSub(inboxSubs(fixture.network));
@@ -1112,7 +1148,12 @@ describe("malicious relay", () => {
     const key = inboxCursorKey(RELAY);
     const fixture = await open(
       script,
-      encodeClientState({ nip44Extended: true, cursors: { [key]: 100 }, inbox: [RELAY] }),
+      encodeClientState({
+        floors: {},
+        nip44Extended: true,
+        cursors: { [key]: 100 },
+        inbox: [RELAY],
+      }),
     );
     await settle(fixture.timer, 5000);
     const sub = mustSub(inboxSubs(fixture.network));
@@ -1142,7 +1183,7 @@ describe("malicious relay", () => {
     script.groups = [snapshot()];
     const fixture = await open(
       script,
-      encodeClientState({ nip44Extended: true, cursors: {}, inbox: [RELAY] }),
+      encodeClientState({ floors: {}, nip44Extended: true, cursors: {}, inbox: [RELAY] }),
     );
     await settle(fixture.timer, 5000);
     const wrapSub = mustSub(inboxSubs(fixture.network));
@@ -1168,7 +1209,7 @@ describe("malicious relay", () => {
     const key = groupCursorKey(ROUTE, RELAY);
     const fixture = await open(
       script,
-      encodeClientState({ nip44Extended: true, cursors: { [key]: 1000 }, inbox: [] }),
+      encodeClientState({ floors: {}, nip44Extended: true, cursors: { [key]: 1000 }, inbox: [] }),
     );
     await settle(fixture.timer, 5000);
     const sub = mustSub(groupSubs(fixture.network));
@@ -1213,6 +1254,7 @@ describe("malicious relay", () => {
     const fixture = await open(
       script,
       encodeClientState({
+        floors: {},
         nip44Extended: true,
         cursors: { [groupKey1]: 1000, [groupKey2]: 1000, [inboxKey]: 500 },
         inbox: [RELAY],
@@ -1271,6 +1313,7 @@ describe("malicious relay", () => {
     const fixture = await open(
       script,
       encodeClientState({
+        floors: {},
         nip44Extended: true,
         cursors: { [groupCursorKey(ROUTE, RELAY)]: 1000 },
         inbox: [],
@@ -1326,7 +1369,7 @@ describe("malicious relay", () => {
     script.groups = [snapshot()];
     const fixture = await open(
       script,
-      encodeClientState({ nip44Extended: true, cursors: {}, inbox: [] }),
+      encodeClientState({ floors: {}, nip44Extended: true, cursors: {}, inbox: [] }),
     );
     await settle(fixture.timer, 5000);
     const changes: string[] = [];
@@ -1345,7 +1388,7 @@ describe("malicious relay", () => {
     script.groups = [snapshot()];
     const fixture = await open(
       script,
-      encodeClientState({ nip44Extended: true, cursors: {}, inbox: [] }),
+      encodeClientState({ floors: {}, nip44Extended: true, cursors: {}, inbox: [] }),
     );
     await settle(fixture.timer, 5000);
     const changes: string[] = [];

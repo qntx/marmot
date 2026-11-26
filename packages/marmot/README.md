@@ -65,6 +65,17 @@ the account's leaves exactly once. `open` also audits the device's own
 `KeyPackage` slot daily, outranking any foreign publication of the same
 slot.
 
+## Invites
+
+`onInvite` reports `joined` when a Welcome installs and `pending` when the
+signer refused or failed to open a gift wrap. The client stores no wraps,
+only a per-inbox-relay floor in its cursor state, so a refused invite
+re-surfaces as `pending` after any restart or `retryInvites()` until it is
+opened, permanently rejected, or its `createdAt` is 30 days old — after
+that it is given up on this device. Nothing retries on its own: call
+`retryInvites()` once the signer is available again (an unlocked
+extension, an approved remote signer).
+
 A White Noise device of the same account lists each Meowl device as an
 unrecognized sign-in; tell users to answer "Not now" there — "This
 wasn't me" makes White Noise warn that the account's key may be
