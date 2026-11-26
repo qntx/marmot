@@ -1,6 +1,6 @@
 {
   "name": "@qntx/marmot",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Marmot (MLS over Nostr) SDK for web, iOS and Android",
   "keywords": [
     "marmot",

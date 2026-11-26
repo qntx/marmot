@@ -11,6 +11,8 @@ npm trusted publishing (OIDC).
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-26
+
 ### Added
 
 - Emptied-slot refill: a write relay that accepted this device's current

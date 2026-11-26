@@ -16,7 +16,7 @@ publish      = false
 workspace = true
 
 [dependencies]
-mk-core                    = { path = "../mk-core", version = "=0.2.0", features = ["testing"] }
+mk-core                    = { path = "../mk-core", version = "=0.3.0", features = ["testing"] }
 async-trait                = "0.1"
 cgka-conformance-simulator = { git = "https://github.com/marmot-protocol/mdk", rev = "34646a577807f2b112ee031f3c164ec58aa18b64", version = "=0.18.0" }
 cgka-traits                = { git = "https://github.com/marmot-protocol/mdk", rev = "34646a577807f2b112ee031f3c164ec58aa18b64", version = "=0.18.0" }

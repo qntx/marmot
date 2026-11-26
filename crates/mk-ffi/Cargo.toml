@@ -21,13 +21,13 @@ default = []
 test-panic = []
 
 [dependencies]
-mk-bridge = { path = "../mk-bridge", version = "=0.2.0" }
+mk-bridge = { path = "../mk-bridge", version = "=0.3.0" }
 tokio     = { workspace = true }
 
 [dev-dependencies]
 cbindgen   = "=0.29.4"
 hex        = { workspace = true }
-mk-core    = { path = "../mk-core", version = "=0.2.0", features = ["testing"] }
+mk-core    = { path = "../mk-core", version = "=0.3.0", features = ["testing"] }
 serde_json = { workspace = true }
 
 [lints]
