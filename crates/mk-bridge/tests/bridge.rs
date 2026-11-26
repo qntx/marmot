@@ -1272,6 +1272,98 @@ async fn signer_invalid_payload() {
     );
 }
 
+/// Every `signer_pending` batch lists only requests still waiting on the
+/// host: once a reply is consumed the request is done — a later batch for
+/// the same operation must not re-list it. The gift-wrap unwrap suspends
+/// twice (outer wrap decrypt, then seal decrypt), so it is the smallest
+/// two-suspension op.
+#[tokio::test(flavor = "current_thread")]
+async fn signer_pending_lists_only_outstanding_requests() {
+    let mut relay = FakeRelay::new();
+
+    let mut a = Member::new();
+    a.open().await;
+    a.publish_identity(&mut relay).await;
+
+    let mut b = Member::new();
+    b.open().await;
+    b.publish_identity(&mut relay).await;
+    let response = a
+        .call(Request::CreateGroup(CreateGroupRequest {
+            name: "g".to_owned(),
+            description: String::new(),
+            relays: vec![RELAY.to_owned()],
+            invitees: vec![Invitee {
+                key_package: key_package_of(&relay, &b.account_hex()),
+                inbox_relays: vec![RELAY.to_owned()],
+            }],
+            own_devices: Vec::new(),
+            admins: Vec::new(),
+            components: Vec::new(),
+        }))
+        .await;
+    assert!(
+        matches!(response, Response::Ok { .. }),
+        "create: {response:?}"
+    );
+    a.publish(&mut relay).await;
+    let welcomes = welcomes_for(&relay, &b.account_hex());
+    assert_ne!(welcomes.len(), 0, "welcome published");
+
+    // First suspension: the outer wrap decrypt, alone.
+    let response = b.call_once(Request::Ingest(IngestRequest { events: welcomes }));
+    let Response::SignerPending { requests: first } = response else {
+        panic!("welcome ingest suspends on nip44: {response:?}")
+    };
+    assert_eq!(first.len(), 1, "first batch is the wrap decrypt: {first:?}");
+    assert!(
+        matches!(&first[0].op, SignerOp::Nip44Decrypt { .. }),
+        "first batch is a decrypt: {first:?}"
+    );
+
+    // Second suspension: the seal decrypt — and nothing else.
+    let replies = vec![SignerReply {
+        id: first[0].id,
+        result: b.answer(&first[0].op).await,
+    }];
+    let response = b.call_once(Request::SignerReply(SignerReplyRequest { replies }));
+    let Response::SignerPending { requests: second } = response else {
+        panic!("seal decrypt suspends too: {response:?}")
+    };
+    assert_eq!(
+        second.len(),
+        1,
+        "the second batch lists only the new request: {second:?}"
+    );
+    assert_ne!(
+        second[0].id, first[0].id,
+        "the answered request must not resurface: {second:?}"
+    );
+    assert!(
+        matches!(&second[0].op, SignerOp::Nip44Decrypt { .. }),
+        "second batch is the seal decrypt: {second:?}"
+    );
+
+    // Answering the seal decrypt completes the join.
+    let replies = vec![SignerReply {
+        id: second[0].id,
+        result: b.answer(&second[0].op).await,
+    }];
+    let response = b.call_once(Request::SignerReply(SignerReplyRequest { replies }));
+    let Response::Ok { result } = response else {
+        panic!("welcome joins after both decrypts: {response:?}")
+    };
+    let OpResult::Ingested(IngestedResult { reports }) = *result else {
+        panic!()
+    };
+    assert!(
+        reports
+            .iter()
+            .all(|report| matches!(report.outcome, InputOutcome::Accepted)),
+        "welcome accepted: {reports:?}"
+    );
+}
+
 /// Ingest order invariance: the same backlog delivered ascending,
 /// descending and deterministically shuffled converges to identical
 /// snapshots and message sets.
