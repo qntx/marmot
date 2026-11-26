@@ -11,6 +11,15 @@ npm trusted publishing (OIDC).
 
 ## [Unreleased]
 
+### Fixed
+
+- `signer_pending` no longer re-lists requests whose replies the
+  suspended operation already consumed: each batch now carries only
+  requests still waiting on the host. Previously every later batch
+  re-listed all earlier ones, so hosts re-ran signer calls — one extra
+  NIP-44 decrypt per gift-wrap unwrap and repeated signs on multi-sign
+  operations.
+
 ## [0.3.0] - 2026-11-26
 
 ### Added

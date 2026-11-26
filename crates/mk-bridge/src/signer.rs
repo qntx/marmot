@@ -18,7 +18,8 @@ use crate::protocol::{SignerOp, SignerRequest, SignerResult};
 #[derive(Debug, Default)]
 pub(crate) struct SignerState {
     next_id: u32,
-    /// Registered requests, in registration order.
+    /// Outstanding requests — registered and not yet consumed by the
+    /// suspended future — in registration order.
     pub(crate) pending: BTreeMap<u32, SignerOp>,
     /// Stored replies awaiting consumption by the suspended future.
     replies: BTreeMap<u32, SignerResult>,
@@ -37,6 +38,15 @@ impl SignerState {
     /// Store a reply the bridge validated for `id`.
     pub(crate) fn answer(&mut self, id: u32, result: SignerResult) {
         self.replies.insert(id, result);
+    }
+
+    /// Take the stored reply for `id`, retiring the request.
+    fn consume(&mut self, id: u32) -> Option<SignerResult> {
+        let reply = self.replies.remove(&id);
+        if reply.is_some() {
+            self.pending.remove(&id);
+        }
+        reply
     }
 
     /// Whether `id` names a registered request not yet answered.
@@ -91,7 +101,7 @@ impl QueueSigner {
             });
         };
         Box::pin(poll_fn(move |_| {
-            let reply = lock(&state).replies.remove(&id);
+            let reply = lock(&state).consume(id);
             reply.map_or_else(|| Poll::Pending, |result| Poll::Ready(map(result)))
         }))
     }
