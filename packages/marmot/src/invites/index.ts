@@ -5,9 +5,10 @@
  * unwrap is `unavailable` in the engine — rolled back and retryable — so the client emits `pending`
  * and holds that inbox cursor under the wrap (a sticky floor in the client state), so it
  * re-surfaces after any restart or `retryInvites` until it is opened, permanently rejected, or its
- * `createdAt` is 30 days old. A `SignerInvalidPayloadError` unwrap is a successful signer
- * invocation whose verdict is on the payload: the engine rejects the wrap permanently, so it is
- * neither a `pending` condition nor a recorded verdict.
+ * `createdAt` is 30 days old. Under a host-owned inbox no floor exists — the `pending` event is the
+ * whole signal and re-delivery is the host re-forwarding the wrap. A `SignerInvalidPayloadError`
+ * unwrap is a successful signer invocation whose verdict is on the payload: the engine rejects the
+ * wrap permanently, so it is neither a `pending` condition nor a recorded verdict.
  */
 
 import { SignerInvalidPayloadError, SignerRefusedError } from "../backend/engine.ts";
@@ -64,9 +65,11 @@ export function observeSigner(signer: Signer): {
 }
 
 /**
- * One `pending` invite per distinct signer-unavailable reason among `reports`. The wraps stay
- * undelivered — the pump holds each one's inbox cursor under it (a sticky floor), so a reopened
- * subscription replays them; the pump leaves out wraps it has given up on (30 days old).
+ * One `pending` invite per distinct signer-unavailable reason among `reports`. On the subscription
+ * path the wraps stay undelivered — the pump holds each one's inbox cursor under it (a sticky
+ * floor), so a reopened subscription replays them; the pump leaves out wraps it has given up on (30
+ * days old). A host-forwarded wrap (`Pump.ingestWrap`) reports all of them: no floor exists there —
+ * re-delivery is the host re-forwarding the wrap.
  */
 export function pendingInvites(reports: InputReport[]): InviteEvent[] {
   const reasons = new Set<"signer_refused" | "signer_failed">();

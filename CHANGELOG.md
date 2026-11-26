@@ -11,6 +11,26 @@ npm trusted publishing (OIDC).
 
 ## [Unreleased]
 
+### Added
+
+- Host-owned inbox (`inbox: "host"`): for a host that already runs the
+  account's NIP-17 inbox, the client opens no kind-1059 subscription and
+  keeps no inbox cursors or floors; the host unwraps wraps itself and
+  forwards each one whose rumor is kind 444 to `MarmotClient.ingestWrap`,
+  which verifies and peels the untouched wrap through the same ingest
+  path a subscription-delivered wrap takes.
+
+### Changed (BREAKING)
+
+- `MarmotClient.open` requires `inbox: "client" | "host"`.
+- Client state blob v4 records the inbox owner (`inbox`) and renames the
+  relay-list field `inbox` to `inboxRelays`; a v3 or otherwise
+  undecodable blob decodes as the empty state — one full refetch and one
+  signer probe at the next open. Reopening in the other mode rejects at
+  open with the new `MarmotErrorKind` `wrong_inbox_owner`, which also
+  answers `retryInvites()`, `publishInboxRelays()` and `ingestWrap()`
+  calls made in the wrong mode.
+
 ### Fixed
 
 - `signer_pending` no longer re-lists requests whose replies the

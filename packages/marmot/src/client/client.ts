@@ -22,10 +22,12 @@ import type {
   ComponentUpdate,
   GroupAvatar,
   GroupSnapshot,
+  InputReport,
   Invitee,
   KeyPackageStatusResult,
   SignOutResult,
   MediaReference,
+  NostrEvent,
   ReaddOutcome,
   RejoinOffer,
   SendOutcome,
@@ -39,13 +41,14 @@ import { KEY_PACKAGE_KIND, lookupInvitees, writeRelaysOf } from "../keys/index.t
 import type { CursorStore, KvDriver } from "../storage/driver.ts";
 import { fetchEvents } from "../transport/fetch.ts";
 import type { RelayPort, Timer } from "../transport/index.ts";
-import { safeMediaUrl, safeRelayUrl } from "../transport/index.ts";
+import { GIFT_WRAP_KIND, safeMediaUrl, safeRelayUrl, wireEventBytes } from "../transport/index.ts";
+import { verifyInbound } from "../transport/verify.ts";
 import { MarmotError, toMarmotError } from "./errors.ts";
 import type { MarmotErrorKind } from "./errors.ts";
-import { Pump } from "./pump.ts";
+import { MAX_INBOUND_EVENT_BYTES, Pump } from "./pump.ts";
 import type { ClientMessage, DeliveryEvent, DropEvent, GroupEvent } from "./pump.ts";
-import { decodeClientState, encodeClientState } from "./state.ts";
-import type { ClientState } from "./state.ts";
+import { decodeClientState, emptyClientState, encodeClientState } from "./state.ts";
+import type { ClientState, InboxOwner } from "./state.ts";
 
 export type MarmotClientOptions = {
   backend: Backend;
@@ -55,6 +58,14 @@ export type MarmotClientOptions = {
   clock: Clock;
   timer: Timer;
   relays: RelayPort;
+  /**
+   * Who owns the account's NIP-17 gift-wrap inbox. `"client"`: the pump opens the kind-1059
+   * subscriptions, tracks inbox cursors/floors and unwraps every wrap itself. `"host"`: the host
+   * runs its own NIP-17 inbox — no kind-1059 subscription ever opens — and forwards each wrap that
+   * unwrapped to a kind-444 rumor through `ingestWrap`. Recorded in the client state; a reopen in
+   * the other mode is rejected `wrong_inbox_owner`.
+   */
+  inbox: InboxOwner;
   /**
    * Read relays used to fetch this account's NIP-65 list for `ensureKeyPackage`. When non-empty,
    * `open` runs `ensureKeyPackage` once in the background (errors surface via `onError`).
@@ -109,12 +120,19 @@ export class MarmotClient {
 
   static async open(options: MarmotClientOptions): Promise<MarmotClient> {
     const observed = observeSigner(options.signer);
-    let state: ClientState;
+    let stored: ClientState | undefined;
     try {
-      state = decodeClientState(await options.cursors.load());
+      stored = decodeClientState(await options.cursors.load());
     } catch {
-      state = { cursors: {}, floors: {}, inbox: [], nip44Extended: false };
+      stored = undefined;
     }
+    // The stored state names its inbox owner; a reopen in the other mode is rejected before
+    // the probe and before the engine opens. Switching modes deliberately means clearing the
+    // CursorStore — an undecodable blob (v3 included) adopts the option's mode.
+    if (stored !== undefined && stored.inbox !== options.inbox) {
+      throw new MarmotError("wrong_inbox_owner");
+    }
+    let state: ClientState = stored ?? emptyClientState(options.inbox);
     // The spec requires NIP-44 extended length of every signer a client uses: probe once per
     // client state, before anything opens, and cache the pass as `nip44Extended`.
     if (!state.nip44Extended) {
@@ -355,9 +373,15 @@ export class MarmotClient {
 
   /**
    * Publish the account's NIP-17 inbox relay list; every relay must pass `safeRelayUrl`. Persists
-   * the list so reconcile subscribes for gift wraps.
+   * the list so reconcile subscribes for gift wraps. Client-owned inbox only: under `inbox: "host"`
+   * the host's own NIP-17 inbox owns the account's kind-10050 — publishing here would overwrite it
+   * — so the call rejects `wrong_inbox_owner` before any engine call.
    */
   async publishInboxRelays(relays: string[]): Promise<void> {
+    this.guard();
+    if (this.options.inbox === "host") {
+      throw new MarmotError("wrong_inbox_owner");
+    }
     for (const relay of relays) {
       if (!safeRelayUrl(relay, this.allowLoopback)) {
         throw new MarmotError("unsafe_relay");
@@ -611,6 +635,43 @@ export class MarmotClient {
   }
 
   /**
+   * Host-owned inbox only. The host unwrapped this kind-1059 event itself, saw a kind-444 rumor,
+   * and forwards the untouched wrap. The engine peels and validates it exactly as it does for a
+   * wrap delivered by its own subscription.
+   *
+   * The wrap goes through the serialized queue and the normal ingest path: the returned report is
+   * the wrap's own `InputReport` (`accepted` for a Welcome this device installs, `rejected{
+   * duplicate}` when the wrap was already ingested, `unavailable{signer_refused|signer_failed}`
+   * when the signer would not open it — the invite surfaces as `pending` and re-delivery is the
+   * host re-forwarding the wrap). Costs one extra NIP-59 unwrap (two signer NIP-44 decrypts) per
+   * forwarded Welcome — the host already paid the first — so hosts must forward only wraps whose
+   * rumor is kind 444. Session events (`joined`, `message_received`) dispatch after the ingest is
+   * durable. Non-1059 kinds, forged ids/signatures and events over the inbound size cap reject
+   * `invalid_input` without reaching the engine; `wrong_inbox_owner` when the client owns the
+   * inbox.
+   */
+  async ingestWrap(wrap: NostrEvent): Promise<InputReport> {
+    this.guard();
+    if (this.options.inbox !== "host") {
+      throw new MarmotError("wrong_inbox_owner");
+    }
+    if (
+      wrap.kind !== GIFT_WRAP_KIND ||
+      wrap.content.length > MAX_INBOUND_EVENT_BYTES ||
+      wireEventBytes(wrap) > MAX_INBOUND_EVENT_BYTES ||
+      !verifyInbound(wrap)
+    ) {
+      throw new MarmotError("invalid_input");
+    }
+    this.observed.take();
+    try {
+      return await this.pump.ingestWrap(wrap);
+    } catch (error) {
+      throw toMarmotError(error, this.observed.take());
+    }
+  }
+
+  /**
    * Replay pending invites: close the kind-1059 inbox subscriptions and reopen them at the floored
    * cursor, so the relays redeliver wraps the signer refused or failed to unwrap. The client stores
    * no wraps, only each inbox key's floor (the earliest unopened wrap's `createdAt`, persisted with
@@ -618,10 +679,14 @@ export class MarmotClient {
    * it is opened, permanently rejected, or its `createdAt` is 30 days old; redelivery goes through
    * the normal ingest path, and a floor older than 30 days is dropped, so an invite left unopened
    * that long is lost on this device. Nothing retries on its own: a signer that keeps refusing
-   * costs one replay per call, reconnect or restart.
+   * costs one replay per call, reconnect or restart. Client-owned inbox only — under `inbox:
+   * "host"` there is no inbox subscription and no floor, so the call rejects `wrong_inbox_owner`.
    */
   async retryInvites(): Promise<void> {
     this.guard();
+    if (this.options.inbox === "host") {
+      throw new MarmotError("wrong_inbox_owner");
+    }
     await this.pump.retryInvites();
   }
 

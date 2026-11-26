@@ -587,6 +587,7 @@ async function run(): Promise<void> {
       },
       timer,
       relays: nostrRelayPort(pool),
+      inbox: "client",
       lookupRelays: [url],
       allowLoopback: true,
     });

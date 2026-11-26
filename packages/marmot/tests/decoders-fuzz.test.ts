@@ -23,6 +23,7 @@ import type { KvBatch, Rows } from "../src/backend/kv.ts";
 import type { DrainResponse } from "../src/backend/protocol.ts";
 import { utf8Encode } from "../src/backend/utf8.ts";
 import { decodeClientState, encodeClientState } from "../src/client/state.ts";
+import type { ClientState } from "../src/client/state.ts";
 
 const VECTORS = join(import.meta.dirname, "..", "..", "..", "vectors", "bridge");
 
@@ -122,6 +123,14 @@ function kvOp(pick: (n: number) => number, i: number): KvBatch["ops"][number] {
 
 const nonNegativeInteger = (value: number): boolean => Number.isInteger(value) && value >= 0;
 
+/** `undefined` (rejected input) or a state whose fields are all well-formed. */
+const wellFormedState = (state: ClientState | undefined): boolean =>
+  state === undefined ||
+  (Object.values(state.cursors).every(nonNegativeInteger) &&
+    Object.values(state.floors).every(nonNegativeInteger) &&
+    (state.inbox === "client" || state.inbox === "host") &&
+    state.inboxRelays.every((relay) => typeof relay === "string"));
+
 const ROW_SEED = 0x5eed01;
 const BATCH_SEED = 0x5eed02;
 const STATE_SEED = 0x5eed03;
@@ -194,7 +203,8 @@ describe("decoder fuzz", () => {
       encodeClientState({
         cursors: { [`group|${pick(100)}|r`]: pick(2_000_000_000) },
         floors: { [`inbox|wss://r${pick(9)}.example`]: pick(2_000_000_000) },
-        inbox: [`wss://r${pick(9)}.example`],
+        inbox: "client",
+        inboxRelays: [`wss://r${pick(9)}.example`],
         nip44Extended: true,
       }),
     );
@@ -202,15 +212,7 @@ describe("decoder fuzz", () => {
       decodeClientState(source(pick, valid, i, 64)),
     );
     expect(states).toHaveLength(ITERATIONS);
-    expect(states.every((state) => Object.values(state.cursors).every(nonNegativeInteger))).toBe(
-      true,
-    );
-    expect(states.every((state) => Object.values(state.floors).every(nonNegativeInteger))).toBe(
-      true,
-    );
-    expect(states.every((state) => state.inbox.every((relay) => typeof relay === "string"))).toBe(
-      true,
-    );
+    expect(states.every(wellFormedState)).toBe(true);
   });
 
   test("bridge response decoders throw only DecodeError", () => {

@@ -44,6 +44,7 @@ describe("outbound retry soak (release wasm)", () => {
         clock,
         timer,
         relays: port,
+        inbox: "client",
         allowLoopback: false,
       });
       try {

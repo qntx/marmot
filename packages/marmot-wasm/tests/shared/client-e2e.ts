@@ -19,6 +19,7 @@ import type {
   ClientMessage,
   DeliveryEvent,
   GroupEvent,
+  InboxOwner,
   InviteEvent,
   MarmotErrorKind,
   RelayFilter,
@@ -84,6 +85,10 @@ export type ClientHandle = {
   skew: Skew;
   stores: Stores;
   timer: CountingTimer;
+  /** The inbox owner every instance opens with (`"client"` unless the scenario overrides). */
+  inbox: InboxOwner;
+  /** The NIP-65 lookup relays every instance opens with; `[]` skips the background ensure. */
+  lookupRelays: string[];
   network: FakeRelayNetwork;
   received: ClientMessage[];
   invites: InviteEvent[];
@@ -110,6 +115,9 @@ export type StartOptions = {
   signer?: Signer;
   skew?: Skew;
   port?: RelayPort;
+  inbox?: InboxOwner;
+  /** Defaults to `[LOOKUP]`; an empty list disables `open`'s background `ensureKeyPackage`. */
+  lookupRelays?: string[];
   onMessages?: MessageHandler;
 };
 
@@ -123,6 +131,8 @@ export async function startClient(options: StartOptions): Promise<ClientHandle> 
     skew: options.skew ?? { offsetMs: 0 },
     stores: options.stores ?? freshStores(),
     timer: countingTimer(),
+    inbox: options.inbox ?? "client",
+    lookupRelays: options.lookupRelays ?? [LOOKUP],
     network: options.network,
     received: [],
     invites: [],
@@ -149,7 +159,8 @@ async function openInstance(handle: HandleSeed): Promise<MarmotClient> {
     clock: e2eClock(handle.skew),
     timer: handle.timer,
     relays: handle.port ?? handle.network.port(handle.portName),
-    lookupRelays: [LOOKUP],
+    inbox: handle.inbox,
+    lookupRelays: handle.lookupRelays,
     allowLoopback: false,
   });
   client.onMessages(async (batch) => {
@@ -686,7 +697,7 @@ export async function scenarioCatchup(): Promise<CatchupReport> {
   if (persisted === undefined) {
     throw new Error("b persisted no cursor blob");
   }
-  const { cursors } = decodeClientState(persisted);
+  const cursors = decodeClientState(persisted)?.cursors ?? {};
   let groupCursorKeys = 0;
   for (const [key, cursor] of Object.entries(cursors)) {
     if (!key.startsWith("group|")) {
@@ -1088,7 +1099,7 @@ export async function scenarioPreJoinCursor(): Promise<ScenarioReport> {
     return (
       sub !== undefined &&
       bytes !== undefined &&
-      decodeClientState(bytes).cursors[`group|${route}|${sub.relay}`] !== undefined
+      decodeClientState(bytes)?.cursors[`group|${route}|${sub.relay}`] !== undefined
     );
   }, "c saved a group cursor for the route");
 

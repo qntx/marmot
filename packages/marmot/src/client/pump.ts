@@ -8,6 +8,12 @@
  * mid-replay cannot persist a cursor past events never received. A wrap the signer refused or
  * failed to open sets its inbox key's sticky floor (`ClientState.floors`), which holds that cursor
  * below the wrap across later batches and restarts until a covering replay settles it.
+ *
+ * When the client state names the host as inbox owner (`ClientState.inbox === "host"`) none of that
+ * exists: the plan never carries a kind-1059 subscription, no `inbox|` cursor key or floor is ever
+ * written, and wraps reach the engine only through `ingestWrap` — a forwarded wrap the host already
+ * peeled once, ingested through the same serialized queue with no cursor credit, no floor and no
+ * wrap budget (replay is the host's job: it re-forwards the wrap).
  */
 
 import type { Clock, Engine } from "../backend/engine.ts";
@@ -312,7 +318,7 @@ export class Pump {
 
   /** Set the persisted inbox relay list: persist, then reconcile on the next op. */
   setInbox(relays: string[]): void {
-    this.state.inbox = [...relays];
+    this.state.inboxRelays = [...relays];
     this.scheduleSave();
     this.reconcileFlag = true;
   }
@@ -326,7 +332,9 @@ export class Pump {
    * Close every active kind-1059 subscription and reconcile, so the inbox subscriptions reopen with
    * `since` taken from the floored cursor (a signer-unavailable wrap holds its key at `createdAt −
    * 1` until a covering replay settles it) and the relays replay the withheld wraps. Stores no
-   * wraps; never runs on its own — only on this call, a reconnect or a restart.
+   * wraps; never runs on its own — only on this call, a reconnect or a restart. Client-owned inbox
+   * only: `MarmotClient.retryInvites` rejects `wrong_inbox_owner` before reaching the pump when the
+   * host owns the inbox.
    */
   async retryInvites(): Promise<void> {
     await this.run(async () => {
@@ -339,6 +347,28 @@ export class Pump {
       this.reconcileFlag = true;
       await Promise.resolve();
     }, false);
+  }
+
+  /**
+   * Host-owned inbox only: ingest one forwarded kind-1059 wrap through the serialized queue — the
+   * engine peels it exactly like a wrap its own subscription delivered. A signer-unavailable
+   * outcome emits `pending` (there is no floor, no cursor credit and no given-up horizon: the host
+   * owns replay by re-forwarding the wrap); the report resolves once the ingest is durable and
+   * session events (`group_joined`, `message_received`) dispatch on the run's normal drain.
+   */
+  async ingestWrap(wrap: NostrEvent): Promise<InputReport> {
+    return this.run(async () => {
+      const reports = await this.engine.ingest([wrap]);
+      for (const invite of pendingInvites(reports)) {
+        this.emitInvite(invite);
+      }
+      await this.engine.whenDurable();
+      const report = reports.find((entry) => entry.event === wrap.id);
+      if (report === undefined) {
+        throw new MarmotError("engine", "missing_report");
+      }
+      return report;
+    });
   }
 
   /**
@@ -1098,7 +1128,12 @@ export class Pump {
     }
     const plan = planSubscriptions({
       account: this.account,
-      inboxRelays: this.state.inbox.filter((relay) => safeRelayUrl(relay, this.allowLoopback)),
+      // Host-owned inbox: the host's own NIP-17 subscription delivers wraps; the plan never
+      // carries a kind-1059 subscription, so no inbox cursor key or floor can exist.
+      inboxRelays:
+        this.state.inbox === "host"
+          ? []
+          : this.state.inboxRelays.filter((relay) => safeRelayUrl(relay, this.allowLoopback)),
       groups: routable.map((group) => ({
         route: group.route,
         relays: group.relays.filter((relay) => safeRelayUrl(relay, this.allowLoopback)),

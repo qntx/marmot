@@ -30,11 +30,18 @@ import { createServer } from "node:http";
 import { connect } from "node:net";
 import { join, resolve } from "node:path";
 
-import { finalizeEvent, generateSecretKey, getPublicKey } from "nostr-tools";
+import { finalizeEvent, generateSecretKey, getPublicKey, nip59 } from "nostr-tools";
 
-import type { Backend } from "@qntx/marmot/backend";
+import type { Backend, InputReport } from "@qntx/marmot/backend";
 import { MarmotClient, nostrRelayPort, MarmotError } from "@qntx/marmot/client";
-import type { ClientMessage, GroupEvent, InviteEvent, RelayPort, Timer } from "@qntx/marmot/client";
+import type {
+  ClientMessage,
+  GroupEvent,
+  InviteEvent,
+  RelayFilter,
+  RelayPort,
+  Timer,
+} from "@qntx/marmot/client";
 import { memoryCursorStore, memoryKv } from "@qntx/marmot/testing";
 import { Pool } from "@qntx/nostr";
 import { decode, npubEncode, nsecEncode } from "@qntx/nostr/nips/nip19";
@@ -72,6 +79,8 @@ const STEP_POLL_MS = 250;
 const RELAY_LIST_KIND = 10002;
 const KEY_PACKAGE_KIND = 30443;
 const INBOX_RELAYS_KIND = 10050;
+const GIFT_WRAP_KIND = 1059;
+const WELCOME_RUMOR_KIND = 444;
 const CHAT_KIND = 9;
 const WN_MESSAGE_LIMIT = 600;
 
@@ -591,6 +600,7 @@ async function run(): Promise<void> {
       },
       timer,
       relays: nostrRelayPort(pool),
+      inbox: "client",
       lookupRelays: [url],
       allowLoopback: true,
     });
@@ -1503,6 +1513,7 @@ async function run(): Promise<void> {
         },
         timer,
         relays: nostrRelayPort(pool),
+        inbox: "client",
         lookupRelays: [url],
         allowLoopback: true,
       });
@@ -1749,6 +1760,7 @@ async function run(): Promise<void> {
         },
         timer,
         relays: droppingPort,
+        inbox: "client",
         lookupRelays: [url],
         allowLoopback: true,
       });
@@ -1768,6 +1780,7 @@ async function run(): Promise<void> {
           },
           timer,
           relays: nostrRelayPort(pool),
+          inbox: "client",
           lookupRelays: [url],
           allowLoopback: true,
         });
@@ -2076,6 +2089,7 @@ async function run(): Promise<void> {
         },
         timer,
         relays: censoringPort,
+        inbox: "client",
         lookupRelays: [url],
         allowLoopback: true,
       });
@@ -2292,6 +2306,7 @@ async function run(): Promise<void> {
         },
         timer,
         relays: nostrRelayPort(pool),
+        inbox: "client",
         lookupRelays: [url],
         allowLoopback: true,
       });
@@ -2664,6 +2679,197 @@ async function run(): Promise<void> {
         }, "device 2 access == removed");
       } finally {
         await sibling.mk.close();
+      }
+    });
+
+    // S23 — a host-owned inbox end to end: a fresh account whose client never
+    // subscribes kind 1059. The test host runs the NIP-17 inbox instead — it
+    // publishes its own 10050, unwraps gift wraps itself, and forwards the
+    // ones carrying a kind-444 rumor through `ingestWrap`.
+    await scenario("S23 wn invites a host-owned-inbox device", async () => {
+      let at: number;
+      const hostSecret = generateSecretKey();
+      const hostSigner = testSigner(hostSecret);
+      const hostNpub = npubEncode(hostSigner.pubkey);
+      log(`host-owned npub ${hostNpub}`);
+
+      const hostSubs: Array<{ relay: string; filters: RelayFilter[] }> = [];
+      const innerPort = nostrRelayPort(pool);
+      const hostPort: RelayPort = {
+        publish: async (relay, event) => innerPort.publish(relay, event),
+        connect: async (relay) => innerPort.connect(relay),
+        subscribe: (relay, filters, handlers) => {
+          hostSubs.push({ relay, filters });
+          return innerPort.subscribe(relay, filters, handlers);
+        },
+      };
+      const hostClient = await MarmotClient.open({
+        backend: await releaseBackend(),
+        kv: memoryKv(),
+        cursors: memoryCursorStore(),
+        signer: hostSigner,
+        clock: {
+          now: () => ({
+            unixMs: BigInt(Date.now()),
+            monotonicMs: BigInt(Math.max(0, Date.now() - startMonotonic)),
+          }),
+        },
+        timer,
+        relays: hostPort,
+        inbox: "host",
+        lookupRelays: [url],
+        allowLoopback: true,
+      });
+      const hostReceived: ClientMessage[] = [];
+      const hostInvites: InviteEvent[] = [];
+      hostClient.onMessages((batch) => {
+        hostReceived.push(...batch);
+      });
+      hostClient.onInvite((event) => {
+        hostInvites.push(event);
+      });
+      hostClient.onError((error) => {
+        log(`host-owned client onError ${error.kind}: ${error.message}`);
+      });
+      try {
+        // Identity: 10002 and the KeyPackage as usual; the 10050 is the host's
+        // own — `publishInboxRelays` is `wrong_inbox_owner` in host mode.
+        const relayList = finalizeEvent(
+          {
+            kind: RELAY_LIST_KIND,
+            created_at: Math.floor(Date.now() / 1000),
+            tags: [["r", url]],
+            content: "",
+          },
+          hostSecret,
+        );
+        await pool.publish([url], relayList);
+        await hostClient.ensureKeyPackage();
+        const inboxRelays = finalizeEvent(
+          {
+            kind: INBOX_RELAYS_KIND,
+            created_at: Math.floor(Date.now() / 1000),
+            tags: [["relay", url]],
+            content: "",
+          },
+          hostSecret,
+        );
+        await pool.publish([url], inboxRelays);
+        await waitFor(
+          () =>
+            served.relay
+              .events()
+              .some(
+                (stored) => stored.kind === KEY_PACKAGE_KIND && stored.pubkey === hostSigner.pubkey,
+              ) || undefined,
+          "host-owned account key package stored",
+        );
+
+        // The host's NIP-17 inbox: its own kind-1059 #p subscription, unwrapped
+        // with nostr-tools; only kind-444 rumors are forwarded — untouched —
+        // to `ingestWrap`.
+        const reports: InputReport[] = [];
+        const closeInbox = pool.subscribe(
+          [url],
+          [{ kinds: [GIFT_WRAP_KIND], "#p": [hostSigner.pubkey] }],
+          {
+            onEvent: (event) => {
+              let rumor: ReturnType<typeof nip59.unwrapEvent>;
+              try {
+                rumor = nip59.unwrapEvent(
+                  {
+                    id: event.id,
+                    pubkey: event.pubkey,
+                    created_at: event.created_at,
+                    kind: event.kind,
+                    tags: event.tags.map((tag) => [...tag]),
+                    content: event.content,
+                    sig: event.sig,
+                  },
+                  hostSecret,
+                );
+              } catch {
+                return;
+              }
+              if (rumor.kind !== WELCOME_RUMOR_KIND) {
+                return;
+              }
+              void (async () => {
+                try {
+                  reports.push(
+                    await hostClient.ingestWrap({
+                      id: event.id,
+                      pubkey: event.pubkey,
+                      createdAt: BigInt(event.created_at),
+                      kind: event.kind,
+                      tags: event.tags.map((tag) => [...tag]),
+                      content: event.content,
+                      sig: event.sig,
+                    }),
+                  );
+                } catch (error) {
+                  log(
+                    `host ingestWrap threw: ${error instanceof Error ? error.message : String(error)}`,
+                  );
+                }
+              })();
+            },
+          },
+        );
+        try {
+          at = Date.now();
+          const created = await wn(rig, ["groups", "create", "m3b-23", hostNpub], rig.wnNpub);
+          const wnGid = wnGroupId(created);
+          log(`wn groups create m3b-23 -> ${wnGid} (${secs(at)})`);
+
+          await waitFor(() => reports[0], "host ingestWrap report");
+          const [report] = reports;
+          if (report === undefined || report.outcome.type !== "accepted") {
+            throw new Error(`ingestWrap outcome ${JSON.stringify(report?.outcome)}`);
+          }
+          log(`ingestWrap accepted the forwarded wrap (${secs(at)})`);
+
+          at = Date.now();
+          await waitFor(
+            () => hostInvites.some((event) => event.type === "joined" && event.group === wnGid),
+            "host-owned joined invite",
+          );
+          log(`host-owned joined ${wnGid} (${secs(at)})`);
+
+          at = Date.now();
+          const wnText = `s23-wn-${Math.floor(Date.now() / 1000)}`;
+          await wn(rig, ["messages", "send", wnGid, wnText], rig.wnNpub);
+          await waitFor(
+            () =>
+              hostReceived.some(
+                (entry) => entry.group === wnGid && entry.message.content === wnText,
+              ) || undefined,
+            `host-owned client receives wn message ${wnText}`,
+          );
+          log(`host-owned received wn message ${wnText} (${secs(at)})`);
+
+          at = Date.now();
+          const ourText = `s23-us-${Math.floor(Date.now() / 1000)}`;
+          await hostClient.sendMessage(wnGid, { kind: CHAT_KIND, tags: [], content: ourText });
+          await waitFor(async () => {
+            const entries = await wnMessages(rig, wnGid);
+            return entries.some((entry) => entry.includes(ourText)) || undefined;
+          }, `wn messages list shows ${ourText}`);
+          log(`wn messages list shows ${ourText} (${secs(at)})`);
+
+          if (
+            hostSubs.some((sub) =>
+              sub.filters.some((filter) => (filter.kinds ?? []).includes(GIFT_WRAP_KIND)),
+            )
+          ) {
+            throw new Error("host-owned client's port subscribed kind 1059");
+          }
+          log("host-owned client's port never subscribed kind 1059");
+        } finally {
+          closeInbox.close();
+        }
+      } finally {
+        await hostClient.close();
       }
     });
 
