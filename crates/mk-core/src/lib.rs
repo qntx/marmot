@@ -88,9 +88,9 @@ pub use semantics::{DropReason, MessageIntent, Semantics};
 pub use session::OpenError as SessionOpenError;
 pub use session::{
     AppMessage, AttachmentInput, ComponentUpdate, CreateGroup, DestinationPolicy, GroupAccess,
-    GroupAvatar, GroupSnapshot, GroupState, Invitee, MediaMessage, MemberSnapshot, Opened,
-    PendingAttachment, PendingProof, ProofError, ProofRejected, SealedAttachment, SendOutcome,
-    SentMessage, Session, SessionConfig, SessionError, TickReport,
+    GroupAvatar, GroupSnapshot, GroupState, Invitee, LiveGroupSnapshot, MediaMessage,
+    MemberSnapshot, Opened, PendingAttachment, PendingProof, ProofError, ProofRejected,
+    SealedAttachment, SendOutcome, SentMessage, Session, SessionConfig, SessionError, TickReport,
 };
 pub use signer::{AccountSigner, SignerError, SignerFuture};
 pub use stall::STALL_EVENTS;

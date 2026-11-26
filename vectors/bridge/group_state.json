@@ -1,8 +1,6 @@
 {
-  "disbanded": "disbanded",
   "pending_publish": "pending_publish",
   "recovering": "recovering",
-  "removed": "removed",
   "stable": "stable",
   "unmapped": "unmapped",
   "unrecoverable": "unrecoverable"

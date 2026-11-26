@@ -147,16 +147,17 @@ function requireClient(): MarmotClient {
 }
 
 function snapshotShape(snapshot: GroupSnapshot): unknown {
+  const admins = snapshot.live?.admins ?? [];
   return {
     id: snapshot.id,
     epoch: snapshot.epoch.toString(),
     members: snapshot.members
-      .map((member) => `${member.account}:${member.admin ? 1 : 0}`)
+      .map((member) => `${member.account}:${admins.includes(member.account) ? 1 : 0}`)
       .toSorted(),
     name: snapshot.name,
-    relays: [...snapshot.relays].toSorted(),
-    nostrGroupId: snapshot.nostrGroupId,
-    state: snapshot.state,
+    relays: [...(snapshot.live?.relays ?? [])].toSorted(),
+    nostrGroupId: snapshot.live?.nostrGroupId,
+    state: snapshot.live?.state,
     access: snapshot.access,
   };
 }

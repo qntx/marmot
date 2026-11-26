@@ -51,7 +51,7 @@ mod flow_tests {
     use std::sync::Arc;
 
     use mk_core::{
-        AccountSigner, Availability, Clock, CreateGroup, GroupId, GroupState, InputCategory,
+        AccountSigner, Availability, Clock, CreateGroup, GroupAccess, GroupId, InputCategory,
         InputOutcome, Invitee, Outbound, PublishResolution, RelayResult, RelayStatus, SendOutcome,
         SessionError, SessionEvent, UnsignedEvent,
     };
@@ -133,11 +133,9 @@ mod flow_tests {
     /// Exact admin account set of a snapshot.
     fn admin_accounts(member: &Member, gid: &GroupId) -> Vec<mk_core::AccountId> {
         let mut accounts: Vec<_> = snapshot(member, gid)
-            .members
-            .iter()
-            .filter(|m| m.admin)
-            .map(|m| m.account)
-            .collect();
+            .live
+            .map(|live| live.admins)
+            .unwrap_or_default();
         accounts.sort();
         accounts
     }
@@ -350,14 +348,14 @@ mod flow_tests {
         flush(&mut a, &relay).await;
 
         let b_drained = sync_member(&mut b, &relay, RELAY, &gid).await;
-        let b_removed = b
-            .session
-            .group(&gid)
-            .expect("group")
-            .is_none_or(|snap| snap.state == GroupState::Removed)
-            || b_drained
-                .iter()
-                .any(|event| matches!(event, SessionEvent::LocalCopyTerminated { .. }));
+        let b_removed = b.session.group(&gid).expect("group").is_none_or(|snap| {
+            matches!(
+                snap.access,
+                GroupAccess::RemovedDevice | GroupAccess::Removed
+            )
+        }) || b_drained
+            .iter()
+            .any(|event| matches!(event, SessionEvent::LocalCopyTerminated { .. }));
         assert!(b_removed, "B observes its own removal");
         sync_member(&mut a, &relay, RELAY, &gid).await;
         sync_member(&mut c, &relay, RELAY, &gid).await;

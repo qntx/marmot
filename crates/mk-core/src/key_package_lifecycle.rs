@@ -39,7 +39,7 @@ use crate::outbox::{
 
 use crate::provider::KvStorageProvider;
 use crate::session::{
-    GroupState, Session, SessionError, engine_gid, outbound_id_of, session_engine_error,
+    GroupAccess, Session, SessionError, engine_gid, outbound_id_of, session_engine_error,
 };
 use crate::types::{GroupId, OutboundId};
 
@@ -330,13 +330,13 @@ impl Session {
         self.withdraw_slot(write_relays).await?;
         let mut report = SignOutReport::default();
         for snapshot in self.groups()? {
-            if matches!(
-                snapshot.state,
-                GroupState::Removed | GroupState::Disbanded | GroupState::Unrecoverable
-            ) {
+            if !matches!(snapshot.access, GroupAccess::Active | GroupAccess::Stalled) {
                 continue;
             }
-            if snapshot.own_account_admin {
+            let Some(live) = &snapshot.live else {
+                continue;
+            };
+            if live.own_account_admin {
                 report.kept_admin_leaves.push(snapshot.id);
                 continue;
             }

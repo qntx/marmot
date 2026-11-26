@@ -58,9 +58,10 @@ mod app_surface_tests {
     use mk_core::media::EncryptedMediaPolicy;
     use mk_core::{
         AccountId, AppMessage, AttachmentInput, Clock, ComponentUpdate, CreateGroup, DropReason,
-        EventId, GroupAccess, GroupAvatar, GroupChange, GroupId, GroupState, Invitee, MediaMessage,
-        MessageIntent, OutboundPurpose, PublishResolution, ReceivedMessage, RelayResult,
-        RelayStatus, Semantics, SendOutcome, SentMessage, SessionError, SessionEvent,
+        EventId, GroupAccess, GroupAvatar, GroupChange, GroupId, GroupState, InputOutcome, Invitee,
+        LocalState, MediaMessage, MessageIntent, OutboundPurpose, PublishResolution, ReaddOutcome,
+        ReceivedMessage, RelayResult, RelayStatus, Semantics, SendOutcome, SentMessage,
+        SessionError, SessionEvent,
     };
 
     const RELAY: &str = "ws://127.0.0.1:7777";
@@ -141,6 +142,12 @@ mod app_surface_tests {
             .group(gid)
             .expect("group")
             .expect("group exists")
+    }
+
+    /// The snapshot's `live` half — a group these tests built is always
+    /// hydrated.
+    const fn live_of(snapshot: &mk_core::GroupSnapshot) -> &mk_core::LiveGroupSnapshot {
+        snapshot.live.as_ref().expect("a live snapshot")
     }
 
     /// One ingest + tick + flush round over the group's backlog (the body of
@@ -892,8 +899,8 @@ mod app_surface_tests {
         flush(&mut a, &relay).await;
 
         let b_events = collect(&mut b, &relay, &route_b).await;
-        assert_eq!(snapshot(&a, &gid).retention_seconds, 60);
-        assert_eq!(snapshot(&b, &gid).retention_seconds, 60);
+        assert_eq!(live_of(&snapshot(&a, &gid)).retention_seconds, 60);
+        assert_eq!(live_of(&snapshot(&b, &gid)).retention_seconds, 60);
         assert!(
             state_changes(&b_events)
                 .iter()
@@ -981,7 +988,7 @@ mod app_surface_tests {
         assert!(matches!(outcome, SendOutcome::Staged(_)), "{outcome:?}");
         flush(&mut a, &relay).await;
         let b_events = collect(&mut b, &relay, &route_b).await;
-        assert_eq!(snapshot(&b, &gid).retention_seconds, 0);
+        assert_eq!(live_of(&snapshot(&b, &gid)).retention_seconds, 0);
         assert!(
             state_changes(&b_events)
                 .iter()
@@ -1297,23 +1304,22 @@ mod app_surface_tests {
 
         collect(&mut b, &relay, &route_b).await;
         let snap = snapshot(&b, &gid);
+        let live = snap.live.as_ref().expect("a live snapshot");
         assert_eq!(
-            snap.avatar.as_ref().map(|avatar| avatar.url.as_str()),
+            live.avatar.as_ref().map(|avatar| avatar.url.as_str()),
             Some("https://example.com/a.png"),
             "avatar URL is normalized (host lowercased)"
         );
         assert_eq!(
-            snap.avatar
+            live.avatar
                 .as_ref()
                 .and_then(|avatar| avatar.dim.as_deref()),
             Some("64x64")
         );
-        assert!(snap.own_account_admin, "B sees its own admin flag");
+        assert!(live.own_account_admin, "B sees its own admin flag");
         assert!(
-            snap.members
-                .iter()
-                .any(|member| member.account == b.signer.account() && member.admin),
-            "B's member row carries admin"
+            live.admins.iter().any(|admin| *admin == b.signer.account()),
+            "B is in the admin set"
         );
 
         // Idempotent re-promotion -> NoChange (before any staging of a
@@ -1401,7 +1407,7 @@ mod app_surface_tests {
             matches!(resolution, PublishResolution::RolledBack),
             "all-rejected rolls back: {resolution:?}"
         );
-        assert_eq!(snapshot(&a, &gid).retention_seconds, 0);
+        assert_eq!(live_of(&snapshot(&a, &gid)).retention_seconds, 0);
     }
 
     /// A second commit-producing op while the previous own commit awaits
@@ -1507,10 +1513,12 @@ mod app_surface_tests {
             "leaver sees voluntary termination: {b_events:?}"
         );
         assert!(
-            b.session
-                .group(&gid)
-                .expect("group")
-                .is_none_or(|snap| snap.state == GroupState::Removed),
+            b.session.group(&gid).expect("group").is_none_or(|snap| {
+                matches!(
+                    snap.access,
+                    GroupAccess::RemovedDevice | GroupAccess::Removed
+                )
+            }),
             "leaver's copy is removed"
         );
         assert!(
@@ -1624,7 +1632,7 @@ mod app_surface_tests {
         sync_member(&mut b3, &relay, RELAY, &gid3).await;
         let route3 = a3.route_hex(&gid3);
         assert!(
-            snapshot(&a3, &gid3).disband_enabled,
+            live_of(&snapshot(&a3, &gid3)).disband_enabled,
             "fresh groups require lifecycle"
         );
 
@@ -1653,7 +1661,7 @@ mod app_surface_tests {
                 )
             }) && matches!(
                 a3.session.group(&gid3),
-                Ok(Some(snap)) if snap.state == GroupState::Disbanded
+                Ok(Some(snap)) if snap.access == GroupAccess::Disbanded
             );
             let b_done = b3_events.iter().any(|event| {
                 matches!(
@@ -1665,7 +1673,7 @@ mod app_surface_tests {
                 )
             }) && matches!(
                 b3.session.group(&gid3),
-                Ok(Some(snap)) if snap.state == GroupState::Disbanded
+                Ok(Some(snap)) if snap.access == GroupAccess::Disbanded
             );
             if a_done && b_done {
                 break;
@@ -1685,8 +1693,8 @@ mod app_surface_tests {
                 "{who} sees the Disbanded system row"
             );
             assert_eq!(
-                snapshot(member, &gid3).state,
-                GroupState::Disbanded,
+                snapshot(member, &gid3).access,
+                GroupAccess::Disbanded,
                 "{who} snapshot is Disbanded"
             );
         }
@@ -1745,7 +1753,10 @@ mod app_surface_tests {
         collect(&mut b, &relay, &route2).await;
 
         let gid1_bytes = gid1.0.clone();
-        let route1_bytes = snapshot(&a, &gid1).nostr_group_id;
+        let route1_bytes = snapshot(&a, &gid1)
+            .live
+            .and_then(|live| live.nostr_group_id)
+            .expect("route");
         a.session.forget_group(&gid1).expect("forget_group");
         assert!(
             matches!(a.session.group(&gid1), Ok(None)),
@@ -1892,7 +1903,7 @@ mod app_surface_tests {
         a.session.tick().await.expect("tick");
         flush(&mut a, &relay).await;
         let _ = collect(&mut b, &relay, &route_b).await;
-        assert_eq!(snapshot(&b, &gid).state, GroupState::Removed);
+        assert_eq!(snapshot(&b, &gid).access, GroupAccess::Removed);
 
         // The received attachment still opens — the media-secret row is
         // retained with the (removed) local copy.
@@ -1939,14 +1950,21 @@ mod app_surface_tests {
             .iter()
             .find(|listed| listed.id == removed)
             .expect("the removed copy is listed");
-        assert_eq!(removed_copy.state, GroupState::Removed);
         assert_eq!(removed_copy.access, GroupAccess::Removed);
+        assert_eq!(
+            removed_copy.live.as_ref().map(|live| live.state),
+            Some(GroupState::Stable),
+            "a removed copy keeps its loaded state"
+        );
         let live_copy = groups
             .iter()
             .find(|listed| listed.id == live)
             .expect("the live copy is listed");
-        assert_eq!(live_copy.state, GroupState::Stable);
         assert_eq!(live_copy.access, GroupAccess::Active);
+        assert_eq!(
+            live_copy.live.as_ref().map(|live| live.state),
+            Some(GroupState::Stable)
+        );
 
         // Group-id byte order, stable across calls and a restart.
         let ids: Vec<GroupId> = groups.iter().map(|listed| listed.id.clone()).collect();
@@ -2022,7 +2040,10 @@ mod app_surface_tests {
             .filter(|listed| listed.id == removed)
             .collect();
         assert_eq!(copies.len(), 1, "one copy of the re-joined group id");
-        assert_eq!(copies[0].state, GroupState::Stable);
+        assert_eq!(
+            copies[0].live.as_ref().map(|live| live.state),
+            Some(GroupState::Stable)
+        );
         assert_eq!(copies[0].access, GroupAccess::Active);
 
         // B reads fresh traffic on the new copy.
@@ -2064,13 +2085,13 @@ mod app_surface_tests {
             });
             let b_done = matches!(
                 b.session.group(&gid),
-                Ok(Some(snap)) if snap.state == GroupState::Disbanded
+                Ok(Some(snap)) if snap.access == GroupAccess::Disbanded
             );
             if a_done && b_done {
                 break;
             }
         }
-        assert_eq!(snapshot(&b, &gid).state, GroupState::Disbanded);
+        assert_eq!(snapshot(&b, &gid).access, GroupAccess::Disbanded);
 
         let listed = b
             .session
@@ -2079,7 +2100,8 @@ mod app_surface_tests {
             .into_iter()
             .find(|listed| listed.id == gid)
             .expect("the disbanded copy is listed");
-        assert_eq!(listed.state, GroupState::Disbanded);
+        assert_eq!(listed.access, GroupAccess::Disbanded);
+        assert!(listed.live.is_none(), "a disbanded copy is record-only");
 
         let mut b = reopen_member(&b).await;
         let listed = b
@@ -2089,7 +2111,8 @@ mod app_surface_tests {
             .into_iter()
             .find(|listed| listed.id == gid)
             .expect("the disbanded copy survives the reopen");
-        assert_eq!(listed.state, GroupState::Disbanded);
+        assert_eq!(listed.access, GroupAccess::Disbanded);
+        assert!(listed.live.is_none(), "a disbanded copy is record-only");
 
         b.session.forget_group(&gid).expect("forget_group");
         assert!(
@@ -2143,5 +2166,360 @@ mod app_surface_tests {
             !pending_row_exists(&a, &transport_id),
             "the drop released the pending row"
         );
+    }
+
+    /// Pair `a`/`b` into one group named `name`, then disband it and drive
+    /// `b`'s copy to the disbanded tombstone.
+    async fn disbanded_pair(name: &str) -> (FakeRelay, Member, Member, GroupId) {
+        let relay = FakeRelay::new();
+        let mut a = open_member().await;
+        let mut b = open_member().await;
+        publish_identity(&mut a, &relay, RELAY).await;
+        publish_identity(&mut b, &relay, RELAY).await;
+        let gid = group_with(&mut a, &relay, &[&b], name).await;
+        join_via_welcome(&mut b, &relay).await;
+        sync_member(&mut a, &relay, RELAY, &gid).await;
+        sync_member(&mut b, &relay, RELAY, &gid).await;
+        let route = a.route_hex(&gid);
+
+        a.session.disband(&gid).await.expect("disband");
+        let mut a_events = Vec::new();
+        for _ in 0..12 {
+            a_events.extend(cycle(&mut a, &relay, &route).await);
+            let _ = cycle(&mut b, &relay, &route).await;
+            let a_done = a_events.iter().any(|event| {
+                matches!(
+                    event,
+                    SessionEvent::GroupStateChanged {
+                        change: GroupChange::Disbanded,
+                        ..
+                    }
+                )
+            });
+            let b_done = matches!(
+                b.session.group(&gid),
+                Ok(Some(snap)) if snap.access == GroupAccess::Disbanded
+            );
+            if a_done && b_done {
+                break;
+            }
+        }
+        assert_eq!(
+            snapshot(&b, &gid).access,
+            GroupAccess::Disbanded,
+            "the loop drove b to the tombstone"
+        );
+        (relay, a, b, gid)
+    }
+
+    /// Rewrite `gid`'s stored `cgka_groups` row's `protocol_profile` to
+    /// `profile` inside `rows`: the row still decodes and the group's MLS
+    /// state still loads, but hydration's record-vs-wire profile check
+    /// fails and the copy quarantines as `MemberValidationFailed`.
+    fn set_group_row_protocol_profile(
+        rows: &mut [(Vec<u8>, Vec<u8>)],
+        gid: &GroupId,
+        profile: &str,
+    ) {
+        let mut tampered = false;
+        for (key, value) in rows.iter_mut() {
+            // A `cgka_groups` row key is `[1]` + length-prefixed group id.
+            if key.first() != Some(&1) || key.len() != 1 + 4 + gid.0.len() || key[5..] != gid.0[..]
+            {
+                continue;
+            }
+            let mut record: serde_json::Value = serde_json::from_slice(value).expect("group row");
+            record["protocol_profile"] = serde_json::Value::String(profile.to_owned());
+            *value = serde_json::to_vec(&record).expect("re-encode group row");
+            tampered = true;
+        }
+        assert!(tampered, "a stored record row must exist for the group");
+    }
+
+    /// A disbanded copy reports `access: Disbanded` — access alone
+    /// carries send-permission, and a disbanded copy cannot send.
+    #[tokio::test(flavor = "current_thread")]
+    async fn disbanded_copy_access_is_disbanded() {
+        let (_relay, _a, b, gid) = disbanded_pair("r1").await;
+        assert_eq!(snapshot(&b, &gid).access, GroupAccess::Disbanded);
+    }
+
+    /// A disbanded copy is record-only: `live: None` so no fabricated
+    /// route id, relays, admins, or state reach the host — while the
+    /// durable record facts (name, epoch, the former roster) still read
+    /// real, and the projection is unchanged after a reopen.
+    #[tokio::test(flavor = "current_thread")]
+    async fn disbanded_copy_is_record_only() {
+        let (_relay, _a, b, gid) = disbanded_pair("r2").await;
+        let snap = snapshot(&b, &gid);
+        assert_eq!(snap.access, GroupAccess::Disbanded);
+        assert!(
+            snap.live.is_none(),
+            "a disbanded copy carries no live facts"
+        );
+        assert_eq!(snap.name, "r2");
+        assert!(snap.epoch > 0);
+        assert_eq!(
+            snap.members
+                .iter()
+                .map(|member| member.devices)
+                .collect::<Vec<_>>(),
+            [1, 1],
+            "the former roster survives as record facts"
+        );
+
+        let b = reopen_member(&b).await;
+        assert_eq!(
+            snapshot(&b, &gid),
+            snap,
+            "the record-only projection survives the reopen"
+        );
+    }
+
+    /// A quarantined copy (hydration failed at open) is still a stored
+    /// copy: `groups()` lists it in group-id byte order alongside a
+    /// healthy copy, `group(id)` agrees, `access: Quarantined`,
+    /// `live: None`, and name/epoch come from the record. A reopen with
+    /// the fault in place keeps it quarantined.
+    #[tokio::test(flavor = "current_thread")]
+    async fn groups_lists_quarantined_copy() {
+        let relay = FakeRelay::new();
+        let mut a = open_member().await;
+        let mut b = open_member().await;
+        publish_identity(&mut a, &relay, RELAY).await;
+        publish_identity(&mut b, &relay, RELAY).await;
+        let healthy = group_with(&mut a, &relay, &[&b], "healthy").await;
+        let gid = group_with(&mut a, &relay, &[&b], "quarantined").await;
+        join_via_welcome(&mut b, &relay).await;
+        for id in [&healthy, &gid] {
+            sync_member(&mut a, &relay, RELAY, id).await;
+            sync_member(&mut b, &relay, RELAY, id).await;
+        }
+
+        // Corrupt hydration without losing the record: flip the stored
+        // record's protocol_profile so the row still decodes and the MLS
+        // state still loads, but hydration's profile check fails.
+        let mut rows = b.host.durable_rows();
+        set_group_row_protocol_profile(&mut rows, &gid, "legacy");
+        let quarantined_rows = rows.clone();
+        let mut b = reopen_member_from_rows(&b, rows).await;
+        let events = b.session.drain_events().expect("drain");
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                SessionEvent::HydrationQuarantined { group } if *group == gid
+            )),
+            "the tampered copy must quarantine at open"
+        );
+
+        // `groups()` lists the quarantined copy next to the healthy one,
+        // in group-id byte order.
+        let groups = b.session.groups().expect("groups");
+        let ids: Vec<GroupId> = groups.iter().map(|listed| listed.id.clone()).collect();
+        let mut sorted = ids.clone();
+        sorted.sort();
+        assert_eq!(ids, sorted, "group-id byte order");
+        let listed = groups
+            .iter()
+            .find(|listed| listed.id == gid)
+            .expect("groups() must list the quarantined copy");
+        assert_eq!(listed.access, GroupAccess::Quarantined);
+        assert!(listed.live.is_none(), "a quarantined copy is record-only");
+        assert_eq!(listed.name, "quarantined");
+        assert_eq!(
+            listed
+                .members
+                .iter()
+                .map(|member| member.devices)
+                .collect::<Vec<_>>(),
+            [1, 1],
+            "the roster comes from the stored record"
+        );
+        // `group(id)` agrees with the `groups()` entry.
+        let single = b
+            .session
+            .group(&gid)
+            .expect("group")
+            .expect("the quarantined copy answers a record");
+        assert_eq!(&single, listed, "group(id) equals the groups() entry");
+
+        // A reopen with the fault in place keeps the same projection.
+        let mut b = reopen_member_from_rows(&b, quarantined_rows).await;
+        let events = b.session.drain_events().expect("drain");
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                SessionEvent::HydrationQuarantined { group } if *group == gid
+            )),
+            "the fault persists across the reopen"
+        );
+        assert_eq!(
+            b.session.group(&gid).expect("group").as_ref(),
+            Some(&single),
+            "still listed record-only after another reopen"
+        );
+
+        // `sign_out` skips the quarantined copy (it cannot send), and
+        // `history_fetched` refuses it as unknown.
+        let report = b
+            .session
+            .sign_out(&[RELAY.to_owned()])
+            .await
+            .expect("sign_out");
+        assert!(
+            !report.left.contains(&gid) && !report.kept_admin_leaves.contains(&gid),
+            "sign_out skips the quarantined copy"
+        );
+        assert!(
+            matches!(
+                b.session.history_fetched(&gid),
+                Err(SessionError::UnknownGroup)
+            ),
+            "history_fetched refuses the quarantined copy"
+        );
+    }
+
+    /// A quarantined copy whose `cgka_groups` row does not even decode
+    /// (`GroupRecordLoadFailed`) can present no durable facts: `groups()`
+    /// still answers `Ok` with the other copies, this copy is absent,
+    /// and `group(id)` is `Ok(None)`. This pins the documented gap.
+    #[tokio::test(flavor = "current_thread")]
+    async fn undecodable_record_quarantine_answers_no_copy() {
+        let relay = FakeRelay::new();
+        let mut a = open_member().await;
+        let mut b = open_member().await;
+        publish_identity(&mut a, &relay, RELAY).await;
+        publish_identity(&mut b, &relay, RELAY).await;
+        let healthy = group_with(&mut a, &relay, &[&b], "healthy").await;
+        let gid = group_with(&mut a, &relay, &[&b], "garbled").await;
+        join_via_welcome(&mut b, &relay).await;
+        for id in [&healthy, &gid] {
+            sync_member(&mut a, &relay, RELAY, id).await;
+            sync_member(&mut b, &relay, RELAY, id).await;
+        }
+
+        // Garble the record row itself: the group quarantines at open,
+        // and the record-read fallback cannot decode either.
+        let mut rows = b.host.durable_rows();
+        let mut garbled = false;
+        for (key, value) in &mut rows {
+            if key.first() == Some(&1) && key.len() == 1 + 4 + gid.0.len() && key[5..] == gid.0[..]
+            {
+                value[0] = b'!';
+                garbled = true;
+            }
+        }
+        assert!(garbled, "a stored record row must exist for the group");
+        let mut b = reopen_member_from_rows(&b, rows).await;
+        let events = b.session.drain_events().expect("drain");
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                SessionEvent::HydrationQuarantined { group } if *group == gid
+            )),
+            "the garbled copy must quarantine at open"
+        );
+
+        let groups = b.session.groups().expect("groups still answers");
+        assert!(
+            groups.iter().any(|listed| listed.id == healthy)
+                && !groups.iter().any(|listed| listed.id == gid),
+            "the undecodable copy is absent, the healthy one stays"
+        );
+        assert!(
+            matches!(b.session.group(&gid), Ok(None)),
+            "group(id) answers None for the undecodable record"
+        );
+    }
+
+    /// A quarantined copy repairs through a re-join: the admin's
+    /// `readd_member` ships a replacement Welcome, which the copy holds
+    /// as a consent offer (`RejoinOffered`) because its stored state is
+    /// still a recorded member's. `confirm_rejoin` installs it, the
+    /// engine clears the quarantine (`HydrationRecovered`), and the copy
+    /// reports its real access again.
+    #[tokio::test(flavor = "current_thread")]
+    async fn quarantined_copy_recovers_via_rejoin() {
+        let relay = FakeRelay::new();
+        let mut a = open_member().await;
+        let mut b = open_member().await;
+        publish_identity(&mut a, &relay, RELAY).await;
+        publish_identity(&mut b, &relay, RELAY).await;
+        let gid = group_with(&mut a, &relay, &[&b], "recoverable").await;
+        join_via_welcome(&mut b, &relay).await;
+        sync_member(&mut a, &relay, RELAY, &gid).await;
+        sync_member(&mut b, &relay, RELAY, &gid).await;
+
+        let mut rows = b.host.durable_rows();
+        set_group_row_protocol_profile(&mut rows, &gid, "legacy");
+        let mut b = reopen_member_from_rows(&b, rows).await;
+        let _ = b.session.drain_events().expect("drain");
+        assert_eq!(snapshot(&b, &gid).access, GroupAccess::Quarantined);
+
+        // The admin re-adds the account: the removal stages first, and
+        // once it confirms a later tick stages the owed Invite.
+        let outcome = a
+            .session
+            .readd_member(
+                &gid,
+                b.signer.account(),
+                vec![Invitee {
+                    key_package: key_package_of(&relay, RELAY, &b.account_hex()),
+                    inbox_relays: inbox_relays_of(&relay, RELAY, &b.account_hex()),
+                }],
+            )
+            .await
+            .expect("readd_member");
+        assert!(
+            matches!(outcome, ReaddOutcome::Removed),
+            "b's leaf is in the tree, so the removal stages: {outcome:?}"
+        );
+        flush(&mut a, &relay).await;
+        for _ in 0..6 {
+            a.clock.advance(2_000);
+            a.session.tick().await.expect("tick");
+            flush(&mut a, &relay).await;
+        }
+
+        // The replacement Welcome lands on the quarantined copy as a
+        // consent offer: its stored state still reads as a recorded
+        // member's, so it is a `RejoinOffered`, not a silent join.
+        let wraps = welcomes_for(&relay, RELAY, &b.account_hex());
+        let reports = b.session.ingest_batch(wraps).await.expect("wraps");
+        assert!(
+            reports.iter().any(|report| matches!(
+                report.outcome,
+                InputOutcome::Local(LocalState::RejoinConfirmationRequired)
+            )),
+            "the replacement Welcome waits for consent: {reports:?}"
+        );
+        let offer = b.session.rejoin_offers(&gid).expect("rejoin_offers")[0].clone();
+        b.session
+            .confirm_rejoin(&gid, &offer.offer, &offer.token)
+            .await
+            .expect("confirm_rejoin");
+
+        let events = b.session.drain_events().expect("drain");
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                SessionEvent::HydrationRecovered { group, .. } if *group == gid
+            )),
+            "the re-join clears the quarantine: {events:?}"
+        );
+        let snap = snapshot(&b, &gid);
+        assert_eq!(snap.access, GroupAccess::Active);
+        assert!(
+            snap.live.is_some(),
+            "the recovered copy carries live facts again"
+        );
+        let listed = b
+            .session
+            .groups()
+            .expect("groups")
+            .into_iter()
+            .find(|entry| entry.id == gid)
+            .expect("the recovered copy stays listed");
+        assert_eq!(snap, listed, "group(id) equals the groups() entry");
     }
 }

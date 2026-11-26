@@ -349,14 +349,15 @@ export function duplicates(handle: ClientHandle, group: string): string[] {
  * and nostrGroupId; every member's (sent ∪ received) content set equals `expected` when given.
  */
 function snapshotShape(snapshot: GroupSnapshot): string {
+  const admins = snapshot.live?.admins ?? [];
   return JSON.stringify({
     epoch: snapshot.epoch.toString(),
     members: snapshot.members
-      .map((member) => `${member.account}:${member.admin ? 1 : 0}`)
+      .map((member) => `${member.account}:${admins.includes(member.account) ? 1 : 0}`)
       .toSorted(),
     name: snapshot.name,
-    relays: [...snapshot.relays].toSorted(),
-    nostrGroupId: snapshot.nostrGroupId,
+    relays: [...(snapshot.live?.relays ?? [])].toSorted(),
+    nostrGroupId: snapshot.live?.nostrGroupId,
   });
 }
 
@@ -579,7 +580,11 @@ export async function scenarioMain(): Promise<ScenarioReport> {
   await a.client.removeMembers(group, [c.signer.pubkey]);
   await waitFor(async () => {
     const snapshot = await c.client.group(group);
-    return snapshot === undefined || snapshot.state === "removed";
+    return (
+      snapshot === undefined ||
+      snapshot.access === "removed" ||
+      snapshot.access === "removed_device"
+    );
   }, "c removed");
   // A and B converge on the full transcript; C is gone from the member set.
   const snapshot = await assertConverged([a, b], group, expected);
@@ -1005,7 +1010,7 @@ export async function scenarioPreJoinCursor(): Promise<ScenarioReport> {
   const network = fakeRelay(101);
   const { a, b, group } = await openPair(network, { a: { skew }, b: { skew } });
   const snapshot = await a.client.group(group);
-  const route = snapshot?.nostrGroupId;
+  const route = snapshot?.live?.nostrGroupId;
   if (snapshot === undefined || route === undefined) {
     throw new Error("a holds no group snapshot");
   }
@@ -1023,7 +1028,7 @@ export async function scenarioPreJoinCursor(): Promise<ScenarioReport> {
   await waitFor(() => contents(a, group).includes("pre-join#4"), "a received the pre-join chats");
   let newestPreJoin = 0;
   let earliestPreJoin = Number.MAX_SAFE_INTEGER;
-  for (const relay of snapshot.relays) {
+  for (const relay of snapshot.live?.relays ?? []) {
     for (const event of network.events(relay)) {
       if (event.kind !== 445) {
         continue;

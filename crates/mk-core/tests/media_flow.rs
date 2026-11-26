@@ -136,7 +136,11 @@ mod media_flow_tests {
         for member in [&a, &b] {
             let snapshot = member.session.group(&gid).expect("group").expect("exists");
             assert_eq!(
-                snapshot.encrypted_media.as_ref().map(|p| &p.endpoints),
+                snapshot
+                    .live
+                    .as_ref()
+                    .and_then(|live| live.encrypted_media.as_ref())
+                    .map(|p| &p.endpoints),
                 Some(&policy.endpoints),
                 "policy visible on both ends"
             );

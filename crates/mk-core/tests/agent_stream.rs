@@ -152,7 +152,10 @@ mod agent_stream_tests {
         join_via_welcome(&mut b, &relay).await;
         for member in [&a, &b] {
             let snapshot = member.session.group(&gid).expect("group").expect("exists");
-            let decoded = snapshot.agent_text_stream.expect("policy");
+            let decoded = snapshot
+                .live
+                .and_then(|live| live.agent_text_stream)
+                .expect("policy");
             assert_eq!(decoded.required_roles, StreamRoles::RECEIVE);
             assert!(decoded.allowed_roles.contains(StreamRoles::RECEIVE));
             assert!(decoded.allowed_roles.contains(StreamRoles::SEND));
@@ -258,7 +261,10 @@ mod agent_stream_tests {
         for (member, epoch) in [&a, &b].iter().zip(epochs) {
             let snapshot = member.session.group(&gid).expect("group").expect("exists");
             assert_eq!(snapshot.epoch, epoch, "epoch must not move");
-            let policy = snapshot.agent_text_stream.expect("policy");
+            let policy = snapshot
+                .live
+                .and_then(|live| live.agent_text_stream)
+                .expect("policy");
             assert_eq!(policy.required_roles, StreamRoles::RECEIVE);
         }
     }

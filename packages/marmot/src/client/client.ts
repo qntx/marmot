@@ -620,9 +620,9 @@ export class MarmotClient {
   }
 
   /**
-   * Every stored local copy — live and terminated (`removed`, `disbanded`) alike — in group-id byte
-   * order. A terminated copy stays listed until `forgetGroup`; hosts that want only live chats
-   * filter on `state`/`access`.
+   * Every stored local copy — live, terminated (`removed`, `disbanded`) and quarantined alike — in
+   * group-id byte order. A terminated or quarantined copy stays listed until `forgetGroup`, and
+   * `access` alone names its state; hosts that want only live chats filter on `access`.
    */
   async groups(): Promise<GroupSnapshot[]> {
     return this.op(async (engine) => {
@@ -644,10 +644,14 @@ export class MarmotClient {
    * address.
    */
   private gateAvatar(snapshot: GroupSnapshot): GroupSnapshot {
-    const { avatar } = snapshot;
-    if (avatar === undefined || safeMediaUrl(avatar.url, this.allowLoopback)) {
+    const { live } = snapshot;
+    if (
+      live === undefined ||
+      live.avatar === undefined ||
+      safeMediaUrl(live.avatar.url, this.allowLoopback)
+    ) {
       return snapshot;
     }
-    return { ...snapshot, avatar: undefined };
+    return { ...snapshot, live: { ...live, avatar: undefined } };
   }
 }

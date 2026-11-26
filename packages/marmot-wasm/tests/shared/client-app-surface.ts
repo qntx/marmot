@@ -139,7 +139,9 @@ export async function scenarioAppSurface(
     const snapshots = await Promise.all(
       [a, b, c].map(async (handle) => handle.client.group(group)),
     );
-    return snapshots.every((snapshot) => snapshot !== undefined && snapshot.state === "stable");
+    return snapshots.every(
+      (snapshot) => snapshot !== undefined && snapshot.live?.state === "stable",
+    );
   }, "all members stable");
 
   // A's send races B's close+reopen: B ingests `m1` only after the restart, exactly once.
@@ -217,7 +219,7 @@ export async function scenarioAppSurface(
   });
   await waitFor(async () => {
     const snap = await b.client.group(group);
-    return snap?.avatar?.url === "https://example.com/a.png";
+    return snap?.live?.avatar?.url === "https://example.com/a.png";
   }, "avatar lands on b");
   await a.client.setRetention(group, 60n);
   await waitFor(async () => {
@@ -228,8 +230,8 @@ export async function scenarioAppSurface(
       (snapshot) =>
         snapshot !== undefined &&
         snapshot.name === "surfaced" &&
-        snapshot.avatar?.url === "https://example.com/a.png" &&
-        snapshot.retentionSeconds === 60n,
+        snapshot.live?.avatar?.url === "https://example.com/a.png" &&
+        snapshot.live?.retentionSeconds === 60n,
     );
   }, "snapshots carry name, avatar and retention");
   await assertConverged([a, b, c], group);
@@ -245,12 +247,12 @@ export async function scenarioAppSurface(
   await a.client.setAdmin(group, b.signer.pubkey, true);
   await waitFor(async () => {
     const snap = await snapshotOf(b, group);
-    return snap.ownAccountAdmin;
+    return snap.live?.ownAccountAdmin === true;
   }, "b ownAccountAdmin true");
   await a.client.setAdmin(group, b.signer.pubkey, false);
   await waitFor(async () => {
     const snap = await snapshotOf(b, group);
-    return !snap.ownAccountAdmin;
+    return snap.live?.ownAccountAdmin === false;
   }, "b ownAccountAdmin false");
 
   // C (non-admin) leaves: A and B see member_left subject C; C's snapshot is removed.
@@ -263,7 +265,7 @@ export async function scenarioAppSurface(
   );
   await waitFor(async () => {
     const snap = await snapshotOf(c, group);
-    return snap.state === "removed";
+    return snap.access === "removed" || snap.access === "removed_device";
   }, "c snapshot removed");
 
   // A disbands: A and B converge on `disbanded` (snapshot + row, actor = A).
@@ -271,7 +273,12 @@ export async function scenarioAppSurface(
   await waitFor(async () => {
     const sa = await snapshotOf(a, group);
     const sb = await snapshotOf(b, group);
-    return sa.state === "disbanded" && sb.state === "disbanded";
+    return (
+      sa.access === "disbanded" &&
+      sa.live === undefined &&
+      sb.access === "disbanded" &&
+      sb.live === undefined
+    );
   }, "a and b snapshots disbanded");
   const disbandA = stateRows(a, group).get("disbanded");
   const disbandB = stateRows(b, group).get("disbanded");

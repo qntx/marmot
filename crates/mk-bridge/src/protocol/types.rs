@@ -891,7 +891,7 @@ impl From<core::OutboundPurpose> for OutboundPurpose {
     }
 }
 
-/// A group's lifecycle bucket for UI projection.
+/// A live group's lifecycle bucket for UI projection.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GroupState {
@@ -903,10 +903,6 @@ pub enum GroupState {
     Recovering,
     /// Frozen pending a verified repair path.
     Unrecoverable,
-    /// This device's copy ended.
-    Removed,
-    /// Terminally disbanded.
-    Disbanded,
     /// An `mk-core` state this wire version does not know.
     Unmapped,
 }
@@ -918,28 +914,31 @@ impl From<core::GroupState> for GroupState {
             core::GroupState::PendingPublish => Self::PendingPublish,
             core::GroupState::Recovering => Self::Recovering,
             core::GroupState::Unrecoverable => Self::Unrecoverable,
-            core::GroupState::Removed => Self::Removed,
-            core::GroupState::Disbanded => Self::Disbanded,
             // `GroupState` is `#[non_exhaustive]`.
             _ => Self::Unmapped,
         }
     }
 }
 
-/// Whether this device's local copy of a group can still read it.
+/// How this device's local copy of a group stands: send-permission and
+/// row state in one vocabulary.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GroupAccess {
     /// The local copy reads and writes normally.
     Active,
+    /// The stall detector flagged the copy as behind.
+    Stalled,
+    /// The copy cannot select a canonical branch.
+    Unrecoverable,
     /// This device's leaf was removed; the account still has a leaf.
     RemovedDevice,
     /// The account no longer has any leaf in the group.
     Removed,
-    /// The copy cannot select a canonical branch.
-    Unrecoverable,
-    /// The stall detector flagged the copy as behind.
-    Stalled,
+    /// Terminally disbanded.
+    Disbanded,
+    /// Hydration refused the copy at open; it is listed record-only.
+    Quarantined,
     /// An `mk-core` access this wire version does not know.
     Unmapped,
 }
@@ -948,10 +947,12 @@ impl From<core::GroupAccess> for GroupAccess {
     fn from(access: core::GroupAccess) -> Self {
         match access {
             core::GroupAccess::Active => Self::Active,
+            core::GroupAccess::Stalled => Self::Stalled,
+            core::GroupAccess::Unrecoverable => Self::Unrecoverable,
             core::GroupAccess::RemovedDevice => Self::RemovedDevice,
             core::GroupAccess::Removed => Self::Removed,
-            core::GroupAccess::Unrecoverable => Self::Unrecoverable,
-            core::GroupAccess::Stalled => Self::Stalled,
+            core::GroupAccess::Disbanded => Self::Disbanded,
+            core::GroupAccess::Quarantined => Self::Quarantined,
             // `GroupAccess` is `#[non_exhaustive]`.
             _ => Self::Unmapped,
         }
@@ -1842,19 +1843,21 @@ pub struct MemberSnapshot {
     /// The member's account, hex.
     #[serde(with = "hex_str")]
     pub account: [u8; 32],
-    /// Whether the member is in the admin-policy set.
-    pub admin: bool,
     /// The account's leaf count — how many devices it holds.
     pub devices: u32,
 }
 
-/// A UI-facing snapshot of one group.
+/// A UI-facing snapshot of one group. `id` through `members` are durable
+/// record facts; `live` is the facts only a loaded MLS state answers —
+/// `null` for a disbanded or quarantined copy.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GroupSnapshot {
     /// The MLS group id, hex.
     #[serde(with = "hex_bytes")]
     pub id: Vec<u8>,
+    /// How this device's copy stands — send-permission and row state.
+    pub access: GroupAccess,
     /// Profile name.
     pub name: String,
     /// Profile description.
@@ -1862,19 +1865,30 @@ pub struct GroupSnapshot {
     /// Current epoch (decimal string).
     #[serde(with = "u64_str")]
     pub epoch: u64,
+    /// Members, one entry per account.
+    pub members: Vec<MemberSnapshot>,
+    /// Present iff the copy's MLS state is loaded; `null` for disbanded
+    /// and quarantined copies.
+    pub live: Option<LiveGroupSnapshot>,
+}
+
+/// The snapshot facts only a loaded MLS state can answer.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LiveGroupSnapshot {
     /// Lifecycle bucket.
     pub state: GroupState,
-    /// Whether this device can still read the group.
-    pub access: GroupAccess,
-    /// Members (account + admin flag).
-    pub members: Vec<MemberSnapshot>,
-    /// The group's Nostr routing relays.
-    pub relays: Vec<String>,
-    /// The 32-byte Nostr route id (`#h` filter value), hex.
-    #[serde(with = "hex_str")]
-    pub nostr_group_id: [u8; 32],
+    /// The admin-policy set (hex accounts, byte order).
+    #[serde(with = "hex_str_seq")]
+    pub admins: Vec<[u8; 32]>,
     /// Whether this account is an admin.
     pub own_account_admin: bool,
+    /// The group's Nostr routing relays.
+    pub relays: Vec<String>,
+    /// The 32-byte Nostr route id (`#h` filter value), hex; `null` when
+    /// the group has no routing component.
+    #[serde(with = "opt_hex32")]
+    pub nostr_group_id: Option<[u8; 32]>,
     /// The group's `0x800b` encrypted-media policy, when present.
     pub encrypted_media: Option<EncryptedMediaPolicy>,
     /// The group's `0x8006` agent text stream policy, when present.
@@ -1894,29 +1908,31 @@ impl From<core::GroupSnapshot> for GroupSnapshot {
     fn from(snapshot: core::GroupSnapshot) -> Self {
         Self {
             id: snapshot.id.0,
+            access: snapshot.access.into(),
             name: snapshot.name,
             description: snapshot.description,
             epoch: snapshot.epoch,
-            state: snapshot.state.into(),
-            access: snapshot.access.into(),
             members: snapshot
                 .members
                 .into_iter()
                 .map(|member| MemberSnapshot {
                     account: member.account.0,
-                    admin: member.admin,
                     devices: member.devices,
                 })
                 .collect(),
-            relays: snapshot.relays,
-            nostr_group_id: snapshot.nostr_group_id,
-            own_account_admin: snapshot.own_account_admin,
-            encrypted_media: snapshot.encrypted_media.map(EncryptedMediaPolicy::from),
-            agent_text_stream: snapshot.agent_text_stream.map(AgentStreamPolicy::from),
-            avatar: snapshot.avatar.map(GroupAvatar::from),
-            retention_seconds: snapshot.retention_seconds,
-            disband_enabled: snapshot.disband_enabled,
-            disbanding: snapshot.disbanding,
+            live: snapshot.live.map(|live| LiveGroupSnapshot {
+                state: live.state.into(),
+                admins: live.admins.into_iter().map(|admin| admin.0).collect(),
+                own_account_admin: live.own_account_admin,
+                relays: live.relays,
+                nostr_group_id: live.nostr_group_id,
+                encrypted_media: live.encrypted_media.map(EncryptedMediaPolicy::from),
+                agent_text_stream: live.agent_text_stream.map(AgentStreamPolicy::from),
+                avatar: live.avatar.map(GroupAvatar::from),
+                retention_seconds: live.retention_seconds,
+                disband_enabled: live.disband_enabled,
+                disbanding: live.disbanding,
+            }),
         }
     }
 }

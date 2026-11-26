@@ -50,8 +50,7 @@ mod stall_tests {
     use super::support::*;
 
     use mk_core::{
-        Availability, Event, GroupAccess, GroupId, GroupState, InputOutcome, InputReport,
-        SessionEvent,
+        Availability, Event, GroupAccess, GroupId, InputOutcome, InputReport, SessionEvent,
     };
 
     const RELAY: &str = "ws://127.0.0.1:7777";
@@ -644,7 +643,6 @@ mod stall_tests {
         }
         sync_member(&mut a2, &relay, RELAY, &gid).await;
         let snap = snapshot(&a2, &gid);
-        assert_eq!(snap.state, GroupState::Removed);
         assert_eq!(snap.access, GroupAccess::RemovedDevice);
         assert_eq!(snapshot(&a1, &gid).access, GroupAccess::Active);
         // Account-level aggregation: a1's live copy and a2's tombstone
@@ -691,12 +689,10 @@ mod stall_tests {
         sync_member(&mut a2, &relay, RELAY, &gid).await;
         // a1's live copy processes the removal: no account leaf remains.
         let snap = snapshot(&a1, &gid);
-        assert_eq!(snap.state, GroupState::Removed);
         assert_eq!(snap.access, GroupAccess::Removed);
         // a2's copy ended at its own leaf's removal and projects that
         // ending forever — it can no longer learn the account removal.
         let snap = snapshot(&a2, &gid);
-        assert_eq!(snap.state, GroupState::Removed);
         assert_eq!(snap.access, GroupAccess::RemovedDevice);
 
         // `groups()` keeps listing terminated copies until
@@ -713,7 +709,6 @@ mod stall_tests {
                 .into_iter()
                 .find(|listed| listed.id == gid)
                 .expect("the removed copy is listed");
-            assert_eq!(listed.state, GroupState::Removed);
             assert_eq!(listed.access, want);
         }
     }

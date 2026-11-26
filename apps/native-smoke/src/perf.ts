@@ -10,7 +10,7 @@
  */
 
 import { BridgeError, Engine } from "@qntx/marmot/backend";
-import type { NostrEvent, SendOutcome, Signer } from "@qntx/marmot/backend";
+import type { GroupSnapshot, NostrEvent, SendOutcome, Signer } from "@qntx/marmot/backend";
 import type { KvDriver } from "@qntx/marmot/storage";
 import { localLocks, sqliteKv } from "@qntx/marmot/storage";
 import { fakeRelay, manualClock, memoryKv } from "@qntx/marmot/testing";
@@ -52,6 +52,15 @@ function stats(values: number[]): Stats {
 }
 
 const round = (ms: number): number => Math.round(ms * 100) / 100;
+
+/** A snapshot's `#h` route hex; a freshly created group always has one. */
+const routeOf = (snapshot: GroupSnapshot): string => {
+  const route = snapshot.live?.nostrGroupId;
+  if (route === undefined) {
+    throw new Error("group route missing");
+  }
+  return route;
+};
 
 /** A nostr-tools signer that accumulates the wall time spent inside its callbacks. */
 function timedSigner(secret?: Uint8Array): { signer: Signer; spentMs: () => number } {
@@ -202,9 +211,9 @@ class Bench {
     });
     await this.publish(a);
     await b.engine.ingest(this.relay.welcomesFor(b.signer.pubkey));
-    await this.sync(b, created.nostrGroupId);
-    await this.sync(a, created.nostrGroupId);
-    return { a, b, group: created.id, route: created.nostrGroupId };
+    await this.sync(b, routeOf(created));
+    await this.sync(a, routeOf(created));
+    return { a, b, group: created.id, route: routeOf(created) };
   }
 
   /** `count` KeyPackage-only members (memoryKv), identities published, engines closed. */
@@ -329,7 +338,7 @@ async function add50(params: RunParams): Promise<Record<string, unknown>> {
   });
   const createMs = performance.now() - createStarted;
   await bench.publish(a);
-  await bench.sync(a, created.nostrGroupId);
+  await bench.sync(a, routeOf(created));
   const adds: Array<Record<string, unknown>> = [];
   for (const pubkey of extra) {
     const before = (await a.engine.group(created.id))?.members.length ?? 0;
@@ -339,7 +348,7 @@ async function add50(params: RunParams): Promise<Record<string, unknown>> {
     const inviteMs = performance.now() - started;
     await bench.publish(a);
     const confirmedMs = performance.now() - started;
-    await bench.sync(a, created.nostrGroupId);
+    await bench.sync(a, routeOf(created));
     const after = (await a.engine.group(created.id))?.members.length ?? 0;
     adds.push({ membersBefore: before, membersAfter: after, outcome: outcome.type, inviteMs: round(inviteMs), confirmedMs: round(confirmedMs) });
   }
@@ -409,7 +418,7 @@ async function memgen(params: RunParams): Promise<Record<string, unknown>> {
     invitees: [r.signer.pubkey, ...others].map((pubkey) => bench.invitee(pubkey)),
   });
   const createMs = performance.now() - createStarted;
-  const route = created.nostrGroupId;
+  const route = routeOf(created);
   await bench.publish(a);
   await r.engine.ingest(bench.relay.welcomesFor(r.signer.pubkey));
   await bench.sync(r, route);

@@ -44,7 +44,7 @@ use cgka_traits::{CgkaEngine, MaintenanceRandom, MessageId, Timestamp};
 use crate::clock::EngineMaintenanceRandom;
 use crate::events::SessionEvent;
 use crate::session::{Session, SessionError, engine_gid, session_engine_error};
-use crate::{GroupId, GroupState};
+use crate::{GroupAccess, GroupId};
 
 /// A join's history fetch may take this long before the obligation stops
 /// waiting (the design's transient `EoseTimeout`).
@@ -113,7 +113,15 @@ impl Session {
             }
             Err(error) => return Err(error),
         };
-        if matches!(snapshot.state, GroupState::Removed | GroupState::Disbanded) {
+        // A quarantined copy reports its record now, but it is still
+        // refused like the `None` it answered before this vocabulary.
+        if snapshot.access == GroupAccess::Quarantined {
+            return Err(SessionError::UnknownGroup);
+        }
+        if matches!(
+            snapshot.access,
+            GroupAccess::RemovedDevice | GroupAccess::Removed | GroupAccess::Disbanded
+        ) {
             return Err(SessionError::NotAMember);
         }
         let now_ms = self.now_ms();

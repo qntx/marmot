@@ -774,18 +774,19 @@ async function run(): Promise<void> {
       const before = await client.group(s1.ourGid);
       if (
         before === undefined ||
-        before.state === "removed" ||
+        before.access === "removed" ||
+        before.access === "removed_device" ||
         !before.members.some((member) => member.account === signer.pubkey)
       ) {
         const detail =
           before === undefined
             ? "snapshot absent"
-            : `state=${before.state}, self in roster=${String(
+            : `access=${before.access}, self in roster=${String(
                 before.members.some((member) => member.account === signer.pubkey),
               )}`;
         throw new Error(`S3 precondition failed: ${detail}`);
       }
-      log(`precondition: group state=${before.state}, self in roster (${secs(at)})`);
+      log(`precondition: group access=${before.access}, self in roster (${secs(at)})`);
 
       at = Date.now();
       await wn(rig, ["groups", "remove-members", s1.wnGid, ourNpub], rig.wnNpub);
@@ -795,7 +796,11 @@ async function run(): Promise<void> {
       const observation = await waitFor(async () => {
         const evidence: string[] = [];
         const snapshot = await client.group(s1.ourGid);
-        if (snapshot === undefined || snapshot.state === "removed") {
+        if (
+          snapshot === undefined ||
+          snapshot.access === "removed" ||
+          snapshot.access === "removed_device"
+        ) {
           evidence.push("snapshot absent/removed");
         } else if (!snapshot.members.some((member) => member.account === signer.pubkey)) {
           evidence.push("self absent from roster");
@@ -1278,8 +1283,8 @@ async function run(): Promise<void> {
         return (text.includes(name) && text.includes("https://example.com/m5a.png")) || undefined;
       }, "wn groups show reflects our name+avatar");
       const snap1 = await client.group(g.u);
-      if (snap1?.avatar?.url !== "https://example.com/m5a.png") {
-        throw new Error(`our avatar snapshot ${JSON.stringify(snap1?.avatar)}`);
+      if (snap1?.live?.avatar?.url !== "https://example.com/m5a.png") {
+        throw new Error(`our avatar snapshot ${JSON.stringify(snap1?.live?.avatar)}`);
       }
 
       await wn(
@@ -1305,8 +1310,8 @@ async function run(): Promise<void> {
         );
       }
       const snap2 = await client.group(g.w);
-      if (snap2?.avatar?.url !== "https://example.com/wn.png") {
-        throw new Error(`snapshot avatar ${JSON.stringify(snap2?.avatar)}`);
+      if (snap2?.live?.avatar?.url !== "https://example.com/wn.png") {
+        throw new Error(`snapshot avatar ${JSON.stringify(snap2?.live?.avatar)}`);
       }
     });
 
@@ -1321,8 +1326,10 @@ async function run(): Promise<void> {
       await waitFor(async () => {
         const snap = await client.group(g.u);
         return (
-          snap?.members.some((member) => member.account === rig.wnPub && member.admin) === true ||
-          undefined
+          snap?.members.some(
+            (member) =>
+              member.account === rig.wnPub && snap.live?.admins.includes(member.account) === true,
+          ) === true || undefined
         );
       }, "our snapshot shows wn admin");
       await whenTransitionClears(async () => client.setAdmin(g.u, rig.wnPub, false));
@@ -1362,7 +1369,7 @@ async function run(): Promise<void> {
       }
       await waitFor(async () => {
         const snap = await client.group(g.w);
-        return snap?.ownAccountAdmin === true || undefined;
+        return snap?.live?.ownAccountAdmin === true || undefined;
       }, "snapshot ownAccountAdmin true");
       await wn(rig, ["groups", "demote", g.w, ourNpub], rig.wnNpub);
       const removed = await waitFor(
@@ -1374,7 +1381,7 @@ async function run(): Promise<void> {
       }
       await waitFor(async () => {
         const snap = await client.group(g.w);
-        return snap?.ownAccountAdmin === false || undefined;
+        return snap?.live?.ownAccountAdmin === false || undefined;
       }, "snapshot ownAccountAdmin false");
     });
 
@@ -1431,7 +1438,12 @@ async function run(): Promise<void> {
       );
       await waitFor(async () => {
         const snap = await client.group(g.w2);
-        return snap === undefined || snap.state === "removed" || undefined;
+        return (
+          snap === undefined ||
+          snap.access === "removed" ||
+          snap.access === "removed_device" ||
+          undefined
+        );
       }, "our snapshot removed after leave");
 
       await wn(rig, ["groups", "leave", g.u2], rig.wnNpub);
@@ -1470,7 +1482,7 @@ async function run(): Promise<void> {
       }
       await waitFor(async () => {
         const snap = await client.group(g.w3);
-        return snap?.state === "disbanded" || undefined;
+        return snap?.access === "disbanded" || undefined;
       }, "our snapshot disbanded");
     });
 
@@ -1870,7 +1882,10 @@ async function run(): Promise<void> {
           }, `${label} roster includes wn`);
         }
         await sleep(2000);
-        const route = snapshot3.nostrGroupId;
+        const route = snapshot3.live?.nostrGroupId;
+        if (route === undefined) {
+          throw new Error("device 3 route missing");
+        }
         log(`device 3 created ${wnGid} with wn admin; device 4 joined (${secs(at)})`);
 
         // Arm the drop, then rename: the commit must never reach device 1's
@@ -2133,7 +2148,10 @@ async function run(): Promise<void> {
         // Whatever wn does about being stuck (its kind-1159 recovery
         // requests, if it issues them), our side stays inert: the route
         // must gain no further events authored by our session.
-        const route5 = snapshot5.nostrGroupId;
+        const route5 = snapshot5.live?.nostrGroupId;
+        if (route5 === undefined) {
+          throw new Error("device 5 route missing");
+        }
         const routeIds = () =>
           new Set(
             served.relay

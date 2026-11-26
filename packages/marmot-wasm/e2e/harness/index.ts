@@ -466,7 +466,7 @@ const api: Harness = {
       await receiver.tick();
       // oxlint-disable-next-line no-await-in-loop
       const snap = await sender.group(group.id);
-      const route = snap?.nostrGroupId;
+      const route = snap?.live?.nostrGroupId;
       if (route === undefined) {
         throw new Error("route missing");
       }

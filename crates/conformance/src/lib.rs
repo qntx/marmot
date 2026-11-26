@@ -1090,10 +1090,10 @@ impl ConvergenceSubject for SessionSubject {
                 .and_then(|gid| client.session.group(gid).ok().flatten())
                 .map(|snapshot| {
                     snapshot
-                        .members
+                        .live
                         .iter()
-                        .filter(|member| member.admin)
-                        .map(|member| self.label_for_account(&member.account))
+                        .flat_map(|live| live.admins.iter())
+                        .map(|admin| self.label_for_account(admin))
                         .collect()
                 })
                 .unwrap_or_default();
