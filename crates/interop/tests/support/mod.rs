@@ -705,7 +705,9 @@ impl Member {
                 .group(group)
                 .expect("group")
                 .expect("group exists")
-                .nostr_group_id,
+                .live
+                .and_then(|live| live.nostr_group_id)
+                .expect("a live group has a routing id"),
         )
     }
 

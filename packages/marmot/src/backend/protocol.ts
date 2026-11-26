@@ -1,5 +1,5 @@
 /**
- * TypeScript mirror of the mk-bridge JSON wire protocol (`PROTOCOL_VERSION` 9). Decoded
+ * TypeScript mirror of the mk-bridge JSON wire protocol (`PROTOCOL_VERSION` 10). Decoded
  * representation: `u64` fields arrive as decimal strings and decode to `bigint`; identifiers (event
  * ids, pubkeys, group ids, nostr group ids, signatures, outbound ids, hashes, nonces) decode to
  * validated lowercase hex `string`s; payload blobs (`key_package`, component `data`, attachment
@@ -17,7 +17,7 @@ import type { InputCategory } from "../core/errors.ts";
 export type Complete<T extends never> = T;
 
 /** Wire protocol version. Bumped on any breaking schema change. */
-export const PROTOCOL_VERSION = 9;
+export const PROTOCOL_VERSION = 10;
 
 /** One reading of the injected clock (decimal strings on the wire). */
 export type ClockReading = {
@@ -374,43 +374,38 @@ export type Outbound = {
   purpose: OutboundPurpose;
 };
 
-/** A group's lifecycle bucket for UI projection. */
-export type GroupState =
-  | "stable"
-  | "pending_publish"
-  | "recovering"
-  | "unrecoverable"
-  | "removed"
-  | "disbanded"
-  | "unmapped";
+/** A live group's lifecycle bucket for UI projection. */
+export type GroupState = "stable" | "pending_publish" | "recovering" | "unrecoverable" | "unmapped";
 
 export const GROUP_STATES = [
   "stable",
   "pending_publish",
   "recovering",
   "unrecoverable",
-  "removed",
-  "disbanded",
   "unmapped",
 ] as const;
 
 export type _GroupStateComplete = Complete<Exclude<GroupState, (typeof GROUP_STATES)[number]>>;
 
-/** Whether this device's local copy of a group can still read it. */
+/** How this device's local copy of a group stands — send-permission and row state. */
 export type GroupAccess =
   | "active"
+  | "stalled"
+  | "unrecoverable"
   | "removed_device"
   | "removed"
-  | "unrecoverable"
-  | "stalled"
+  | "disbanded"
+  | "quarantined"
   | "unmapped";
 
 export const GROUP_ACCESSES = [
   "active",
+  "stalled",
+  "unrecoverable",
   "removed_device",
   "removed",
-  "unrecoverable",
-  "stalled",
+  "disbanded",
+  "quarantined",
   "unmapped",
 ] as const;
 
@@ -690,26 +685,40 @@ export type KeyPackageInfo = {
 /** One member in a `GroupSnapshot`. */
 export type MemberSnapshot = {
   account: string;
-  admin: boolean;
   /** The account's leaf count — how many devices it holds. */
   devices: number;
 };
 
-/** A UI-facing snapshot of one group. */
+/**
+ * A UI-facing snapshot of one group. `id` through `members` are durable record facts; `live`
+ * carries the facts only a loaded MLS state answers — `undefined` for a disbanded or quarantined
+ * copy.
+ */
 export type GroupSnapshot = {
   /** The MLS group id, hex. */
   id: string;
+  /** How this device's copy stands — send-permission and row state. */
+  access: GroupAccess;
   name: string;
   description: string;
   epoch: bigint;
-  state: GroupState;
-  access: GroupAccess;
   members: MemberSnapshot[];
+  live: LiveGroupSnapshot | undefined;
+};
+
+/** The snapshot facts only a loaded MLS state can answer. */
+export type LiveGroupSnapshot = {
+  state: GroupState;
+  /** The admin-policy set, hex accounts. */
+  admins: string[];
+  ownAccountAdmin: boolean;
   /** The group's Nostr routing relays. */
   relays: string[];
-  /** The 32-byte Nostr route id (`#h` filter value), hex. */
-  nostrGroupId: string;
-  ownAccountAdmin: boolean;
+  /**
+   * The 32-byte Nostr route id (`#h` filter value), hex; `undefined` when the group has no routing
+   * component.
+   */
+  nostrGroupId: string | undefined;
   encryptedMedia: EncryptedMediaPolicy | undefined;
   agentTextStream: AgentStreamPolicy | undefined;
   /** The group's avatar component, when set. */

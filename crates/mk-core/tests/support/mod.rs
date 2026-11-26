@@ -94,7 +94,9 @@ pub fn route_hex(member: &Member, group: &GroupId) -> String {
             .group(group)
             .expect("group")
             .expect("group exists")
-            .nostr_group_id,
+            .live
+            .and_then(|live| live.nostr_group_id)
+            .expect("a live group has a routing id"),
     )
 }
 

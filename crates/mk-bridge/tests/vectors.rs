@@ -288,3 +288,45 @@ fn call_round_trip() {
         serde_json::to_value(envelope).expect("call encodes")
     );
 }
+
+/// A record-only snapshot (a disbanded or quarantined copy) encodes with
+/// `live: null` under its `access` tag — the durable record facts still
+/// read real while no live facts are fabricated.
+#[test]
+fn record_only_snapshot_encoding() {
+    let member = MemberSnapshot {
+        account: [0xbb; 32],
+        devices: 1,
+    };
+    for access in [GroupAccess::Disbanded, GroupAccess::Quarantined] {
+        let snapshot = GroupSnapshot {
+            id: vec![0xde, 0xad],
+            access,
+            name: "group".to_owned(),
+            description: "desc".to_owned(),
+            epoch: 3,
+            members: vec![member],
+            live: None,
+        };
+        let tag = serde_json::to_value(access).expect("access encodes");
+        let expected = json!({
+            "id": "dead",
+            "access": tag,
+            "name": "group",
+            "description": "desc",
+            "epoch": "3",
+            "members": [{
+                "account": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "devices": 1,
+            }],
+            "live": null,
+        });
+        assert_eq!(
+            serde_json::to_value(&snapshot).expect("snapshot encodes"),
+            expected,
+            "{access:?} snapshot encoding"
+        );
+        let decoded: GroupSnapshot = serde_json::from_value(expected).expect("snapshot decodes");
+        assert_eq!(decoded, snapshot, "{access:?} snapshot round-trips");
+    }
+}

@@ -42,14 +42,20 @@ when the group is founded with `createGroup`'s default
 `includeOwnDevices`, which adds the account's sibling slots as
 `own_devices` (a MAY — lookup failures found without them).
 
-`GroupSnapshot.access` names this device's copy: `active`;
-`removed_device` when this device left or was dropped while the account
-stays on its other leaves; `removed` for a whole-account removal;
-`unrecoverable` when the copy lost its key schedule; `stalled` when a
-stall suspicion survives one full refetch. `members` carries one entry
-per account with `devices`, its leaf count — a sibling leaf leaving
-fires no member event, so hosts re-read the snapshot on
-`epoch_changed`. A stalled, removed-device or unrecoverable copy is
+`GroupSnapshot.access` names how this device's copy stands — it alone
+decides send-permission and row state: `active`; `stalled` when a stall
+suspicion survives one full refetch; `unrecoverable` when the copy lost
+its key schedule; `removed_device` when this device left or was dropped
+while the account stays on its other leaves; `removed` for a
+whole-account removal; `disbanded` for a terminal disband;
+`quarantined` when hydration refused the copy at open. `id` through
+`members` are durable record facts; `live` carries the facts only a
+loaded MLS state answers and is `undefined` for a disbanded or
+quarantined copy — a live snapshot's `nostrGroupId` is `undefined` when
+the group has no routing component, never a placeholder. `members`
+carries one entry per account with `devices`, its leaf count — a
+sibling leaf leaving fires no member event, so hosts re-read the
+snapshot on `epoch_changed`. A stalled, removed-device or unrecoverable copy is
 replaced by an admin re-invite: the client surfaces `rejoin_offered`,
 the host shows it, and `confirmRejoin` installs the new local copy while
 delivered history stays; messages between the stall and the rejoin

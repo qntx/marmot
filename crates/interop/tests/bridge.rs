@@ -408,7 +408,9 @@ impl BridgeMember {
     fn refresh_routes(&mut self) {
         if let OpResult::Groups(result) = self.call_blocking(Request::Groups(NoArgs {})) {
             for group in result.groups {
-                self.routes_seen.insert(hex::encode(group.nostr_group_id));
+                if let Some(route) = group.live.and_then(|live| live.nostr_group_id) {
+                    self.routes_seen.insert(hex::encode(route));
+                }
             }
         }
     }
@@ -637,11 +639,13 @@ async fn scenario7_bridge_wn_invites_us() {
                     .iter()
                     .any(|event| matches!(event, SessionEvent::LocalCopyTerminated { .. }));
                 let gone = a.snapshot(&gid).is_none_or(|snapshot| {
-                    matches!(snapshot.state, protocol::GroupState::Removed)
-                        || !snapshot
-                            .members
-                            .iter()
-                            .any(|member| hex::encode(member.account) == a_hex)
+                    matches!(
+                        snapshot.access,
+                        protocol::GroupAccess::RemovedDevice | protocol::GroupAccess::Removed
+                    ) || !snapshot
+                        .members
+                        .iter()
+                        .any(|member| hex::encode(member.account) == a_hex)
                 });
                 (terminated || gone).then_some(())
             })

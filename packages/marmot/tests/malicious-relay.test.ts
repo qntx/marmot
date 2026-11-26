@@ -134,21 +134,24 @@ const wrapEvent = (createdAt = 1000n, content = ""): NostrEvent =>
 function snapshot(relays: string[] = [RELAY]): GroupSnapshot {
   return {
     id: GROUP,
+    access: "active",
     name: "g",
     description: "",
     epoch: 1n,
-    state: "stable",
-    access: "active",
     members: [],
-    relays,
-    nostrGroupId: ROUTE,
-    ownAccountAdmin: true,
-    encryptedMedia: undefined,
-    agentTextStream: undefined,
-    avatar: undefined,
-    retentionSeconds: 0n,
-    disbandEnabled: true,
-    disbanding: false,
+    live: {
+      state: "stable",
+      admins: [],
+      ownAccountAdmin: true,
+      relays,
+      nostrGroupId: ROUTE,
+      encryptedMedia: undefined,
+      agentTextStream: undefined,
+      avatar: undefined,
+      retentionSeconds: 0n,
+      disbandEnabled: true,
+      disbanding: false,
+    },
   };
 }
 

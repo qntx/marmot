@@ -286,7 +286,7 @@ mod crash {
 
     #[derive(PartialEq, Debug)]
     struct GroupObs {
-        state: GroupState,
+        state: Option<GroupState>,
         epoch: u64,
         members: BTreeSet<usize>,
         admins: BTreeSet<usize>,
@@ -525,12 +525,9 @@ mod crash {
             );
             if let Some(gid) = &self.world.gid
                 && let Ok(Some(snapshot)) = self.world.members[member].session.group(gid)
+                && let Some(route) = snapshot.live.and_then(|live| live.nostr_group_id)
             {
-                events.extend(group_events(
-                    &self.world.relay,
-                    RELAY,
-                    &hex::encode(snapshot.nostr_group_id),
-                ));
+                events.extend(group_events(&self.world.relay, RELAY, &hex::encode(route)));
             }
             if events.is_empty() {
                 return;
@@ -917,7 +914,7 @@ mod crash {
                     .expect("groups")
                     .iter()
                     .map(|snapshot: &GroupSnapshot| GroupObs {
-                        state: snapshot.state,
+                        state: snapshot.live.as_ref().map(|live| live.state),
                         epoch: snapshot.epoch,
                         members: snapshot
                             .members
@@ -925,10 +922,10 @@ mod crash {
                             .map(|member| label_of(member.account))
                             .collect(),
                         admins: snapshot
-                            .members
+                            .live
                             .iter()
-                            .filter(|member| member.admin)
-                            .map(|member| label_of(member.account))
+                            .flat_map(|live| live.admins.iter())
+                            .map(|admin| label_of(*admin))
                             .collect(),
                         name: snapshot.name.clone(),
                         description: snapshot.description.clone(),
@@ -1792,14 +1789,31 @@ mod crash {
                     let groups = session.groups().expect("groups");
                     let coherent = groups
                         .iter()
-                        .map(|g| (g.state, g.epoch, g.members.len()))
+                        .map(|g| {
+                            (
+                                g.live.as_ref().map(|live| live.state),
+                                g.epoch,
+                                g.members.len(),
+                            )
+                        })
                         .collect::<Vec<_>>()
                         == intact_groups
                             .iter()
-                            .map(|g| (g.state, g.epoch, g.members.len()))
+                            .map(|g| {
+                                (
+                                    g.live.as_ref().map(|live| live.state),
+                                    g.epoch,
+                                    g.members.len(),
+                                )
+                            })
                             .collect::<Vec<_>>();
                     let flagged = groups.iter().any(|g| {
-                        matches!(g.state, GroupState::Recovering | GroupState::Unrecoverable)
+                        g.live.as_ref().is_some_and(|live| {
+                            matches!(
+                                live.state,
+                                GroupState::Recovering | GroupState::Unrecoverable
+                            )
+                        })
                     }) || session
                         .drain_events()
                         .unwrap()

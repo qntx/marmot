@@ -920,6 +920,8 @@ export class Pump {
         case "rejoin_offered":
         case "group_state_invalidated":
         case "group_state_revalidated":
+        case "hydration_quarantined":
+        case "hydration_recovered":
           this.reconcileFlag = true;
           this.emitGroupChange(event);
           break;
@@ -964,21 +966,31 @@ export class Pump {
       return;
     }
     const snapshots = await this.engine.groups();
-    const live = snapshots.filter(
-      (snapshot) => snapshot.state !== "removed" && snapshot.state !== "disbanded",
-    );
+    const routable: Array<{ id: string; route: string; relays: string[] }> = [];
+    for (const snapshot of snapshots) {
+      const route = snapshot.live?.nostrGroupId;
+      if (
+        route === undefined ||
+        (snapshot.access !== "active" &&
+          snapshot.access !== "stalled" &&
+          snapshot.access !== "unrecoverable")
+      ) {
+        continue;
+      }
+      routable.push({ id: snapshot.id, route, relays: snapshot.live?.relays ?? [] });
+    }
     const plan = planSubscriptions({
       account: this.account,
       inboxRelays: this.state.inbox.filter((relay) => safeRelayUrl(relay, this.allowLoopback)),
-      groups: live.map((snapshot) => ({
-        route: snapshot.nostrGroupId,
-        relays: snapshot.relays.filter((relay) => safeRelayUrl(relay, this.allowLoopback)),
+      groups: routable.map((group) => ({
+        route: group.route,
+        relays: group.relays.filter((relay) => safeRelayUrl(relay, this.allowLoopback)),
       })),
       cursor: (key) => this.state.cursors[key],
     });
     this.routeGroup.clear();
-    for (const snapshot of live) {
-      this.routeGroup.set(snapshot.nostrGroupId, snapshot.id);
+    for (const group of routable) {
+      this.routeGroup.set(group.route, group.id);
     }
     this.routeRelays.clear();
     for (const sub of plan.subscriptions) {

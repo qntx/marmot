@@ -50,7 +50,7 @@ mod lifecycle_tests {
     use std::sync::{Arc, Mutex};
 
     use mk_core::{
-        AccountId, AccountSigner, Availability, Clock, Event, GroupState, InputOutcome, Outbound,
+        AccountId, AccountSigner, Availability, Clock, Event, GroupAccess, InputOutcome, Outbound,
         OutboundPurpose, SessionError, SessionEvent, SignerError, SignerFuture, UnsignedEvent,
         testing::{LocalSigner, key_package_bundle_count},
     };
@@ -625,7 +625,8 @@ mod lifecycle_tests {
                 .group(&gid)
                 .expect("group")
                 .expect("snapshot")
-                .own_account_admin,
+                .live
+                .is_some_and(|live| live.own_account_admin),
             "a is a plain member"
         );
 
@@ -656,7 +657,7 @@ mod lifecycle_tests {
         a.session.tick().await.expect("tick");
         flush(&mut a, &relay).await;
         let a_snapshot = a.session.group(&gid).expect("group").expect("snapshot");
-        assert_eq!(a_snapshot.state, GroupState::Removed);
+        assert_eq!(a_snapshot.access, GroupAccess::Removed);
     }
 
     /// An admin leaf cannot `SelfRemove`: the group is reported in

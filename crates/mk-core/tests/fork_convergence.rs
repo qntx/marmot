@@ -198,7 +198,11 @@ mod fork_tests {
             "[fork] settled: b {} a1 {} a2 {:?}",
             snapshot(&b, &gid).epoch,
             snapshot(&a1, &gid).epoch,
-            a2.session.group(&gid).ok().flatten().map(|g| g.state)
+            a2.session
+                .group(&gid)
+                .ok()
+                .flatten()
+                .and_then(|g| g.live.map(|live| live.state))
         );
 
         // Both directions must cross the fork without loss.

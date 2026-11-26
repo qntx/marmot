@@ -334,7 +334,9 @@ export async function scenarioModifiers(
     const snapshots = await Promise.all(
       [a, b, c].map(async (handle) => handle.client.group(group)),
     );
-    return snapshots.every((snapshot) => snapshot !== undefined && snapshot.state === "stable");
+    return snapshots.every(
+      (snapshot) => snapshot !== undefined && snapshot.live?.state === "stable",
+    );
   }, "all members stable");
 
   // The scripted traffic; every op is recorded so the sender can fold its own send. B's own

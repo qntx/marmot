@@ -61,9 +61,9 @@ operation is `invalid_request { reason: "value" }`).
 
 Result payloads that carry more than their request implies:
 
-| Request        | Result          | Note                                                                                                                        |
-| -------------- | --------------- | --------------------------------------------------------------------------------------------------------------------------- |
-| `create_group` | `group_created` | The full `GroupSnapshot`, not just the group id — hosts need `nostr_group_id`, the 32-byte transport route publishes carry. |
+| Request        | Result          | Note                                                                                                                                                                              |
+| -------------- | --------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `create_group` | `group_created` | The full `GroupSnapshot`, not just the group id — hosts need `live.nostr_group_id`, the 32-byte transport route publishes carry (`null` when the group has no routing component). |
 
 ## Timing
 

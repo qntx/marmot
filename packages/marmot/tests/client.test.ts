@@ -19,6 +19,7 @@ import type {
   BridgeResponse,
   DrainResponse,
   GroupSnapshot,
+  LiveGroupSnapshot,
   InputReport,
   NostrEvent,
   Outbound,
@@ -104,24 +105,31 @@ const msg = (id: string) => ({
 const groupEvent = (createdAt = 1000n, content = ""): NostrEvent =>
   event({ kind: 445, createdAt, tags: [["h", ROUTE]], content });
 
-function snapshot(): GroupSnapshot {
+function liveSnapshot(): LiveGroupSnapshot {
   return {
-    id: GROUP,
-    name: "g",
-    description: "",
-    epoch: 1n,
     state: "stable",
-    access: "active",
-    members: [],
+    admins: [],
+    ownAccountAdmin: true,
     relays: [RELAY],
     nostrGroupId: ROUTE,
-    ownAccountAdmin: true,
     encryptedMedia: undefined,
     agentTextStream: undefined,
     avatar: undefined,
     retentionSeconds: 0n,
     disbandEnabled: true,
     disbanding: false,
+  };
+}
+
+function snapshot(): GroupSnapshot {
+  return {
+    id: GROUP,
+    access: "active",
+    name: "g",
+    description: "",
+    epoch: 1n,
+    members: [],
+    live: liveSnapshot(),
   };
 }
 
@@ -577,9 +585,8 @@ describe("MarmotClient", () => {
       {
         ...snapshot(),
         id: removedId,
-        nostrGroupId: removedRoute,
-        state: "removed",
         access: "removed",
+        live: { ...liveSnapshot(), nostrGroupId: removedRoute },
       },
     ];
     const fixture = await open(
@@ -589,7 +596,7 @@ describe("MarmotClient", () => {
     await settle(fixture.timer, 5000);
 
     const groups = await fixture.client.groups();
-    expect(groups.map((g) => g.state)).toStrictEqual(["stable", "removed"]);
+    expect(groups.map((g) => g.live?.state)).toStrictEqual(["stable", "stable"]);
     expect(groups[1]?.access).toBe("removed");
 
     // Only the live group's route gets a kind-445 subscription.
@@ -597,6 +604,61 @@ describe("MarmotClient", () => {
       .filter((sub) => sub.filters.some((filter) => filter.kinds?.includes(445) === true))
       .flatMap((sub) => sub.filters.flatMap(routesOf));
     expect(routes).toStrictEqual([ROUTE]);
+    await fixture.client.close();
+  });
+
+  test("record-only and route-less copies plan no group subscription", async () => {
+    const script = freshScript();
+    script.groups = [
+      snapshot(),
+      { ...snapshot(), id: "ee".repeat(32), access: "disbanded", live: undefined },
+      { ...snapshot(), id: "dd".repeat(32), access: "quarantined", live: undefined },
+      {
+        ...snapshot(),
+        id: "cc".repeat(32),
+        access: "removed_device",
+        live: { ...liveSnapshot(), nostrGroupId: "ff".repeat(32) },
+      },
+      // A live copy whose group carries no routing component: nothing to
+      // subscribe.
+      {
+        ...snapshot(),
+        id: "bb".repeat(32),
+        live: { ...liveSnapshot(), nostrGroupId: undefined },
+      },
+    ];
+    const fixture = await open(
+      script,
+      encodeClientState({ nip44Extended: true, cursors: {}, inbox: [RELAY] }),
+    );
+    await settle(fixture.timer, 5000);
+    const routes = fixture.subs
+      .filter((sub) => sub.filters.some((filter) => filter.kinds?.includes(445) === true))
+      .flatMap((sub) => sub.filters.flatMap(routesOf));
+    expect(routes).toStrictEqual([ROUTE]);
+    await fixture.client.close();
+  });
+
+  test("a hydration_quarantined event reconciles and drops the copy's subscription", async () => {
+    const script = freshScript();
+    script.groups = [snapshot()];
+    const fixture = await open(
+      script,
+      encodeClientState({ nip44Extended: true, cursors: {}, inbox: [RELAY] }),
+    );
+    await settle(fixture.timer, 5000);
+    // Inbox gift wraps plus the group's kind-445 sub are open.
+    expect(fixture.network.openSubscriptions("c")).toBe(2);
+    // The copy quarantines mid-run: groups() now reports it record-only,
+    // and the next op's post-run drain carries the event.
+    script.groups = [{ ...snapshot(), access: "quarantined", live: undefined }];
+    script.drains.unshift({
+      type: "events",
+      events: [{ type: "hydration_quarantined", group: GROUP }],
+    });
+    await fixture.client.groups();
+    await settle(fixture.timer, 5000);
+    expect(fixture.network.openSubscriptions("c")).toBe(1);
     await fixture.client.close();
   });
 
@@ -993,8 +1055,11 @@ describe("MarmotClient", () => {
     script.groups = Array.from({ length: 17 }, (_, i) => ({
       ...snapshot(),
       id: `${i.toString(16).padStart(2, "0")}${"c".repeat(62)}`,
-      nostrGroupId: `${i.toString(16).padStart(2, "0")}${"d".repeat(62)}`,
-      relays: [`wss://overflow-${i}.example`],
+      live: {
+        ...liveSnapshot(),
+        nostrGroupId: `${i.toString(16).padStart(2, "0")}${"d".repeat(62)}`,
+        relays: [`wss://overflow-${i}.example`],
+      },
     }));
     const fixture = await open(
       script,
@@ -1660,8 +1725,11 @@ describe("MarmotClient", () => {
     const pool = Array.from({ length: 8 }, (_, i) => ({
       ...snapshot(),
       id: `${i.toString(16).padStart(2, "0")}${"c".repeat(62)}`,
-      nostrGroupId: `${i.toString(16).padStart(2, "0")}${"d".repeat(62)}`,
-      relays: [`wss://g${i % 4}.example`],
+      live: {
+        ...liveSnapshot(),
+        nostrGroupId: `${i.toString(16).padStart(2, "0")}${"d".repeat(62)}`,
+        relays: [`wss://g${i % 4}.example`],
+      },
     }));
     const live = new Set<number>([0]);
     for (let i = 0; i < 200; i += 1) {
@@ -1688,7 +1756,8 @@ describe("MarmotClient", () => {
     expect(fixture.network.peakRelays("c")).toBeLessThanOrEqual(16);
     // With only four group relays in play the input always fits: every referenced
     // relay holds a 445 subscription and nothing reports subscription_limit.
-    const relaysNeeded = new Set(script.groups.flatMap((snap) => snap.relays));
+    // oxlint-disable-next-line vitest/no-conditional-in-test -- a script snapshot may be record-only
+    const relaysNeeded = new Set(script.groups.flatMap((snap) => snap.live?.relays ?? []));
     expect(fixture.network.openRelays("c")).toBeGreaterThanOrEqual(relaysNeeded.size);
     expect(errors.map((e) => e.kind)).not.toContain("subscription_limit");
     await fixture.client.close();
@@ -2066,12 +2135,18 @@ describe("MarmotClient", () => {
     script.groups = [
       {
         ...snapshot(),
-        avatar: { url: "https://10.0.0.1/a.png", dim: undefined, thumbhash: undefined },
+        live: {
+          ...liveSnapshot(),
+          avatar: { url: "https://10.0.0.1/a.png", dim: undefined, thumbhash: undefined },
+        },
       },
       {
         ...snapshot(),
         id: "ee".repeat(32),
-        avatar: { url: "https://blossom.example/a.png", dim: undefined, thumbhash: undefined },
+        live: {
+          ...liveSnapshot(),
+          avatar: { url: "https://blossom.example/a.png", dim: undefined, thumbhash: undefined },
+        },
       },
     ];
     const fixture = await open(
@@ -2079,7 +2154,7 @@ describe("MarmotClient", () => {
       encodeClientState({ nip44Extended: true, cursors: {}, inbox: [] }),
     );
     const groupSnapshots = await fixture.client.groups();
-    const avatars = groupSnapshots.map((g) => g.avatar);
+    const avatars = groupSnapshots.map((g) => g.live?.avatar);
     expect(avatars).toStrictEqual([
       undefined,
       { url: "https://blossom.example/a.png", dim: undefined, thumbhash: undefined },
@@ -2160,6 +2235,39 @@ describe("MarmotClient", () => {
       { type: "message_expired", group: GROUP, message, transportId },
     ]);
     expect(messages).toHaveLength(0);
+    await fixture.client.close();
+  });
+
+  test("a hydration_recovered event reconciles and subscribes the recovered group", async () => {
+    const script = freshScript();
+    script.drains.push(
+      { type: "events", events: [] }, // open's first drain
+      { type: "events", events: [] }, // the serialized takeOutbound job's drain
+      {
+        type: "events",
+        events: [{ type: "hydration_recovered", group: GROUP, epoch: 3n }],
+      },
+    );
+    const fixture = await open(
+      script,
+      encodeClientState({ nip44Extended: true, cursors: {}, inbox: [RELAY] }),
+    );
+    // The open reconcile ran with an empty group list: nothing subscribed.
+    await settle(fixture.timer, 5000);
+    expect(
+      fixture.subs.filter((sub) =>
+        sub.filters.some((filter) => filter.kinds?.includes(445) === true),
+      ),
+    ).toHaveLength(0);
+    // The copy recovers while the client runs: groups() reports it live
+    // again, and the next op's post-run drain carries the event.
+    script.groups = [snapshot()];
+    await fixture.client.groups();
+    await settle(fixture.timer, 5000);
+    const routes = fixture.subs
+      .filter((sub) => sub.filters.some((filter) => filter.kinds?.includes(445) === true))
+      .flatMap((sub) => sub.filters.flatMap(routesOf));
+    expect(routes).toStrictEqual([ROUTE]);
     await fixture.client.close();
   });
 

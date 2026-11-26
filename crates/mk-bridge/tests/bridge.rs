@@ -726,7 +726,6 @@ async fn groups_keeps_removed_copy_until_forget() {
         .iter()
         .find(|snapshot| snapshot.id == group)
         .expect("the removed copy is listed");
-    assert!(matches!(listed.state, GroupState::Removed));
     assert!(matches!(listed.access, GroupAccess::Removed));
 
     let response = b
@@ -2001,8 +2000,9 @@ async fn app_surface() {
         panic!("create_group")
     };
     let group = created.group.id.clone();
-    assert!(created.group.disband_enabled, "lifecycle required");
-    assert_eq!(created.group.retention_seconds, 0);
+    let live = created.group.live.expect("a live snapshot");
+    assert!(live.disband_enabled, "lifecycle required");
+    assert_eq!(live.retention_seconds, 0);
     a.publish(&mut relay).await;
     let welcomes = welcomes_for(&relay, &b.account_hex());
     b.call(Request::Ingest(IngestRequest { events: welcomes }))
@@ -2179,13 +2179,14 @@ async fn app_surface() {
     else {
         panic!("b snapshot")
     };
-    assert!(snapshot.own_account_admin, "b is admin after promotion");
-    let avatar = snapshot.avatar.expect("avatar set");
+    let live = snapshot.live.expect("a live snapshot");
+    assert!(live.own_account_admin, "b is admin after promotion");
+    let avatar = live.avatar.expect("avatar set");
     assert_eq!(avatar.url, "https://example.com/a.png");
     assert_eq!(avatar.dim.as_deref(), Some("64x64"));
-    assert_eq!(snapshot.retention_seconds, 60);
-    assert!(snapshot.disband_enabled);
-    assert!(!snapshot.disbanding);
+    assert_eq!(live.retention_seconds, 60);
+    assert!(live.disband_enabled);
+    assert!(!live.disbanding);
 
     // A message under the policy arrives with `expires_at`.
     a.advance(1_000);
@@ -2243,7 +2244,7 @@ async fn app_surface() {
         else {
             panic!("b snapshot")
         };
-        if matches!(snapshot.state, GroupState::Disbanded) {
+        if matches!(snapshot.access, GroupAccess::Disbanded) {
             break;
         }
     }
@@ -2259,9 +2260,9 @@ async fn app_surface() {
         panic!("b snapshot")
     };
     assert!(
-        matches!(snapshot.state, GroupState::Disbanded),
+        matches!(snapshot.access, GroupAccess::Disbanded),
         "b sees the group disbanded: {:?}",
-        snapshot.state
+        snapshot.access
     );
 
     // `forget_group` on a live second group: `done`, then absent from

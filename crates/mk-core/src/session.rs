@@ -825,7 +825,11 @@ pub struct TickReport {
     pub next_wake_ms: Option<u64>,
 }
 
-/// A group's lifecycle bucket for UI projection.
+/// A live group's lifecycle bucket for UI projection.
+///
+/// Only a copy whose MLS state is loaded carries a state — every
+/// terminal ending (removed, disbanded, quarantined) lives in
+/// [`GroupAccess`], not here.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum GroupState {
@@ -837,31 +841,32 @@ pub enum GroupState {
     Recovering,
     /// Frozen pending a verified repair path.
     Unrecoverable,
-    /// This device's copy ended (left, removed, or reset).
-    Removed,
-    /// Terminally disbanded.
-    Disbanded,
 }
 
 /// How this device's local copy of a group stands.
 ///
-/// The one host vocabulary for "this device can't read this group". Each
-/// variant has exactly one source of truth in [`Session::group`];
-/// `Active` also marks a disbanded copy because `state` already reports
-/// that ending.
+/// The one host vocabulary for "can this device send here" and which row
+/// state to render: `access` alone answers both. `Active` and `Stalled`
+/// are the only sendable copies; every other variant is a different way
+/// the copy is not currently usable.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum GroupAccess {
     /// The local copy reads and writes normally.
     Active,
+    /// The stall detector flagged the copy as behind.
+    Stalled,
+    /// The copy cannot select a canonical branch (engine-flagged).
+    Unrecoverable,
     /// This device's leaf was removed; the account still has a leaf.
     RemovedDevice,
     /// The account no longer has any leaf in the group.
     Removed,
-    /// The copy cannot select a canonical branch (engine-flagged).
-    Unrecoverable,
-    /// The stall detector flagged the copy as behind.
-    Stalled,
+    /// Terminally disbanded.
+    Disbanded,
+    /// Hydration refused the copy at open; it is listed record-only
+    /// until a repair (`HydrationRecovered`) restores it.
+    Quarantined,
 }
 
 /// Which removal a `removed` record represents, read against the roster.
@@ -875,32 +880,53 @@ enum RemovedScope {
     Account,
 }
 
-/// The access mapping's precedence: a removed copy splits by whether
+/// What the stored record alone says about the copy: a record-only
+/// state outranks every live distinction, so the caller decides it
+/// first — a quarantined copy stays `Quarantined` even when its record
+/// also carries `disbanded`.
+#[derive(Clone, Copy)]
+enum RecordState {
+    /// The copy's MLS state loads.
+    Live,
+    /// Hydration refused the copy at open.
+    Quarantined,
+    /// Terminally disbanded.
+    Disbanded,
+}
+
+/// The access mapping's precedence: a quarantined or disbanded copy
+/// outranks every live distinction, a removed copy splits by whether
 /// the account still holds a roster leaf, an engine-flagged
 /// unrecoverable copy outranks a stall flag, and everything else reads
 /// normally.
-const fn group_access(removed: RemovedScope, unrecoverable: bool, stalled: bool) -> GroupAccess {
-    match removed {
-        RemovedScope::DeviceOnly => GroupAccess::RemovedDevice,
-        RemovedScope::Account => GroupAccess::Removed,
-        RemovedScope::Live => {
-            if unrecoverable {
-                GroupAccess::Unrecoverable
-            } else if stalled {
-                GroupAccess::Stalled
-            } else {
-                GroupAccess::Active
+const fn group_access(
+    record: RecordState,
+    removed: RemovedScope,
+    unrecoverable: bool,
+    stalled: bool,
+) -> GroupAccess {
+    match record {
+        RecordState::Quarantined => GroupAccess::Quarantined,
+        RecordState::Disbanded => GroupAccess::Disbanded,
+        RecordState::Live => match removed {
+            RemovedScope::DeviceOnly => GroupAccess::RemovedDevice,
+            RemovedScope::Account => GroupAccess::Removed,
+            RemovedScope::Live => {
+                if unrecoverable {
+                    GroupAccess::Unrecoverable
+                } else if stalled {
+                    GroupAccess::Stalled
+                } else {
+                    GroupAccess::Active
+                }
             }
-        }
+        },
     }
 }
 
 /// Collapses a leaf-level roster into one snapshot member per account,
 /// first-appearance order, `devices` = the account's leaf count.
-fn aggregate_members(
-    leaves: impl IntoIterator<Item = [u8; 32]>,
-    admins: &[[u8; 32]],
-) -> Vec<MemberSnapshot> {
+fn aggregate_members(leaves: impl IntoIterator<Item = [u8; 32]>) -> Vec<MemberSnapshot> {
     let mut members: Vec<MemberSnapshot> = Vec::new();
     for bytes in leaves {
         if let Some(member) = members.iter_mut().find(|member| member.account.0 == bytes) {
@@ -908,7 +934,6 @@ fn aggregate_members(
         } else {
             members.push(MemberSnapshot {
                 account: AccountId(bytes),
-                admin: admins.contains(&bytes),
                 devices: 1,
             });
         }
@@ -916,33 +941,28 @@ fn aggregate_members(
     members
 }
 
-/// The snapshot a disbanded copy can still answer: the durable record
-/// keeps name, epoch, and the former roster, but the engine deleted the
-/// live MLS state the member/component reads need.
-fn disbanded_snapshot(id: &GroupId, record: &cgka_traits::group::Group) -> GroupSnapshot {
+/// The snapshot a record-only copy answers: the durable record keeps
+/// name, epoch, and the roster, but the copy holds no loaded MLS state —
+/// disbanded (the engine deleted it) or quarantined (hydration refused
+/// it) — so `live` is `None` and nothing else is fabricated.
+fn record_snapshot(
+    id: &GroupId,
+    record: &cgka_traits::group::Group,
+    state: RecordState,
+) -> GroupSnapshot {
     GroupSnapshot {
         id: id.clone(),
+        access: group_access(state, RemovedScope::Live, false, false),
         name: record.name.clone(),
         description: record.description.clone(),
         epoch: record.epoch.0,
-        state: GroupState::Disbanded,
-        access: GroupAccess::Active,
         members: aggregate_members(
             record
                 .members
                 .iter()
                 .filter_map(|member| member.id.as_slice().try_into().ok()),
-            &[],
         ),
-        relays: Vec::new(),
-        nostr_group_id: [0; 32],
-        own_account_admin: false,
-        encrypted_media: None,
-        agent_text_stream: None,
-        avatar: None,
-        retention_seconds: 0,
-        disband_enabled: false,
-        disbanding: false,
+        live: None,
     }
 }
 
@@ -951,37 +971,51 @@ fn disbanded_snapshot(id: &GroupId, record: &cgka_traits::group::Group) -> Group
 pub struct MemberSnapshot {
     /// The member's account.
     pub account: AccountId,
-    /// Whether the member is in the admin-policy set.
-    pub admin: bool,
     /// The account's leaf count — how many devices it holds.
     pub devices: u32,
 }
 
 /// A UI-facing snapshot of one group.
+///
+/// `id` through `members` are durable record facts — always real, even
+/// for a record-only copy. `live` carries the facts only a loaded MLS
+/// state can answer; it is `None` for a disbanded or quarantined copy.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GroupSnapshot {
     /// The MLS group id.
     pub id: GroupId,
+    /// How this device's copy stands — send-permission and row state.
+    pub access: GroupAccess,
     /// Profile name.
     pub name: String,
     /// Profile description.
     pub description: String,
     /// Current epoch.
     pub epoch: u64,
-    /// Lifecycle bucket.
-    pub state: GroupState,
-    /// Whether this device can still read the group; `Active` also marks
-    /// a `Disbanded` snapshot (`state` carries the ending).
-    pub access: GroupAccess,
     /// Members, one entry per account (leaf scope stays in `devices`).
     pub members: Vec<MemberSnapshot>,
-    /// The group's Nostr routing relays.
-    pub relays: Vec<String>,
-    /// The 32-byte Nostr route id (`#h` filter value) for fetching this
-    /// group's transport feed. Distinct from [`GroupId`].
-    pub nostr_group_id: [u8; 32],
+    /// Present iff the copy's MLS state is loaded (active, stalled,
+    /// unrecoverable, or removed); `None` for disbanded and quarantined
+    /// copies.
+    pub live: Option<LiveGroupSnapshot>,
+}
+
+/// The snapshot facts only a loaded MLS state can answer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LiveGroupSnapshot {
+    /// Lifecycle bucket.
+    pub state: GroupState,
+    /// The admin-policy set, as decoded.
+    pub admins: Vec<AccountId>,
     /// Whether this account is an admin.
     pub own_account_admin: bool,
+    /// The group's Nostr routing relays; empty only when the group
+    /// genuinely has no routing component.
+    pub relays: Vec<String>,
+    /// The 32-byte Nostr route id (`#h` filter value) for fetching this
+    /// group's transport feed; `None` when the group has no routing
+    /// component or it does not decode. Distinct from [`GroupId`].
+    pub nostr_group_id: Option<[u8; 32]>,
     /// The group's `0x800b` encrypted-media policy, when the component is
     /// present and decodes.
     pub encrypted_media: Option<EncryptedMediaPolicy>,
@@ -3539,11 +3573,13 @@ impl Session {
     /// Snapshots of every stored local copy of a group — live and
     /// terminated alike — in group-id byte order, for UI projection.
     ///
-    /// A removed copy reports `state: Removed` with `access:
-    /// RemovedDevice|Removed`; a disbanded copy reports `state:
-    /// Disbanded`. A terminated copy stays listed until
-    /// [`Self::forget_group`]; quarantined copies are not listed (they
-    /// surface through `HydrationQuarantined`).
+    /// A removed copy reports `access: RemovedDevice|Removed` with a
+    /// live snapshot; a disbanded copy reports `access: Disbanded` and a
+    /// quarantined copy `access: Quarantined`, both record-only
+    /// (`live: None`). A terminated or quarantined copy stays listed
+    /// until [`Self::forget_group`] — except a quarantined copy whose
+    /// stored record row does not even decode, which cannot present its
+    /// durable facts and is skipped.
     ///
     /// # Errors
     /// [`SessionError`] for engine/storage failures.
@@ -3585,17 +3621,43 @@ impl Session {
                     && row.epoch == record.epoch.0
                     && row.welcome == record.local_copy_welcome_created_at.map(|stamp| stamp.0)
             });
-        Ok(group_access(removed, unrecoverable, stalled))
+        Ok(group_access(
+            RecordState::Live,
+            removed,
+            unrecoverable,
+            stalled,
+        ))
     }
 
     /// Snapshot of one group. `Ok(None)` when the device holds no copy of
-    /// it (unknown, quarantined or forgotten); a removed or disbanded copy
-    /// still snapshots.
+    /// it (unknown or forgotten); a removed or disbanded copy still
+    /// snapshots, and a quarantined copy answers its stored record with
+    /// `access: Quarantined`, `live: None` — except a quarantined copy
+    /// whose record row does not decode (`GroupRecordLoadFailed`), which
+    /// answers `Ok(None)`: hydration could not read the row either, so no
+    /// durable fact can be presented.
     ///
     /// # Errors
     /// [`SessionError`] for engine/storage failures.
     pub fn group(&self, id: &GroupId) -> Result<Option<GroupSnapshot>, SessionError> {
         let gid = engine_gid(id);
+        // A quarantined copy is refused by every live engine read, so its
+        // snapshot comes straight from the stored record row — the same
+        // row hydration failed to promote.
+        if self
+            .engine
+            .quarantined_groups()
+            .iter()
+            .any(|(quarantined, _)| quarantined == &gid)
+        {
+            return match self.provider.get_group(&gid) {
+                Ok(record) => Ok(Some(record_snapshot(id, &record, RecordState::Quarantined))),
+                // The row absent (a forget raced the quarantine) or
+                // undecodable means no durable facts to present.
+                Err(StorageError::NotFound | StorageError::Serialization(_)) => Ok(None),
+                Err(error) => Err(SessionError::Storage(error)),
+            };
+        }
         let record = match self.engine.group_record(&gid) {
             Ok(record) => record,
             // A forgotten copy's row is gone (`forget_group_local`): the
@@ -3605,27 +3667,29 @@ impl Session {
             }
             Err(error) => return Err(session_engine_error(error)),
         };
+        let epoch_state = self.engine.epoch_state(&gid);
         // A disbanded copy keeps its durable record (name, epoch, the
         // former roster) but the engine has deleted the live MLS state, so
-        // member/component reads below would fail — the tombstone answers
-        // everything the snapshot can still say.
-        if record.disbanded.is_some() {
-            return Ok(Some(disbanded_snapshot(id, &record)));
+        // member/component reads below would fail — the record answers
+        // everything the snapshot can still say. `EpochState::Disbanded`
+        // is the same terminal copy, so there is one disbanded path.
+        if record.disbanded.is_some() || matches!(epoch_state, Some(EpochState::Disbanded(_))) {
+            return Ok(Some(record_snapshot(id, &record, RecordState::Disbanded)));
         }
         let members = self.engine.members(&gid).map_err(session_engine_error)?;
         let admins = self.admin_set(&gid)?;
-        let state = match self.engine.epoch_state(&gid) {
+        let state = match epoch_state {
             Some(EpochState::Stable { .. }) | None => GroupState::Stable,
             Some(EpochState::PendingPublish(_) | EpochState::Merging(_)) => {
                 GroupState::PendingPublish
             }
             Some(EpochState::Recovering(_)) => GroupState::Recovering,
-            Some(EpochState::Unrecoverable(_)) => GroupState::Unrecoverable,
-            Some(EpochState::Disbanded(_)) => GroupState::Disbanded,
+            // `Disbanded` exits above, before any live read.
+            Some(EpochState::Unrecoverable(_) | EpochState::Disbanded(_)) => {
+                GroupState::Unrecoverable
+            }
         };
-        let state = if record.removed {
-            GroupState::Removed
-        } else if record.unrecoverable {
+        let state = if record.unrecoverable {
             GroupState::Unrecoverable
         } else {
             state
@@ -3643,7 +3707,7 @@ impl Session {
             .as_ref()
             .map(|routing| routing.relays.clone())
             .unwrap_or_default();
-        let nostr_group_id = routing.map_or([0; 32], |routing| routing.nostr_group_id);
+        let nostr_group_id = routing.map(|routing| routing.nostr_group_id);
         let epoch = record.epoch.0;
         let account = self.account();
         let avatar = self
@@ -3676,26 +3740,28 @@ impl Session {
             .map_err(session_engine_error)?;
         Ok(Some(GroupSnapshot {
             id: id.clone(),
+            access,
             name: record.name,
             description: record.description,
             epoch,
-            state,
-            access,
-            nostr_group_id,
             members: aggregate_members(
                 members
                     .iter()
                     .filter_map(|member| member.id.as_slice().try_into().ok()),
-                &admins,
             ),
-            relays,
-            own_account_admin: admins.contains(&account.0),
-            encrypted_media: self.media_policy(&gid)?,
-            agent_text_stream: self.agent_stream_policy(&gid)?,
-            avatar,
-            retention_seconds,
-            disband_enabled,
-            disbanding,
+            live: Some(LiveGroupSnapshot {
+                state,
+                admins: admins.iter().map(|bytes| AccountId(*bytes)).collect(),
+                own_account_admin: admins.contains(&account.0),
+                relays,
+                nostr_group_id,
+                encrypted_media: self.media_policy(&gid)?,
+                agent_text_stream: self.agent_stream_policy(&gid)?,
+                avatar,
+                retention_seconds,
+                disband_enabled,
+                disbanding,
+            }),
         }))
     }
 
@@ -4124,26 +4190,51 @@ mod access_tests {
     //! mapping is pinned here while `tests/stall.rs` proves the
     //! removed-device/removed and stalled halves end to end.
 
-    use super::{GroupAccess, RemovedScope, group_access};
+    use super::{GroupAccess, RecordState, RemovedScope, group_access};
 
     #[test]
     fn precedence() {
+        use RecordState::{Disbanded, Quarantined};
         use RemovedScope::{Account, DeviceOnly, Live};
 
         assert_eq!(
-            group_access(DeviceOnly, false, false),
+            group_access(RecordState::Live, DeviceOnly, false, false),
             GroupAccess::RemovedDevice
         );
-        assert_eq!(group_access(Account, false, false), GroupAccess::Removed);
-        assert_eq!(group_access(Live, true, false), GroupAccess::Unrecoverable);
-        assert_eq!(group_access(Live, false, true), GroupAccess::Stalled);
-        assert_eq!(group_access(Live, false, false), GroupAccess::Active);
+        assert_eq!(
+            group_access(RecordState::Live, Account, false, false),
+            GroupAccess::Removed
+        );
+        assert_eq!(
+            group_access(RecordState::Live, Live, true, false),
+            GroupAccess::Unrecoverable
+        );
+        assert_eq!(
+            group_access(RecordState::Live, Live, false, true),
+            GroupAccess::Stalled
+        );
+        assert_eq!(
+            group_access(RecordState::Live, Live, false, false),
+            GroupAccess::Active
+        );
         // A removed copy outranks every other flag; `unrecoverable`
         // outranks `stalled`.
         assert_eq!(
-            group_access(DeviceOnly, true, true),
+            group_access(RecordState::Live, DeviceOnly, true, true),
             GroupAccess::RemovedDevice
         );
-        assert_eq!(group_access(Live, true, true), GroupAccess::Unrecoverable);
+        assert_eq!(
+            group_access(RecordState::Live, Live, true, true),
+            GroupAccess::Unrecoverable
+        );
+        // `quarantined` and `disbanded` outrank every live distinction.
+        assert_eq!(
+            group_access(Disbanded, Account, true, true),
+            GroupAccess::Disbanded
+        );
+        assert_eq!(
+            group_access(Quarantined, DeviceOnly, true, true),
+            GroupAccess::Quarantined
+        );
     }
 }

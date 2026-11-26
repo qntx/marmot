@@ -1,5 +1,7 @@
 {
   "active": "active",
+  "disbanded": "disbanded",
+  "quarantined": "quarantined",
   "removed": "removed",
   "removed_device": "removed_device",
   "stalled": "stalled",

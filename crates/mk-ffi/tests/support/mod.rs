@@ -498,7 +498,12 @@ pub trait SessionDriver {
         else {
             panic!("group result: {result:?}");
         };
-        hex::encode(snapshot.nostr_group_id)
+        hex::encode(
+            snapshot
+                .live
+                .and_then(|live| live.nostr_group_id)
+                .expect("a live group has a routing id"),
+        )
     }
 
     /// Sync the group: ingest the relay backlog, tick, publish, until

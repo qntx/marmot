@@ -20,10 +20,22 @@ npm trusted publishing (OIDC).
 
 ### Changed (BREAKING)
 
-- `groups()` now returns every local copy including removed and disbanded
-  ones (with `access`/`state` telling them apart), in a stable order, until
-  the host calls `forgetGroup`; hosts that want only live chats filter on
-  `state`/`access`.
+- `groups()` now returns every local copy including removed, disbanded and
+  quarantined ones (`access` alone tells them apart), in a stable order,
+  until the host calls `forgetGroup`; hosts that want only live chats
+  filter on `access`. A copy whose stored record row does not decode is
+  the one exception: it stays unlisted.
+- Bridge protocol 10: `GroupSnapshot` carries durable record facts (`id`,
+  `access`, profile, `epoch`, `members`) plus `live` — the facts only a
+  loaded MLS state answers (`state`, `admins`, `ownAccountAdmin`,
+  `relays`, `nostrGroupId`, the media/stream/avatar/retention/disband
+  policies). `access` gains `disbanded` and `quarantined`; `GroupState`
+  drops `removed` and `disbanded`; `MemberSnapshot` drops `admin` (a live
+  fact now read from `live.admins`). `live` is `undefined`/`null` for a
+  disbanded or quarantined copy — a disbanded copy no longer reports
+  `access: active` with placeholder routes, and a live snapshot's
+  `nostrGroupId` is `undefined`/`null` (never all-zero) when the group
+  has no routing component.
 - Bridge protocol 8: the `audit_key_package_slot` request carries
   `emptyRelays` — the write relays whose read of the slot completed
   (eose) and returned nothing.
@@ -37,6 +49,10 @@ npm trusted publishing (OIDC).
 
 ### Fixed
 
+- The pump now reconciles on `hydration_quarantined` and
+  `hydration_recovered`: a quarantined copy's subscription is dropped and
+  a recovered group's kind-445 subscription opens without waiting for an
+  unrelated reconcile.
 - `group(id)` on a forgotten copy answers `undefined` instead of failing.
 - A newly joined device no longer re-fetches the group's pre-join history
   on every reconnect: those deferred kind-445s report

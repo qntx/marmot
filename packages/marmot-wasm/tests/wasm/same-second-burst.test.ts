@@ -68,7 +68,11 @@ async function routeHex(engine: Engine, group: string): Promise<string> {
   if (snapshot === undefined) {
     throw new Error("group snapshot missing");
   }
-  return snapshot.nostrGroupId;
+  const route = snapshot.live?.nostrGroupId;
+  if (route === undefined) {
+    throw new Error("group route missing");
+  }
+  return route;
 }
 
 function messageReceived(events: SessionEvent[]): number {

@@ -33,6 +33,7 @@ import type {
   InputReport,
   Invitee,
   KeyPackageInfo,
+  LiveGroupSnapshot,
   LocalState,
   Locator,
   MediaAttachmentRef,
@@ -1233,32 +1234,28 @@ export function encodeSessionEvent(event: SessionEvent): Json {
   });
 }
 
-const MEMBER_KEYS = ["account", "admin", "devices"];
+const MEMBER_KEYS = ["account", "devices"];
 
 function decodeMember(value: unknown, path: string): MemberSnapshot {
   const o = rec(value, path, MEMBER_KEYS);
   return {
     account: hex32(field(o, "account", path), `${path}.account`),
-    admin: bool(field(o, "admin", path), `${path}.admin`),
     devices: uint(field(o, "devices", path), `${path}.devices`),
   };
 }
 
 function encodeMember(member: MemberSnapshot): Json {
-  return { account: member.account, admin: member.admin, devices: member.devices };
+  return { account: member.account, devices: member.devices };
 }
 
-const SNAPSHOT_KEYS = [
-  "id",
-  "name",
-  "description",
-  "epoch",
+const SNAPSHOT_KEYS = ["id", "access", "name", "description", "epoch", "members", "live"];
+
+const LIVE_KEYS = [
   "state",
-  "access",
-  "members",
+  "admins",
+  "own_account_admin",
   "relays",
   "nostr_group_id",
-  "own_account_admin",
   "encrypted_media",
   "agent_text_stream",
   "avatar",
@@ -1286,22 +1283,19 @@ export function encodeKeyPackageInfo(info: KeyPackageInfo): Json {
   };
 }
 
-export function decodeGroupSnapshot(value: unknown, path = "group"): GroupSnapshot {
-  const o = rec(value, path, SNAPSHOT_KEYS);
+function decodeLiveGroupSnapshot(value: unknown, path: string): LiveGroupSnapshot {
+  const o = rec(value, path, LIVE_KEYS);
   const media = field(o, "encrypted_media", path);
   const stream = field(o, "agent_text_stream", path);
   const avatar = field(o, "avatar", path);
+  const route = field(o, "nostr_group_id", path);
   return {
-    id: hexEncode(hex(field(o, "id", path), `${path}.id`)),
-    name: str(field(o, "name", path), `${path}.name`),
-    description: str(field(o, "description", path), `${path}.description`),
-    epoch: u64(field(o, "epoch", path), `${path}.epoch`),
     state: decodeGroupState(field(o, "state", path), `${path}.state`),
-    access: decodeGroupAccess(field(o, "access", path), `${path}.access`),
-    members: arr(field(o, "members", path), `${path}.members`, decodeMember),
-    relays: strList(field(o, "relays", path), `${path}.relays`),
-    nostrGroupId: hex32(field(o, "nostr_group_id", path), `${path}.nostr_group_id`),
+    admins: strList(field(o, "admins", path), `${path}.admins`),
     ownAccountAdmin: bool(field(o, "own_account_admin", path), `${path}.own_account_admin`),
+    relays: strList(field(o, "relays", path), `${path}.relays`),
+    nostrGroupId:
+      route === null || route === undefined ? undefined : hex32(route, `${path}.nostr_group_id`),
     encryptedMedia:
       media === null || media === undefined
         ? undefined
@@ -1320,26 +1314,50 @@ export function decodeGroupSnapshot(value: unknown, path = "group"): GroupSnapsh
   };
 }
 
+function encodeLiveGroupSnapshot(live: LiveGroupSnapshot): Json {
+  return {
+    state: live.state,
+    admins: live.admins,
+    own_account_admin: live.ownAccountAdmin,
+    relays: live.relays,
+    nostr_group_id: live.nostrGroupId ?? null,
+    encrypted_media:
+      live.encryptedMedia === undefined ? null : encodeMediaPolicy(live.encryptedMedia),
+    agent_text_stream:
+      live.agentTextStream === undefined ? null : encodeStreamPolicy(live.agentTextStream),
+    avatar: live.avatar === undefined ? null : encodeGroupAvatar(live.avatar),
+    retention_seconds: live.retentionSeconds.toString(),
+    disband_enabled: live.disbandEnabled,
+    disbanding: live.disbanding,
+  };
+}
+
+export function decodeGroupSnapshot(value: unknown, path = "group"): GroupSnapshot {
+  const o = rec(value, path, SNAPSHOT_KEYS);
+  const live = field(o, "live", path);
+  return {
+    id: hexEncode(hex(field(o, "id", path), `${path}.id`)),
+    access: decodeGroupAccess(field(o, "access", path), `${path}.access`),
+    name: str(field(o, "name", path), `${path}.name`),
+    description: str(field(o, "description", path), `${path}.description`),
+    epoch: u64(field(o, "epoch", path), `${path}.epoch`),
+    members: arr(field(o, "members", path), `${path}.members`, decodeMember),
+    live:
+      live === null || live === undefined
+        ? undefined
+        : decodeLiveGroupSnapshot(live, `${path}.live`),
+  };
+}
+
 export function encodeGroupSnapshot(snapshot: GroupSnapshot): Json {
   return {
     id: snapshot.id,
+    access: snapshot.access,
     name: snapshot.name,
     description: snapshot.description,
     epoch: snapshot.epoch.toString(),
-    state: snapshot.state,
-    access: snapshot.access,
     members: snapshot.members.map(encodeMember),
-    relays: snapshot.relays,
-    nostr_group_id: snapshot.nostrGroupId,
-    own_account_admin: snapshot.ownAccountAdmin,
-    encrypted_media:
-      snapshot.encryptedMedia === undefined ? null : encodeMediaPolicy(snapshot.encryptedMedia),
-    agent_text_stream:
-      snapshot.agentTextStream === undefined ? null : encodeStreamPolicy(snapshot.agentTextStream),
-    avatar: snapshot.avatar === undefined ? null : encodeGroupAvatar(snapshot.avatar),
-    retention_seconds: snapshot.retentionSeconds.toString(),
-    disband_enabled: snapshot.disbandEnabled,
-    disbanding: snapshot.disbanding,
+    live: snapshot.live === undefined ? null : encodeLiveGroupSnapshot(snapshot.live),
   };
 }
 

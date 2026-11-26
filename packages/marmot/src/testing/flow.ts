@@ -106,10 +106,11 @@ async function publish(member: Member, network: FakeRelayNetwork): Promise<Publi
 /** The group's `#h` route hex, read through `group`. */
 async function routeHex(member: Member, group: string): Promise<string> {
   const snapshot = await member.engine.group(group);
-  if (snapshot === undefined) {
-    throw new Error("group snapshot missing");
+  const route = snapshot?.live?.nostrGroupId;
+  if (route === undefined) {
+    throw new Error("group route missing");
   }
-  return snapshot.nostrGroupId;
+  return route;
 }
 
 /**

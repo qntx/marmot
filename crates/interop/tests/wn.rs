@@ -38,8 +38,8 @@ use std::time::{Duration, Instant};
 
 use mk_core::media::Locator;
 use mk_core::{
-    AccountId, AppMessage, AttachmentInput, CreateGroup, GroupId, GroupState, Invitee,
-    MediaMessage, RelayResult, RelayStatus, SessionEvent,
+    AccountId, AppMessage, AttachmentInput, CreateGroup, GroupId, Invitee, MediaMessage,
+    RelayResult, RelayStatus, SessionEvent,
 };
 use serde_json::Value;
 use support::*;
@@ -578,8 +578,10 @@ async fn scenario3_bulk_and_membership() {
                 let _ = sync(&mut *a, &rig, &gid2).await;
                 let snapshot = a.session.group(&gid2).expect("group");
                 let out = snapshot.is_none_or(|s| {
-                    s.state == GroupState::Removed
-                        || !s.members.iter().any(|m| m.account.to_hex() == a_hex)
+                    matches!(
+                        s.access,
+                        mk_core::GroupAccess::Removed | mk_core::GroupAccess::RemovedDevice
+                    ) || !s.members.iter().any(|m| m.account.to_hex() == a_hex)
                 });
                 out.then_some(())
             })
@@ -792,8 +794,8 @@ async fn scenario5_media_round_trip() {
             .group(&gid)
             .expect("group")
             .expect("exists")
-            .encrypted_media
-            .is_some(),
+            .live
+            .is_some_and(|live| live.encrypted_media.is_some()),
         "s5 group must carry the encrypted-media policy"
     );
     sleep(Duration::from_millis(WND_SETTLE_MS)).await;
@@ -1266,10 +1268,11 @@ async fn scenario17_second_device_signs_out() {
             let rig = Arc::clone(&rig);
             Box::pin(async move {
                 let _ = sync(&mut *a, &rig, &gid2).await;
-                let removed = a.session.group(&gid2).expect("group").is_some_and(|s| {
-                    s.state == GroupState::Removed
-                        && s.access == mk_core::GroupAccess::RemovedDevice
-                });
+                let removed = a
+                    .session
+                    .group(&gid2)
+                    .expect("group")
+                    .is_some_and(|s| s.access == mk_core::GroupAccess::RemovedDevice);
                 removed.then_some(())
             })
         },
