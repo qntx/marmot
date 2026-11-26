@@ -1,6 +1,6 @@
 {
   "name": "@qntx/marmot-native",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Native mk-ffi (Nitro) bridge backend for @qntx/marmot on React Native",
   "keywords": [
     "marmot",
@@ -61,7 +61,7 @@
   },
   "devDependencies": {
     "@arethetypeswrong/cli": "0.18.5",
-    "@qntx/marmot": "0.3.0",
+    "@qntx/marmot": "0.4.0",
     "@qntx/tsconfig": "1.0.1",
     "@types/node": "26.6.6",
     "nitrogen": "0.37.2",
@@ -71,7 +71,7 @@
     "vite-plus": "1.6.0"
   },
   "peerDependencies": {
-    "@qntx/marmot": "^0.3.0",
+    "@qntx/marmot": "^0.4.0",
     "react-native": "*",
     "react-native-nitro-modules": "^0.37.1"
   },
