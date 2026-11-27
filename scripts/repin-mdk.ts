@@ -8,9 +8,11 @@
  *   taken from the MDK checkout's own Cargo.lock, so the pins stay coherent with each other.
  *
  * MDK workspace members (url = the MDK repository) take the new HEAD rev and the version of the
- * source-less `[[package]]` of the same name in MDK's Cargo.lock. Other git deps (OpenMLS, the
- * rust-nostr fork) take the rev after `#` and the version of the `[[package]]` whose `source`
- * matches `git+<url>`. A dependency the lock does not have is an error — nothing is written.
+ * source-less `[[package]]` of the same name in MDK's Cargo.lock. Other git deps (OpenMLS, nostr)
+ * follow whatever git source the MDK lockfile records for that package name — URL, rev after `#`
+ * and version all come from the lock, so a dep whose source repo moved (rust-nostr → nostrdevkit)
+ * gets its `git = "<url>"` rewritten too. A name the lock has no git source for is an error —
+ * nothing is written.
  */
 
 /// <reference types="node" />
@@ -56,30 +58,43 @@ export function workspaceVersion(manifestText: string): string | undefined {
 
 /**
  * Resolve one git dependency line to its new pin. MDK members pin the new HEAD and the MDK
- * workspace version; other git deps keep following whatever rev/version the MDK lock records.
- * Throws naming the dependency when the lock has no matching package.
+ * workspace version; other git deps take the URL, rev and version of the git-sourced package of the
+ * same name in the MDK lock. Throws naming the dependency when the lock has no git source for it
+ * (or several).
  */
 export function resolveDep(
   name: string,
   url: string,
   packages: LockPackage[],
   mdkRev: string,
-): { rev: string; version: string } {
+): { url: string; rev: string; version: string } {
   if (url === MDK_REPOSITORY) {
     const member = packages.find((pkg) => pkg.name === name && pkg.source === undefined);
     if (member === undefined) {
       throw new Error(`${name}: no workspace member in the MDK lockfile`);
     }
-    return { rev: mdkRev, version: member.version };
+    return { url, rev: mdkRev, version: member.version };
   }
-  const dep = packages.find(
-    (pkg) => pkg.name === name && pkg.source?.startsWith(`git+${url}`) === true,
-  );
-  const commit = dep?.source?.split("#")[1];
-  if (dep === undefined || commit === undefined) {
-    throw new Error(`${name}: no git+${url} package in the MDK lockfile`);
+  let resolved: { url: string; rev: string; version: string } | undefined;
+  for (const pkg of packages) {
+    if (pkg.name !== name || pkg.source === undefined || !pkg.source.startsWith("git+")) {
+      continue;
+    }
+    const [, commit] = pkg.source.split("#");
+    const [gitUrl] = pkg.source.slice(4).split("?");
+    if (commit === undefined || gitUrl === undefined) {
+      throw new Error(`${name}: not a git dependency in the MDK lockfile`);
+    }
+    const pin = { url: gitUrl, rev: commit, version: pkg.version };
+    if (resolved !== undefined && resolved.url !== pin.url) {
+      throw new Error(`${name}: multiple git sources in the MDK lockfile`);
+    }
+    resolved = resolved ?? pin;
   }
-  return { rev: commit, version: dep.version };
+  if (resolved === undefined) {
+    throw new Error(`${name}: not a git dependency in the MDK lockfile`);
+  }
+  return resolved;
 }
 
 const GIT_DEP = /^([^\s=]+)\s*=\s*\{\s*git\s*=\s*"([^"]+)"/;
@@ -101,11 +116,12 @@ export function repinManifest(
       return line;
     }
     const [, name = "", url = ""] = dep;
-    const { rev, version } = resolveDep(name, url, packages, mdkRev);
-    summaries.push(`${name}: rev ${rev}, version =${version}`);
+    const pin = resolveDep(name, url, packages, mdkRev);
+    summaries.push(`${name}: git ${pin.url}, rev ${pin.rev}, version =${pin.version}`);
     return line
-      .replace(/\brev(\s*=\s*)"[^"]*"/, `rev$1"${rev}"`)
-      .replace(/\bversion(\s*=\s*)"=[^"]*"/, `version$1"=${version}"`);
+      .replace(/\bgit(\s*=\s*)"[^"]*"/, `git$1"${pin.url}"`)
+      .replace(/\brev(\s*=\s*)"[^"]*"/, `rev$1"${pin.rev}"`)
+      .replace(/\bversion(\s*=\s*)"=[^"]*"/, `version$1"=${pin.version}"`);
   });
   return { text: lines.join("\n"), summaries };
 }
