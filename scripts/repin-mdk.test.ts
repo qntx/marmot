@@ -42,7 +42,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 [[package]]
 name = "nostr"
 version = "0.45.6"
-source = "git+https://github.com/erskingardner/rust-nostr?rev=${NOSTR_REV}#${NOSTR_REV}"
+source = "git+https://github.com/nostrdevkit/nostr?rev=${NOSTR_REV}#${NOSTR_REV}"
 `;
 
 const MANIFEST = `[workspace.dependencies]
@@ -75,7 +75,7 @@ describe("lockPackages", () => {
       {
         name: "nostr",
         version: "0.45.6",
-        source: `git+https://github.com/erskingardner/rust-nostr?rev=${NOSTR_REV}#${NOSTR_REV}`,
+        source: `git+https://github.com/nostrdevkit/nostr?rev=${NOSTR_REV}#${NOSTR_REV}`,
       },
     ]);
   });
@@ -87,19 +87,31 @@ describe("resolveDep", () => {
   test("an MDK member takes the checkout rev and the member version", () => {
     expect(
       resolveDep("cgka-engine", "https://github.com/marmot-protocol/mdk", packages, MDK_REV),
-    ).toStrictEqual({ rev: MDK_REV, version: "0.18.0" });
+    ).toStrictEqual({
+      url: "https://github.com/marmot-protocol/mdk",
+      rev: MDK_REV,
+      version: "0.18.0",
+    });
   });
 
   test("another git dep takes the rev after # and the locked version", () => {
     expect(
       resolveDep("openmls", "https://github.com/openmls/openmls.git", packages, MDK_REV),
-    ).toStrictEqual({ rev: OPENMLS_REV, version: "0.9.1" });
+    ).toStrictEqual({
+      url: "https://github.com/openmls/openmls.git",
+      rev: OPENMLS_REV,
+      version: "0.9.1",
+    });
   });
 
-  test("a registry package of the same name does not satisfy a git dep", () => {
+  test("the lockfile's git source wins over the manifest's stale URL", () => {
     expect(
       resolveDep("nostr", "https://github.com/erskingardner/rust-nostr", packages, MDK_REV),
-    ).toStrictEqual({ rev: NOSTR_REV, version: "0.45.6" });
+    ).toStrictEqual({
+      url: "https://github.com/nostrdevkit/nostr",
+      rev: NOSTR_REV,
+      version: "0.45.6",
+    });
   });
 
   test("a dependency the lock does not have is an error naming it", () => {
@@ -108,7 +120,7 @@ describe("resolveDep", () => {
     ).toThrow("storage-sqlite: no workspace member in the MDK lockfile");
     expect(() =>
       resolveDep("quinn", "https://github.com/quinn-rs/quinn", packages, MDK_REV),
-    ).toThrow("quinn: no git+https://github.com/quinn-rs/quinn package in the MDK lockfile");
+    ).toThrow("quinn: not a git dependency in the MDK lockfile");
   });
 });
 
@@ -119,14 +131,14 @@ describe("repinManifest", () => {
       `[workspace.dependencies]
 cgka-engine = { git = "https://github.com/marmot-protocol/mdk", rev = "${MDK_REV}", version = "=0.18.0" }
 openmls     = { git = "https://github.com/openmls/openmls.git", rev = "${OPENMLS_REV}", version = "=0.9.1", features = ["extensions-draft"] }
-nostr       = { git = "https://github.com/erskingardner/rust-nostr", rev = "${NOSTR_REV}", version = "=0.45.6", default-features = false }
+nostr       = { git = "https://github.com/nostrdevkit/nostr", rev = "${NOSTR_REV}", version = "=0.45.6", default-features = false }
 serde       = { version = "1", features = ["derive"] }
 `,
     );
     expect(summaries).toStrictEqual([
-      `cgka-engine: rev ${MDK_REV}, version =0.18.0`,
-      `openmls: rev ${OPENMLS_REV}, version =0.9.1`,
-      `nostr: rev ${NOSTR_REV}, version =0.45.6`,
+      `cgka-engine: git https://github.com/marmot-protocol/mdk, rev ${MDK_REV}, version =0.18.0`,
+      `openmls: git https://github.com/openmls/openmls.git, rev ${OPENMLS_REV}, version =0.9.1`,
+      `nostr: git https://github.com/nostrdevkit/nostr, rev ${NOSTR_REV}, version =0.45.6`,
     ]);
   });
 
