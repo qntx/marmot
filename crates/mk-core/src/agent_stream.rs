@@ -22,7 +22,7 @@ const FINAL_KIND_TAG: &str = "final-kind";
 /// `parent` tag on the start event (optional prompt message id).
 const PARENT_TAG: &str = "parent";
 /// `stream-start` tag on the final message (the start event's inner id).
-const STREAM_START_TAG: &str = "stream-start";
+pub(crate) const STREAM_START_TAG: &str = "stream-start";
 /// `stream-hash` tag on the final message (transcript hash).
 const STREAM_HASH_TAG: &str = "stream-hash";
 /// `stream-chunks` tag on the final message (chunk count).

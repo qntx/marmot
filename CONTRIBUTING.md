@@ -120,7 +120,7 @@ cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo deny che
 
 ## White Noise interop (`crates/interop`)
 
-Fifteen scenario tests (`tests/wn.rs`, S1–S6 and S14–S22) drive the
+Fourteen scenario tests (`tests/wn.rs`, S1–S5 and S14–S22) drive the
 public `Session` API against a real White Noise `wn`/`wnd` pair built
 from the pinned MDK rev, over a real in-process NIP-01 WebSocket relay
 (`nostr-sdk`'s `LocalRelay` from the `erskingardner/rust-nostr` fork MDK
@@ -134,11 +134,11 @@ Build `wn`/`wnd` from the pinned MDK rev (`upstream.json` → `wn.rev`;
 ```sh
 ODIN=<path-to-odin> cargo install --locked \
   --git https://github.com/marmot-protocol/mdk \
-  --rev 34646a577807f2b112ee031f3c164ec58aa18b64 \
+  --rev 3fce95465cdea1edc8456dbd1c6691d1c8dc1f2e \
   --root spike/target/wn wn-cli
 ```
 
-`cargo install` takes ~12 min cold; `wn --version` must report `wn 0.18.0`
+`cargo install` takes ~12 min cold; `wn --version` must report `wn 0.19.0`
 (the test asserts it against `upstream.json` `wn.tag`). In CI the `wn` job
 builds the pair from the pin and `interop-rust`/`interop-wasm` run the
 scenarios on every PR with the binaries cached per pin; the advisory

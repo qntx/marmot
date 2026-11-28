@@ -6,48 +6,48 @@ move only when the pin moves. `bun run check:pins` verifies them against a
 local `3rdparty/mdk` checkout when present.
 
 - repository: https://github.com/marmot-protocol/mdk
-- tag: v0.18.0
-- rev: 34646a577807f2b112ee031f3c164ec58aa18b64
+- tag: v0.19.0
+- rev: 3fce95465cdea1edc8456dbd1c6691d1c8dc1f2e
 
 | recorded file | source path (repo root) | sha256 |
 | --- | --- | --- |
-| `account-devices-activation-loses-to-unsupported-invite.v1.json` | `crates/cgka-conformance-simulator/vectors/account-devices-activation-loses-to-unsupported-invite.v1.json` | `b5672045994927be57c8bbb36c6c1e01f7665f9454478c794d3f4911bcfe3466` |
-| `account-devices-activation-needs-support.v1.json` | `crates/cgka-conformance-simulator/vectors/account-devices-activation-needs-support.v1.json` | `2d1af4a54025c2ea58840868afac91a1e1af0997d759d0c5234d4b5362a224ed` |
-| `account-devices-activation-wins-over-unsupported-invite.v1.json` | `crates/cgka-conformance-simulator/vectors/account-devices-activation-wins-over-unsupported-invite.v1.json` | `0529453446014606fbb3d4a12fdc986074b2b4abf61ede0a2d77245bc212e2e9` |
-| `account-devices-activation.v1.json` | `crates/cgka-conformance-simulator/vectors/account-devices-activation.v1.json` | `3ef0450f50572dda1cbc809c2c8179b4cf91699ce271b6896d43d279d16167eb` |
-| `account-devices-founding.v1.json` | `crates/cgka-conformance-simulator/vectors/account-devices-founding.v1.json` | `06743ec466e1626b09ad345fdb7eade02d680cd41fda75eaacbdd51829ab92e8` |
-| `account-devices-own-device-removal-loses-to-admin-remove.v1.json` | `crates/cgka-conformance-simulator/vectors/account-devices-own-device-removal-loses-to-admin-remove.v1.json` | `5ad5f276ff213d138152013081f6653a541ee0158fc83dd25479ecdef9727826` |
-| `admin-handover.v1.json` | `crates/cgka-conformance-simulator/vectors/admin-handover.v1.json` | `333f1131b18e4ec65544c7e4eef34bc728047b3e13f3059f5d10ff8632d58f7e` |
-| `admin-policy-update.v1.json` | `crates/cgka-conformance-simulator/vectors/admin-policy-update.v1.json` | `51c7480cfb4909e7249ff4439ecd5206579908e089df540e2c2550c39b0351e4` |
-| `concurrent-invite-fork-recovery.v1.json` | `crates/cgka-conformance-simulator/vectors/concurrent-invite-fork-recovery.v1.json` | `4db698960e895f68a9565c8df36e2d886e29927a549e9ed6dfceb1438bfa61c7` |
-| `convergence-committer-selected.v1.json` | `crates/cgka-conformance-simulator/vectors/convergence-committer-selected.v1.json` | `f7a571313ff5ce97993ab26028f3bab695bddc8a46bd8560c05f6c370bb02b02` |
-| `convergence-witness-selected.v1.json` | `crates/cgka-conformance-simulator/vectors/convergence-witness-selected.v1.json` | `e49356712a228c6489ad3c6b4e83d55a4650183eb48c64c0e9646546ec7bfe85` |
-| `conversation.v1.json` | `crates/cgka-conformance-simulator/vectors/conversation.v1.json` | `61227e09779302aa00ebc029aa5d1fdfa311696aec186062f69203c8d5a92738` |
-| `cross-route-own-commit-recovery.v1.json` | `crates/cgka-conformance-simulator/vectors/cross-route-own-commit-recovery.v1.json` | `68c590f7fe21bdd006c3ffad337cb30c3fe79ba5b8e1c3b38104cc7458799be8` |
-| `current-profile-required-set.v1.json` | `crates/cgka-conformance-simulator/vectors/current-profile-required-set.v1.json` | `abc88f401dd7a36033d09e9226f34f9dbd2a33567e4c6b752026b306a84f9f3e` |
-| `deferred-tick-catchup.v1.json` | `crates/cgka-conformance-simulator/vectors/deferred-tick-catchup.v1.json` | `0fc46e488969df760ea05f39c28f7cc3f0fd4ed7cf0baeaa3bf4298e8cad2650` |
-| `delayed-past-epoch-app-message.v1.json` | `crates/cgka-conformance-simulator/vectors/delayed-past-epoch-app-message.v1.json` | `8015f343a469ae0d864e5ea72f164741511c208da932d566e74ef9ac889fa33d` |
-| `drop-queued.v1.json` | `crates/cgka-conformance-simulator/vectors/drop-queued.v1.json` | `4b59e3163c7808acb8538f3bfdc07645e43999a8ea3ea19c3946403a6c12287a` |
-| `group-data-fork-recovery.v1.json` | `crates/cgka-conformance-simulator/vectors/group-data-fork-recovery.v1.json` | `5ae843fbcfccb8858e36d2b8b99c5f1a77900978c80e79cafd5b796b4b5b6e15` |
-| `group-data-update.v1.json` | `crates/cgka-conformance-simulator/vectors/group-data-update.v1.json` | `8dd630acb1a90e3804e2a7b6b9d2984db474cdc8b6193fa2dd743ede85cbaff0` |
-| `group-profile-update.v1.json` | `crates/cgka-conformance-simulator/vectors/group-profile-update.v1.json` | `11384a693edf2839de9bef65824df02d646a82cb14ab2cb2e6743b8c40ddfa23` |
-| `incremental-growth.v1.json` | `crates/cgka-conformance-simulator/vectors/incremental-growth.v1.json` | `11464f4a4da71c4baf2c34129f68acae0a07ad814607fa656733cbf89e90ddf0` |
-| `invite-member.v1.json` | `crates/cgka-conformance-simulator/vectors/invite-member.v1.json` | `4e1d65841aa444aa5a95c17b41cc9dc0cfb2bb9df4cc97504733ed0c26899140` |
-| `invite-publish-fail.v1.json` | `crates/cgka-conformance-simulator/vectors/invite-publish-fail.v1.json` | `ddfcb136e027a012f17d92440a4424c452d61053ca11ef83a0050b81e726103e` |
-| `late-welcome-backfill.v1.json` | `crates/cgka-conformance-simulator/vectors/late-welcome-backfill.v1.json` | `8ab7180162437076ca520572a35b0728681716b7b664ec17bfe634934720c89a` |
-| `latecomer-forward-secrecy.v1.json` | `crates/cgka-conformance-simulator/vectors/latecomer-forward-secrecy.v1.json` | `7bce909035e711b21fdae09279aafa69e7d4616718205829ff8f8c169e3e0ac7` |
-| `leaver-removal-secrecy.v1.json` | `crates/cgka-conformance-simulator/vectors/leaver-removal-secrecy.v1.json` | `a8ff7f41cdb45137b16e49fe2f200592ee8c51797d7036d71c75c699c819c83e` |
+| `account-devices-activation-loses-to-unsupported-invite.v1.json` | `crates/cgka-conformance-simulator/vectors/account-devices-activation-loses-to-unsupported-invite.v1.json` | `4b210a235a2ff2b1e12205d993a0a9ccf7d1365c0b839c2002cfb414b5e45144` |
+| `account-devices-activation-needs-support.v1.json` | `crates/cgka-conformance-simulator/vectors/account-devices-activation-needs-support.v1.json` | `e1ad5363a4c885cac986b60e94c65514437ac996e53a0ad1aa6e3ac68d4675db` |
+| `account-devices-activation-wins-over-unsupported-invite.v1.json` | `crates/cgka-conformance-simulator/vectors/account-devices-activation-wins-over-unsupported-invite.v1.json` | `5c8ad0cd176edc06f011865d7736be6fafa80fd3f05127e1a122479cc0a751e2` |
+| `account-devices-activation.v1.json` | `crates/cgka-conformance-simulator/vectors/account-devices-activation.v1.json` | `2d8f8a29592e01a50022a5d76c6bfa3e1257bcccd3d6b1425bc24cc6eaccbc4d` |
+| `account-devices-founding.v1.json` | `crates/cgka-conformance-simulator/vectors/account-devices-founding.v1.json` | `ba4defc51402071b132528240f31eca7caa1fad13883454d044faeb1c0d56195` |
+| `account-devices-own-device-removal-loses-to-admin-remove.v1.json` | `crates/cgka-conformance-simulator/vectors/account-devices-own-device-removal-loses-to-admin-remove.v1.json` | `7dd8b1fbee0396f8d1100eac542dfdb44a6c512d35dfd25f56595b3f6f82a2d0` |
+| `admin-handover.v1.json` | `crates/cgka-conformance-simulator/vectors/admin-handover.v1.json` | `4763c40617e7fbd6be1c7e839e5a4963d0b573e5c3e043f65b7e79a10a1db583` |
+| `admin-policy-update.v1.json` | `crates/cgka-conformance-simulator/vectors/admin-policy-update.v1.json` | `f39d34d3295bb4ff93ce6e94c1a729028d4008635b49701332306cf910ab1473` |
+| `concurrent-invite-fork-recovery.v1.json` | `crates/cgka-conformance-simulator/vectors/concurrent-invite-fork-recovery.v1.json` | `a3e10d448781bbe3ebfeab65039b1c83a169f467073eb5dacee9555b8418a88d` |
+| `convergence-committer-selected.v1.json` | `crates/cgka-conformance-simulator/vectors/convergence-committer-selected.v1.json` | `30689e83b9f7fc308a5c59c36d0429e94140604208cd255af6e9ee6531d03a31` |
+| `convergence-witness-selected.v1.json` | `crates/cgka-conformance-simulator/vectors/convergence-witness-selected.v1.json` | `80285bf36100f10cd3c4b5a4a0a75a77446d284a46bb7f530ff4af5037ea20c6` |
+| `conversation.v1.json` | `crates/cgka-conformance-simulator/vectors/conversation.v1.json` | `3ee4d473bbbe3b385fc3b90df84575dacb669f09d6b313f24f81adecfc41128d` |
+| `cross-route-own-commit-recovery.v1.json` | `crates/cgka-conformance-simulator/vectors/cross-route-own-commit-recovery.v1.json` | `022ba217a3460dab60e0b40f0f57b540eec8275053adaf800712d8ab5185fe7e` |
+| `current-profile-required-set.v1.json` | `crates/cgka-conformance-simulator/vectors/current-profile-required-set.v1.json` | `330c465c017ed7dcf7f059a24e8c40ec4a7c9cc3f6905405dd4bdf6f4c6c25b4` |
+| `deferred-tick-catchup.v1.json` | `crates/cgka-conformance-simulator/vectors/deferred-tick-catchup.v1.json` | `68c1afe4d5b3f06c9f726dd71898e8def2fe9fc6c6db351a3ff8f237fc9d0e26` |
+| `delayed-past-epoch-app-message.v1.json` | `crates/cgka-conformance-simulator/vectors/delayed-past-epoch-app-message.v1.json` | `96e7f73e8e010415c3cf99306074f9de25c8b3d42dcfce2c92dd64335aabbf4e` |
+| `drop-queued.v1.json` | `crates/cgka-conformance-simulator/vectors/drop-queued.v1.json` | `11a16689466743f63e86bda18f29b8f684c527c93b7e698e015e9ce31281201a` |
+| `group-data-fork-recovery.v1.json` | `crates/cgka-conformance-simulator/vectors/group-data-fork-recovery.v1.json` | `b5bf20f0970549567f22fb99490b5c2b816ef0ea4a28a613aff1385938922fbe` |
+| `group-data-update.v1.json` | `crates/cgka-conformance-simulator/vectors/group-data-update.v1.json` | `fcfb4f58239b50d64ad006044180741fbde2ef2f7f958fecaab13331b4727adf` |
+| `group-profile-update.v1.json` | `crates/cgka-conformance-simulator/vectors/group-profile-update.v1.json` | `cf3e3eca491d30f8ae06793fb74dfbf89fb85035545c15344924ba35a5ca9a82` |
+| `incremental-growth.v1.json` | `crates/cgka-conformance-simulator/vectors/incremental-growth.v1.json` | `c5895c93a033a35eb4ac44ae1da2fcf24fadf7a599c74027b8374525baa10484` |
+| `invite-member.v1.json` | `crates/cgka-conformance-simulator/vectors/invite-member.v1.json` | `cc333e96a2ea19d17457519012b102c9ebe01eab8b901ef82633a2de2db32631` |
+| `invite-publish-fail.v1.json` | `crates/cgka-conformance-simulator/vectors/invite-publish-fail.v1.json` | `2c8a4c2a12bdcd34fcd4815e6302f0e3fb7038c14905df4945b5e132195b0c49` |
+| `late-welcome-backfill.v1.json` | `crates/cgka-conformance-simulator/vectors/late-welcome-backfill.v1.json` | `bd1569872857e77725fac26e3249252798b34b58748950fa02aedd36d36c42e9` |
+| `latecomer-forward-secrecy.v1.json` | `crates/cgka-conformance-simulator/vectors/latecomer-forward-secrecy.v1.json` | `8d647710d77cb2757623dfa2e8532fb1a2cb3c712318c7f69fc54940a40a98fa` |
+| `leaver-removal-secrecy.v1.json` | `crates/cgka-conformance-simulator/vectors/leaver-removal-secrecy.v1.json` | `637f0dd250e74d871081cddf064c0c1d84d361133415d567a48c3f17ad09c8ad` |
 | `manifest.v1.json` | `crates/cgka-conformance-simulator/vectors/manifest.v1.json` | `104d1d026eb0b41557d9e018fe12fb87b7c9bd149406379251368b7e6a509f05` |
-| `multigroup-isolation.v1.json` | `crates/cgka-conformance-simulator/vectors/multigroup-isolation.v1.json` | `75b91380be3f5e123b8b7eb62e252678d5ebc70cf618bdcef1240d5ca45852bc` |
-| `partition-clear-leave.v1.json` | `crates/cgka-conformance-simulator/vectors/partition-clear-leave.v1.json` | `ef2818b3c4c13950ac2f52fbc1e75604f40e2dc6bd24eccce4558e0dd9d8f126` |
-| `publish-fail.v1.json` | `crates/cgka-conformance-simulator/vectors/publish-fail.v1.json` | `58b5245d0b99eae7a71351892307f7075a0fd303b037f97cfa74df120b6bf29b` |
-| `queue-faults.v1.json` | `crates/cgka-conformance-simulator/vectors/queue-faults.v1.json` | `c9a2944e5bd42824059cce952a7deecce9856133281386e1dc45b5381d8de769` |
-| `readd-after-eviction.v1.json` | `crates/cgka-conformance-simulator/vectors/readd-after-eviction.v1.json` | `e9dcd1476603288287aa7823477e3be556d3195d0388486d19a03df40b3c581f` |
-| `restart-delivery-faults.v1.json` | `crates/cgka-conformance-simulator/vectors/restart-delivery-faults.v1.json` | `6c65d32395233a9765b5174acc560331f00de15946c3b398ae0e92b277bb0755` |
-| `route-equivalence.v1.json` | `crates/cgka-conformance-simulator/vectors/route-equivalence.v1.json` | `465d394b5c6cba5ed1e3a6506a0f1386c921e87cc0f0c098bd15e5c796a18875` |
-| `three-client-message-exchange.v1.json` | `crates/cgka-conformance-simulator/vectors/three-client-message-exchange.v1.json` | `9a2a876db10cbc6ee530170374bacc6af93b49cb5c1538e8decb17732326459d` |
-| `incidents/convergence-incident.v1.json` | `crates/cgka-conformance-simulator/vectors/incidents/convergence-incident.v1.json` | `d5cb19524e901a11e335238f80f103b952977ff90c16c87221fb42b803bd25cb` |
-| `incidents/fork-recovery-incident.v1.json` | `crates/cgka-conformance-simulator/vectors/incidents/fork-recovery-incident.v1.json` | `12d80e917f8168a21a60b3761ef40f9a7379321782a8fb6a6aa7ef21b2d82365` |
-| `incidents/membership-fork-recovery-incident.v1.json` | `crates/cgka-conformance-simulator/vectors/incidents/membership-fork-recovery-incident.v1.json` | `222eb69bb7936b409781755ad42f21ee259ab7b5c6437faa4af268b2a346243c` |
+| `multigroup-isolation.v1.json` | `crates/cgka-conformance-simulator/vectors/multigroup-isolation.v1.json` | `c61937f27d9a0951d7c3c12dcb530422383d40fa436b052689ab444851c170c4` |
+| `partition-clear-leave.v1.json` | `crates/cgka-conformance-simulator/vectors/partition-clear-leave.v1.json` | `35002fa6389576238d74f88e321340fa6a0040de6daa4ca940362bbde5116448` |
+| `publish-fail.v1.json` | `crates/cgka-conformance-simulator/vectors/publish-fail.v1.json` | `67ac4fd340af74675f428910b074cb02cbf5afa9f42dd628e9ddd496aa5b5181` |
+| `queue-faults.v1.json` | `crates/cgka-conformance-simulator/vectors/queue-faults.v1.json` | `a5bb6f171e42ec6ee32c3f4c57aa4af62e256a72d8476e315b2e4fee44f9ad88` |
+| `readd-after-eviction.v1.json` | `crates/cgka-conformance-simulator/vectors/readd-after-eviction.v1.json` | `bd442d6ab8ff926951db463ad9af0a22e3d37eefe1ba3f5c91a85861d94cd86b` |
+| `restart-delivery-faults.v1.json` | `crates/cgka-conformance-simulator/vectors/restart-delivery-faults.v1.json` | `91651e8bdff34e54e7b74bdf61c216770be0b1d8ee101dc5027725616955989f` |
+| `route-equivalence.v1.json` | `crates/cgka-conformance-simulator/vectors/route-equivalence.v1.json` | `679efb0e4df9917e98ec512cf1d8791767698922b6378f88108654f347b6cfc2` |
+| `three-client-message-exchange.v1.json` | `crates/cgka-conformance-simulator/vectors/three-client-message-exchange.v1.json` | `65fab1955fe94f29263305bad5770266559e319281acc1190408d58a56b55ef8` |
+| `incidents/convergence-incident.v1.json` | `crates/cgka-conformance-simulator/vectors/incidents/convergence-incident.v1.json` | `691aca35c767f1225edc43d8d47fa23b373042fe3ee5319501a3074fa2f2e643` |
+| `incidents/fork-recovery-incident.v1.json` | `crates/cgka-conformance-simulator/vectors/incidents/fork-recovery-incident.v1.json` | `9b88c6fb7a9ee8a2fb50cba59eb3754ead110be79e9f297db70ebad352d675bc` |
+| `incidents/membership-fork-recovery-incident.v1.json` | `crates/cgka-conformance-simulator/vectors/incidents/membership-fork-recovery-incident.v1.json` | `70ae6ce51930fadc47c707c0fedc3e605c077f290a435ff88d5b53c22090088d` |
 | `encrypted-media/imeta-v1.json` | `fixtures/encrypted-media/imeta-v1.json` | `24adea4c86f4c9bae04f69a1f5a183c2dc88b78fb9fd9bbb2355d584a7be82ee` |
 | `encrypted-media/imeta-v2.json` | `fixtures/encrypted-media/imeta-v2.json` | `fbab0c8dbdd60efa6439ab97c0cd2c14ae9e6a9423dd67ad32d440eda152a578` |

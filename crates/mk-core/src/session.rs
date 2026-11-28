@@ -62,7 +62,7 @@ use cgka_traits::app_components::{
 use cgka_traits::app_event::{
     MARMOT_APP_EVENT_KIND_AGENT_STREAM_START, MARMOT_APP_EVENT_KIND_CHAT,
     MARMOT_APP_EVENT_KIND_DELETE, MARMOT_APP_EVENT_KIND_EDIT, MARMOT_APP_EVENT_KIND_GROUP_SYSTEM,
-    MARMOT_APP_EVENT_KIND_REACTION, MARMOT_APP_EVENT_KIND_REMOVE, STREAM_START_TAG,
+    MARMOT_APP_EVENT_KIND_REACTION, MARMOT_APP_EVENT_KIND_REMOVE,
 };
 use cgka_traits::capabilities::{Capability, CapabilityRequirement, Feature, RequirementLevel};
 use cgka_traits::engine::{
@@ -90,7 +90,7 @@ use thiserror::Error;
 use transport_nostr_peeler::NostrMlsPeeler;
 use zeroize::Zeroizing;
 
-use crate::agent_stream::{AgentStreamPolicy, StreamRoles};
+use crate::agent_stream::{AgentStreamPolicy, STREAM_START_TAG, StreamRoles};
 use crate::clock::{Clock, EngineConvergenceClock, EngineMaintenanceRandom, EngineWallClock, Time};
 use crate::delivered::{self, ExpiryHeap, HeldModifier, HeldQueue};
 use crate::events::{InputOutcome, InputReport, SessionEvent, input_outcome, session_event};

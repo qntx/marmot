@@ -294,8 +294,8 @@ checksum = "4e7648175b45a9a48536d676f68d918270699102aa8dab5496df06904c914600"
 
 [[package]]
 name = "cgka-engine"
-version = "0.18.0"
-source = "git+https://github.com/marmot-protocol/mdk?rev=34646a577807f2b112ee031f3c164ec58aa18b64#34646a577807f2b112ee031f3c164ec58aa18b64"
+version = "0.19.0"
+source = "git+https://github.com/marmot-protocol/mdk?rev=3fce95465cdea1edc8456dbd1c6691d1c8dc1f2e#3fce95465cdea1edc8456dbd1c6691d1c8dc1f2e"
 dependencies = [
  "async-trait",
  "cgka-traits",
@@ -323,8 +323,8 @@ dependencies = [
 
 [[package]]
 name = "cgka-traits"
-version = "0.18.0"
-source = "git+https://github.com/marmot-protocol/mdk?rev=34646a577807f2b112ee031f3c164ec58aa18b64#34646a577807f2b112ee031f3c164ec58aa18b64"
+version = "0.19.0"
+source = "git+https://github.com/marmot-protocol/mdk?rev=3fce95465cdea1edc8456dbd1c6691d1c8dc1f2e#3fce95465cdea1edc8456dbd1c6691d1c8dc1f2e"
 dependencies = [
  "async-trait",
  "hex",
@@ -783,8 +783,8 @@ dependencies = [
 
 [[package]]
 name = "fs-private"
-version = "0.18.0"
-source = "git+https://github.com/marmot-protocol/mdk?rev=34646a577807f2b112ee031f3c164ec58aa18b64#34646a577807f2b112ee031f3c164ec58aa18b64"
+version = "0.19.0"
+source = "git+https://github.com/marmot-protocol/mdk?rev=3fce95465cdea1edc8456dbd1c6691d1c8dc1f2e#3fce95465cdea1edc8456dbd1c6691d1c8dc1f2e"
 dependencies = [
  "libc",
 ]
@@ -1617,8 +1617,8 @@ checksum = "5d15f86d12da44cd8d4ec3c73984537eb7f4cadcb9776a575a0a8a05ca11005c"
 
 [[package]]
 name = "marmot-forensics"
-version = "0.18.0"
-source = "git+https://github.com/marmot-protocol/mdk?rev=34646a577807f2b112ee031f3c164ec58aa18b64#34646a577807f2b112ee031f3c164ec58aa18b64"
+version = "0.19.0"
+source = "git+https://github.com/marmot-protocol/mdk?rev=3fce95465cdea1edc8456dbd1c6691d1c8dc1f2e#3fce95465cdea1edc8456dbd1c6691d1c8dc1f2e"
 dependencies = [
  "fs-private",
  "hex",
@@ -2583,8 +2583,8 @@ dependencies = [
 
 [[package]]
 name = "transport-nostr-peeler"
-version = "0.18.0"
-source = "git+https://github.com/marmot-protocol/mdk?rev=34646a577807f2b112ee031f3c164ec58aa18b64#34646a577807f2b112ee031f3c164ec58aa18b64"
+version = "0.19.0"
+source = "git+https://github.com/marmot-protocol/mdk?rev=3fce95465cdea1edc8456dbd1c6691d1c8dc1f2e#3fce95465cdea1edc8456dbd1c6691d1c8dc1f2e"
 dependencies = [
  "async-trait",
  "base64",
