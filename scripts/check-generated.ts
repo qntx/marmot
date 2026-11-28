@@ -3,8 +3,9 @@
  * `check:generated` — the committed wasm-bindgen glue must equal fresh output, modulo the per-build
  * closure-shim hash. `wasm_bindgen_<16 hex>` export names carry a descriptor hash that is not
  * reproducible across machines (the wasm itself is not byte-identical either — e.g. secp256k1 C
- * objects differ per host clang), so both sides are normalized before comparison. Every other
- * difference — exports, signatures, imports, comments — still fails.
+ * objects differ per host clang), and descriptor ordering also shifts across hosts, moving the
+ * `shim_idx: <n>` comment values — both are normalized before comparison. Every other difference —
+ * exports, signatures, imports, comments — still fails.
  *
  * Fresh glue is generated into target/wasm-glue (`build-wasm.ts --glue-only`); the committed glue
  * under packages/marmot-wasm/src/generated is compared as recorded at HEAD and never touched.
@@ -19,7 +20,9 @@ const GLUE_REL = "packages/marmot-wasm/src/generated";
 const FRESH = join(ROOT, "target/wasm-glue");
 
 const normalize = (text: string): string =>
-  text.replaceAll(/wasm_bindgen_[0-9a-f]{16}/g, "wasm_bindgen_SHIM_HASH");
+  text
+    .replaceAll(/wasm_bindgen_[0-9a-f]{16}/g, "wasm_bindgen_SHIM_HASH")
+    .replaceAll(/shim_idx: \d+/g, "shim_idx: SHIM_IDX");
 
 function run(command: string[]): string {
   const result = spawnSync(command[0] ?? "", command.slice(1), {
