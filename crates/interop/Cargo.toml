@@ -20,9 +20,9 @@ mk-core                = { path = "../mk-core", version = "=0.4.0", features = [
 mk-bridge              = { path = "../mk-bridge", version = "=0.4.0" }
 nostr                  = { git = "https://github.com/erskingardner/rust-nostr", rev = "e93cc06b5624f06c21ecd8111a124176eb0c7589", version = "=0.45.5" }
 nostr-sdk              = { git = "https://github.com/erskingardner/rust-nostr", rev = "e93cc06b5624f06c21ecd8111a124176eb0c7589", version = "=0.45.4", features = ["local-relay"] }
-nostr-directory        = { git = "https://github.com/marmot-protocol/mdk", rev = "34646a577807f2b112ee031f3c164ec58aa18b64", version = "=0.18.0", features = ["test-support"] }
-transport-nostr        = { git = "https://github.com/marmot-protocol/mdk", rev = "34646a577807f2b112ee031f3c164ec58aa18b64", version = "=0.18.0" }
-transport-nostr-peeler = { git = "https://github.com/marmot-protocol/mdk", rev = "34646a577807f2b112ee031f3c164ec58aa18b64", version = "=0.18.0" }
+nostr-directory        = { git = "https://github.com/marmot-protocol/mdk", rev = "3fce95465cdea1edc8456dbd1c6691d1c8dc1f2e", version = "=0.19.0", features = ["test-support"] }
+transport-nostr        = { git = "https://github.com/marmot-protocol/mdk", rev = "3fce95465cdea1edc8456dbd1c6691d1c8dc1f2e", version = "=0.19.0" }
+transport-nostr-peeler = { git = "https://github.com/marmot-protocol/mdk", rev = "3fce95465cdea1edc8456dbd1c6691d1c8dc1f2e", version = "=0.19.0" }
 axum                   = "0.8"
 hex                    = "0.4"
 serde_json             = "1"

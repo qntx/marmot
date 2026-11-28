@@ -21,7 +21,12 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 const MDK_REPOSITORY = "https://github.com/marmot-protocol/mdk";
-const MANIFESTS = ["Cargo.toml", "crates/interop/Cargo.toml"];
+const MANIFESTS = [
+  "Cargo.toml",
+  "crates/interop/Cargo.toml",
+  "crates/conformance/Cargo.toml",
+  "fuzz/Cargo.toml",
+];
 
 type JsonObject = Record<string, unknown>;
 
